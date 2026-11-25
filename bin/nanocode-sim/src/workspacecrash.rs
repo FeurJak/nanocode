@@ -16,9 +16,10 @@
 //!
 //! Race: two writers in different runtimes append unique tokens to the same
 //! files, over one shared `WorkspaceFs` or one each over the same store, with
-//! their steps and the store's commits interleaved by the seed. Every
-//! acknowledged token must be in the store once, in its writer's order, and no
-//! file may hold a torn token.
+//! their steps and the store's commits interleaved by the seed. Every token
+//! must be acknowledged (a write the head CAS refused retries from the newer
+//! head), in the store once, in its writer's order, and no file may hold a
+//! torn token.
 //!
 //! Crash points: each seed also kills one job at one of its commits and
 //! resumes it: an append written in pieces through one open file, a git
@@ -174,6 +175,7 @@ pub enum WorkspaceCrashMutation {
     VisibleBeforeCommit,
     LostUpdate,
     StaleRetryOverwrites,
+    StaleSurfaces,
     ReplaceRemovesFirst,
     ReplaceEmptiesFirst,
     TrackingRefTorn,
@@ -184,13 +186,14 @@ pub enum WorkspaceCrashMutation {
 }
 
 impl WorkspaceCrashMutation {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::None,
         Self::TornCommit,
         Self::BackendFailureAcked,
         Self::VisibleBeforeCommit,
         Self::LostUpdate,
         Self::StaleRetryOverwrites,
+        Self::StaleSurfaces,
         Self::ReplaceRemovesFirst,
         Self::ReplaceEmptiesFirst,
         Self::TrackingRefTorn,
@@ -214,6 +217,7 @@ impl WorkspaceCrashMutation {
             Self::VisibleBeforeCommit => "visible_before_commit",
             Self::LostUpdate => "lost_update",
             Self::StaleRetryOverwrites => "stale_retry_overwrites",
+            Self::StaleSurfaces => "stale_surfaces",
             Self::ReplaceRemovesFirst => "replace_removes_first",
             Self::ReplaceEmptiesFirst => "replace_empties_first",
             Self::TrackingRefTorn => "tracking_ref_torn",
@@ -240,6 +244,7 @@ impl WorkspaceCrashMutation {
             Self::VisibleBeforeCommit => FsRule::VisibleBeforeCommit,
             Self::LostUpdate => FsRule::LostUpdate,
             Self::StaleRetryOverwrites => FsRule::StaleRetryOverwrites,
+            Self::StaleSurfaces => FsRule::StaleSurfaces,
             Self::ReplaceRemovesFirst
             | Self::ReplaceEmptiesFirst
             | Self::TrackingRefTorn
@@ -1597,6 +1602,14 @@ fn race(
         let acked: BTreeSet<&str> = said.acked.iter().map(String::as_str).collect();
         let mut last: BTreeMap<&str, usize> = BTreeMap::new();
         for (path, token) in &writer.tokens {
+            if !acked.contains(token.as_str()) {
+                return Err(format!(
+                    "writer {} ({}) was refused {token} in {path} with no fault injected: a head CAS refusal must retry from the newer head: {:?}",
+                    writer.name,
+                    writer.runtime.name(),
+                    said.output
+                ));
+            }
             match (acked.contains(token.as_str()), found.remove(token.as_str())) {
                 (true, None) => {
                     return Err(format!(

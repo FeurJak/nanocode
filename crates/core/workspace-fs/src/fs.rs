@@ -9,7 +9,6 @@ use nanocode_shell::{
     FileDownload, FileSystem, FileUpload, Kind, Links, Machine, Remove, Reply, SHA256_BYTES, Stat,
     WholeFile, Write, Wrote, normalize,
 };
-use nanocode_sync::Semaphore;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -34,7 +33,6 @@ struct Inner {
     /// The hash state over the bytes of the blob `write` made last, with its digest,
     /// so that appending to that blob hashes only the new bytes.
     tail: RefCell<Option<(Digest, Sha256)>>,
-    gate: Semaphore,
 }
 
 #[derive(Clone)]
@@ -274,6 +272,10 @@ fn plan(
     Planned { files }
 }
 
+fn refused(error: &io::Error) -> Option<&Failure> {
+    error.get_ref()?.downcast_ref::<Failure>()
+}
+
 impl WorkspaceFs {
     pub async fn open(
         store: Arc<dyn Store>,
@@ -292,7 +294,6 @@ impl WorkspaceFs {
                 manifest: RefCell::new(manifest),
                 blobs: RefCell::new(BTreeMap::new()),
                 tail: RefCell::new(None),
-                gate: Semaphore::new(1),
             }),
         })
     }
@@ -318,15 +319,11 @@ impl WorkspaceFs {
     }
 
     pub async fn refresh(&self) -> io::Result<u64> {
-        let inner = &self.inner;
-        let _turn = inner.gate.acquire().await.map_err(io::Error::other)?;
-        inner.reload().await
+        self.inner.reload().await
     }
 
     pub async fn commit(&self, ops: Vec<Op>, fresh: Vec<Blob>) -> io::Result<u64> {
-        let inner = &self.inner;
-        let _turn = inner.gate.acquire().await.map_err(io::Error::other)?;
-        inner.commit(&ops, fresh).await
+        self.inner.commit(&ops, fresh).await
     }
 
     pub async fn bytes(&self, path: &[u8]) -> io::Result<Bytes> {
@@ -408,34 +405,13 @@ impl Upload {
             ));
         }
         let inner = &self.fs.inner;
-        let _turn = inner.gate.acquire().await.map_err(io::Error::other)?;
         let path = key(&self.path)?;
-        let now = inner.now();
-        let ops = {
-            let manifest = inner.manifest.borrow();
-            let path = resolve(&manifest, &path, true)?;
-            if path.is_empty() {
-                return Err(io::ErrorKind::IsADirectory.into());
-            }
-            dir_exists(&manifest, &path)?;
-            let mode = match (self.mode, manifest.get(&path)) {
-                (_, Some(Entry::Dir { .. })) => return Err(io::ErrorKind::IsADirectory.into()),
-                (Some(mode), _) => mode,
-                (None, Some(Entry::File { mode, .. })) => *mode,
-                (None, _) => FILE_MODE,
-            };
-            let mut ops = vec![Op::Put {
-                path: path.clone(),
-                digest,
-                size: self.size,
-                mode: mode & MODE_BITS,
-                mtime_ns: now,
-            }];
-            touch(&mut ops, &path, now);
-            ops
-        };
         let blob = Blob::verified(digest, self.data.freeze())?;
-        inner.commit(&ops, vec![blob]).await
+        let mode = self.mode;
+        let size = self.size;
+        inner
+            .retrying(async || inner.upload(&path, &blob, mode, size).await)
+            .await
     }
 }
 
@@ -458,9 +434,69 @@ impl Inner {
         i64::try_from(self.machine.now().as_nanos()).unwrap_or(i64::MAX)
     }
 
+    fn version(&self) -> u64 {
+        self.manifest.borrow().version()
+    }
+
+    async fn retrying<T>(&self, mut attempt: impl AsyncFnMut() -> io::Result<T>) -> io::Result<T> {
+        loop {
+            let base = self.version();
+            let error = match attempt().await {
+                Err(error) if !mutated(Mutation::StaleSurfaces) => error,
+                outcome => return outcome,
+            };
+            let behind = match refused(&error) {
+                Some(Failure::Refused(Refusal::Stale { .. })) => true,
+                Some(Failure::Missing(_)) => self.reload().await.is_ok(),
+                _ => false,
+            };
+            if !behind || self.version() <= base {
+                return Err(error);
+            }
+        }
+    }
+
+    async fn upload(
+        &self,
+        path: &str,
+        blob: &Blob,
+        mode: Option<u32>,
+        size: u64,
+    ) -> io::Result<u64> {
+        let now = self.now();
+        let ops = {
+            let manifest = self.manifest.borrow();
+            let path = resolve(&manifest, path, true)?;
+            if path.is_empty() {
+                return Err(io::ErrorKind::IsADirectory.into());
+            }
+            dir_exists(&manifest, &path)?;
+            let mode = match (mode, manifest.get(&path)) {
+                (_, Some(Entry::Dir { .. })) => return Err(io::ErrorKind::IsADirectory.into()),
+                (Some(mode), _) => mode,
+                (None, Some(Entry::File { mode, .. })) => *mode,
+                (None, _) => FILE_MODE,
+            };
+            let mut ops = vec![Op::Put {
+                path: path.clone(),
+                digest: *blob.digest(),
+                size,
+                mode: mode & MODE_BITS,
+                mtime_ns: now,
+            }];
+            touch(&mut ops, &path, now);
+            ops
+        };
+        self.commit(&ops, vec![blob.clone()]).await
+    }
+
     async fn reload(&self) -> io::Result<u64> {
         let manifest = self.store.load(&self.workspace).await?;
         let version = manifest.version();
+        let held = self.version();
+        if version < held {
+            return Ok(held);
+        }
         self.blobs
             .borrow_mut()
             .retain(|digest, _| manifest.holds(digest));
@@ -584,7 +620,11 @@ impl Inner {
     }
 
     async fn write(&self, path: &[u8], data: &[u8], how: Write) -> io::Result<()> {
-        let _turn = self.gate.acquire().await.map_err(io::Error::other)?;
+        self.retrying(async || self.write_once(path, data, how).await)
+            .await
+    }
+
+    async fn write_once(&self, path: &[u8], data: &[u8], how: Write) -> io::Result<()> {
         let (path, entry) = self.lookup(path, true)?;
         if path.is_empty() {
             return Err(io::ErrorKind::IsADirectory.into());
@@ -660,7 +700,15 @@ impl Inner {
         files: Vec<(String, Bytes, u32)>,
         dir_mode: u32,
     ) -> io::Result<Wrote> {
-        let _turn = self.gate.acquire().await.map_err(io::Error::other)?;
+        self.retrying(async || self.write_files_once(&files, dir_mode).await)
+            .await
+    }
+
+    async fn write_files_once(
+        &self,
+        files: &[(String, Bytes, u32)],
+        dir_mode: u32,
+    ) -> io::Result<Wrote> {
         let planned = plan(
             &self.manifest.borrow(),
             &self.caps,
@@ -691,7 +739,7 @@ impl Inner {
             if held.is_none() {
                 wrote.created.push(at);
             }
-            let blob = Blob::new(data);
+            let blob = Blob::new(data.clone());
             ops.push(Op::Put {
                 path: path.clone(),
                 digest: *blob.digest(),
@@ -707,7 +755,11 @@ impl Inner {
     }
 
     async fn mkdir(&self, path: &[u8], mode: u32) -> io::Result<()> {
-        let _turn = self.gate.acquire().await.map_err(io::Error::other)?;
+        self.retrying(async || self.mkdir_once(path, mode).await)
+            .await
+    }
+
+    async fn mkdir_once(&self, path: &[u8], mode: u32) -> io::Result<()> {
         let (path, entry) = self.lookup(path, false)?;
         if path.is_empty() || entry.is_some() {
             return Err(io::ErrorKind::AlreadyExists.into());
@@ -724,7 +776,11 @@ impl Inner {
     }
 
     async fn remove(&self, path: &[u8], what: Remove) -> io::Result<()> {
-        let _turn = self.gate.acquire().await.map_err(io::Error::other)?;
+        self.retrying(async || self.remove_once(path, what).await)
+            .await
+    }
+
+    async fn remove_once(&self, path: &[u8], what: Remove) -> io::Result<()> {
         let (path, entry) = self.lookup(path, false)?;
         if path.is_empty() {
             return Err(invalid("the workspace root cannot be removed"));
@@ -749,7 +805,11 @@ impl Inner {
     }
 
     async fn rename(&self, from: &[u8], to: &[u8]) -> io::Result<()> {
-        let _turn = self.gate.acquire().await.map_err(io::Error::other)?;
+        self.retrying(async || self.rename_once(from, to).await)
+            .await
+    }
+
+    async fn rename_once(&self, from: &[u8], to: &[u8]) -> io::Result<()> {
         let (from, entry) = self.lookup(from, false)?;
         let (to, _) = self.lookup(to, false)?;
         if from.is_empty() || to.is_empty() || to.starts_with(&format!("{from}/")) {
@@ -773,7 +833,11 @@ impl Inner {
     }
 
     async fn hard_link(&self, existing: &[u8], link: &[u8]) -> io::Result<()> {
-        let _turn = self.gate.acquire().await.map_err(io::Error::other)?;
+        self.retrying(async || self.hard_link_once(existing, link).await)
+            .await
+    }
+
+    async fn hard_link_once(&self, existing: &[u8], link: &[u8]) -> io::Result<()> {
         let (from, entry) = self.lookup(existing, false)?;
         let (to, held) = self.lookup(link, false)?;
         match entry {
@@ -795,7 +859,11 @@ impl Inner {
     }
 
     async fn symlink(&self, target: &[u8], link: &[u8]) -> io::Result<()> {
-        let _turn = self.gate.acquire().await.map_err(io::Error::other)?;
+        self.retrying(async || self.symlink_once(target, link).await)
+            .await
+    }
+
+    async fn symlink_once(&self, target: &[u8], link: &[u8]) -> io::Result<()> {
         let target = std::str::from_utf8(target)
             .map_err(|_| invalid("workspace symlink targets are UTF-8"))?
             .to_owned();
@@ -815,7 +883,11 @@ impl Inner {
     }
 
     async fn set_mode(&self, path: &[u8], mode: u32) -> io::Result<()> {
-        let _turn = self.gate.acquire().await.map_err(io::Error::other)?;
+        self.retrying(async || self.set_mode_once(path, mode).await)
+            .await
+    }
+
+    async fn set_mode_once(&self, path: &[u8], mode: u32) -> io::Result<()> {
         match self.lookup(path, true)? {
             (path, _) if path.is_empty() => Err(invalid("the workspace root keeps its mode")),
             (path, Some(Entry::File { .. } | Entry::Dir { .. })) => {
@@ -830,7 +902,11 @@ impl Inner {
     }
 
     async fn set_mtime(&self, path: &[u8], mtime_ns: i64) -> io::Result<()> {
-        let _turn = self.gate.acquire().await.map_err(io::Error::other)?;
+        self.retrying(async || self.set_mtime_once(path, mtime_ns).await)
+            .await
+    }
+
+    async fn set_mtime_once(&self, path: &[u8], mtime_ns: i64) -> io::Result<()> {
         match self.lookup(path, true)? {
             (path, _) if path.is_empty() => Err(invalid("the workspace root keeps its time")),
             (path, Some(_)) => {

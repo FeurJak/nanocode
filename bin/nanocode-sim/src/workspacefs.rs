@@ -283,7 +283,8 @@ impl World {
                 };
                 let mut whole = data.clone();
                 if how == Write::Append {
-                    if let Ok(held) = reply(fs.read(path.as_bytes(), u64::MAX)) {
+                    let head = self.open();
+                    if let Ok(held) = reply(head.read(path.as_bytes(), u64::MAX)) {
                         whole = [&held[..], &data[..]].concat();
                     }
                     if whole.len() as u64 > self.caps.file_bytes {

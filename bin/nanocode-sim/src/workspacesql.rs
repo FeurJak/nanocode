@@ -955,6 +955,7 @@ struct Flight {
     result: Option<io::Result<()>>,
     expect: Expect,
     written: Option<(String, Vec<u8>)>,
+    appended: bool,
 }
 
 struct World {
@@ -1338,6 +1339,7 @@ impl World {
             result: None,
             expect: Expect::Any,
             written: None,
+            appended: false,
         };
         if let Some(sweep) = self.sweep() {
             flight.future = Some(sweep);
@@ -1403,14 +1405,9 @@ impl World {
             1 => Write::Append,
             _ => Write::New,
         };
-        let mut whole = data.clone();
-        if how == Write::Append
-            && let Ok(held) = reply(fs.read(path.as_bytes(), u64::MAX))?
-        {
-            whole = [&held[..], &data[..]].concat();
-        }
         let future = flying(fs.write(path.as_bytes(), &data, how));
-        flight.written = Some((path, whole));
+        flight.appended = how == Write::Append;
+        flight.written = Some((path, data));
         Ok(future)
     }
 
@@ -1571,7 +1568,12 @@ impl World {
             };
         }
         let read = read.map_err(|error| format!("{path} unreadable after its write: {error}"))?;
-        if read[..] != bytes[..] {
+        let landed = if flight.appended {
+            read.ends_with(bytes)
+        } else {
+            read[..] == bytes[..]
+        };
+        if !landed {
             return Err(format!(
                 "{path} reads {} bytes after a write of {}",
                 read.len(),
