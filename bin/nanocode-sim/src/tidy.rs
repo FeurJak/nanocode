@@ -328,6 +328,7 @@ pub fn check(root: &Path) -> std::io::Result<Vec<String>> {
 const LOCK_FREE_SQL: &[&str] = &[
     "crates/core/turnlog/src/parted/sql.rs",
     "crates/core/durability/src/sql.rs",
+    "crates/core/durability/src/row.rs",
 ];
 const ROW_LOCKS: &[&str] = &[
     "FOR UPDATE",

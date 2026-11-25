@@ -12,9 +12,9 @@ use nanocode_sync::{AtomMap, Mailbox, Sequencer};
 use nanocode_sys::base64::STANDARD;
 
 use crate::{
-    Collected, Committed, Migration, OwnedCommit, OwnedState, OwnerId, OwnerToken, Settle, Sql,
-    SqlRow, SqlStatement, SqlStore, StateCommit, StateStore, StoreError, StoreFuture, StoreRecord,
-    StoredState, Unreachable,
+    Collected, Committed, Lease, Migration, OwnedCommit, OwnedState, OwnerId, OwnerToken, Settle,
+    Sql, SqlRow, SqlStatement, SqlStore, StateCommit, StateStore, StoreError, StoreFuture,
+    StoreRecord, StoredState, Unreachable,
     sql::{
         SqlAccess, check_format, counter, invalid, keys_json, limit_param, migrate_format, names,
         run_checked, single, text, unreachable_in, written,
@@ -49,6 +49,11 @@ const BYTES: [&[&str]; 2] = [
     &["ALTER TABLE state_pages ALTER COLUMN body TYPE BYTEA USING convert_to(body, 'UTF8')"],
 ];
 
+const LEASES: [&[&str]; 2] = [
+    &["ALTER TABLE state_rows ADD COLUMN expires INTEGER"],
+    &["ALTER TABLE state_rows ADD COLUMN IF NOT EXISTS expires BIGINT"],
+];
+
 const LEGACY: Dialects = [
     "SELECT CAST(COUNT(*) AS TEXT) FROM sqlite_schema WHERE type = 'table' AND name = 'states'",
     "SELECT CAST(COUNT(*) AS TEXT) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'states'",
@@ -80,8 +85,8 @@ const PEEK: Dialects = [
     "SELECT CAST(revision AS TEXT), payload FROM state_rows WHERE id = $1::text AND payload IS NOT NULL",
 ];
 const OWNER: Dialects = [
-    "SELECT owner, CAST(fence AS TEXT) FROM state_rows WHERE id = ?1 AND fence > 0",
-    "SELECT owner, CAST(fence AS TEXT) FROM state_rows WHERE id = $1::text AND fence > 0",
+    "SELECT owner, CAST(fence AS TEXT) FROM state_rows WHERE id = ?1 AND fence > 0 AND owner <> ''",
+    "SELECT owner, CAST(fence AS TEXT) FROM state_rows WHERE id = $1::text AND fence > 0 AND owner <> ''",
 ];
 const HEAD: Dialects = [
     "SELECT owner, CAST(fence AS TEXT), CAST(revision AS TEXT) FROM state_rows WHERE id = ?1",
@@ -92,32 +97,32 @@ const STATES: Dialects = [
     "SELECT id FROM state_rows WHERE payload IS NOT NULL ORDER BY ord DESC LIMIT CAST($1::text AS BIGINT)",
 ];
 const ACQUIRE: Dialects = [
-    "INSERT INTO state_rows (id, owner, fence, revision, payload, tail, pages) VALUES (?1, ?2, 1, 0, NULL, '', 0) ON CONFLICT (id) DO UPDATE SET owner = excluded.owner, fence = state_rows.fence + 1 WHERE state_rows.fence < 9223372036854775807 RETURNING CAST(fence AS TEXT), CAST(revision AS TEXT), payload, CAST(length(CAST(tail AS BLOB)) AS TEXT), CAST(pages AS TEXT)",
-    "INSERT INTO state_rows (id, owner, fence, revision, payload, tail, pages) VALUES ($1::text, $2::text, 1, 0, NULL, '', 0) ON CONFLICT (id) DO UPDATE SET owner = excluded.owner, fence = state_rows.fence + 1 WHERE state_rows.fence < 9223372036854775807 RETURNING CAST(fence AS TEXT), CAST(revision AS TEXT), payload, CAST(octet_length(tail) AS TEXT), CAST(pages AS TEXT)",
+    "INSERT INTO state_rows (id, owner, fence, revision, payload, tail, pages, expires) VALUES (?1, ?2, 1, 0, NULL, '', 0, CAST(NULLIF(?3, '') AS INTEGER) + CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)) ON CONFLICT (id) DO UPDATE SET owner = excluded.owner, fence = state_rows.fence + 1, expires = excluded.expires WHERE state_rows.fence < 9223372036854775807 AND (state_rows.owner = '' OR state_rows.owner = excluded.owner OR state_rows.expires IS NULL OR ?4 = '' OR state_rows.expires + CAST(NULLIF(?4, '') AS INTEGER) < CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)) RETURNING CAST(fence AS TEXT), CAST(revision AS TEXT), payload, CAST(length(CAST(tail AS BLOB)) AS TEXT), CAST(pages AS TEXT)",
+    "INSERT INTO state_rows (id, owner, fence, revision, payload, tail, pages, expires) VALUES ($1::text, $2::text, 1, 0, NULL, '', 0, CAST(NULLIF($3::text, '') AS BIGINT) + CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT)) ON CONFLICT (id) DO UPDATE SET owner = excluded.owner, fence = state_rows.fence + 1, expires = excluded.expires WHERE state_rows.fence < 9223372036854775807 AND (state_rows.owner = '' OR state_rows.owner = excluded.owner OR state_rows.expires IS NULL OR $4::text = '' OR state_rows.expires + CAST(NULLIF($4::text, '') AS BIGINT) < CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT)) RETURNING CAST(fence AS TEXT), CAST(revision AS TEXT), payload, CAST(octet_length(tail) AS TEXT), CAST(pages AS TEXT)",
 ];
 const MOVE: Dialects = [
-    "UPDATE state_rows SET revision = CAST(?5 AS INTEGER), payload = ?6 WHERE id = ?1 AND owner = ?2 AND fence = CAST(?3 AS INTEGER) AND revision = CAST(?4 AS INTEGER) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
-    "UPDATE state_rows SET revision = CAST($5::text AS BIGINT), payload = $6::text WHERE id = $1::text AND owner = $2::text AND fence = CAST($3::text AS BIGINT) AND revision = CAST($4::text AS BIGINT) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
+    "UPDATE state_rows SET revision = CAST(?5 AS INTEGER), expires = CAST(NULLIF(?7, '') AS INTEGER) + CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER), payload = ?6 WHERE id = ?1 AND owner = ?2 AND fence = CAST(?3 AS INTEGER) AND revision = CAST(?4 AS INTEGER) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
+    "UPDATE state_rows SET revision = CAST($5::text AS BIGINT), expires = CAST(NULLIF($7::text, '') AS BIGINT) + CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT), payload = $6::text WHERE id = $1::text AND owner = $2::text AND fence = CAST($3::text AS BIGINT) AND revision = CAST($4::text AS BIGINT) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
 ];
 const APPEND: Dialects = [
-    "UPDATE state_rows SET revision = CAST(?5 AS INTEGER), payload = ?6, tail = tail || ?7 WHERE id = ?1 AND owner = ?2 AND fence = CAST(?3 AS INTEGER) AND revision = CAST(?4 AS INTEGER) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
-    "UPDATE state_rows SET revision = CAST($5::text AS BIGINT), payload = $6::text, tail = tail || $7::text WHERE id = $1::text AND owner = $2::text AND fence = CAST($3::text AS BIGINT) AND revision = CAST($4::text AS BIGINT) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
+    "UPDATE state_rows SET revision = CAST(?5 AS INTEGER), expires = CAST(NULLIF(?8, '') AS INTEGER) + CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER), payload = ?6, tail = tail || ?7 WHERE id = ?1 AND owner = ?2 AND fence = CAST(?3 AS INTEGER) AND revision = CAST(?4 AS INTEGER) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
+    "UPDATE state_rows SET revision = CAST($5::text AS BIGINT), expires = CAST(NULLIF($8::text, '') AS BIGINT) + CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT), payload = $6::text, tail = tail || $7::text WHERE id = $1::text AND owner = $2::text AND fence = CAST($3::text AS BIGINT) AND revision = CAST($4::text AS BIGINT) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
 ];
 const SEAL: Dialects = [
     "INSERT INTO state_pages (id, page, keys, body) SELECT id, pages, ?5, ?6 FROM state_rows WHERE id = ?1 AND owner = ?2 AND fence = CAST(?3 AS INTEGER) AND revision = CAST(?4 AS INTEGER) AND length(CAST(tail AS BLOB)) = CAST(?7 AS INTEGER)",
     "INSERT INTO state_pages (id, page, keys, body) SELECT id, pages, $5::text, CASE WHEN left($6::text, 1) = chr(10) THEN decode('0a', 'hex') || decode(substr($6::text, 2), 'base64') ELSE convert_to($6::text, 'UTF8') END FROM state_rows WHERE id = $1::text AND owner = $2::text AND fence = CAST($3::text AS BIGINT) AND revision = CAST($4::text AS BIGINT) AND octet_length(tail) = CAST($7::text AS BIGINT)",
 ];
 const SEALED: Dialects = [
-    "UPDATE state_rows SET revision = CAST(?5 AS INTEGER), payload = ?6, tail = '', pages = pages + 1 WHERE id = ?1 AND owner = ?2 AND fence = CAST(?3 AS INTEGER) AND revision = CAST(?4 AS INTEGER) AND length(CAST(tail AS BLOB)) = CAST(?7 AS INTEGER) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
-    "UPDATE state_rows SET revision = CAST($5::text AS BIGINT), payload = $6::text, tail = '', pages = pages + 1 WHERE id = $1::text AND owner = $2::text AND fence = CAST($3::text AS BIGINT) AND revision = CAST($4::text AS BIGINT) AND octet_length(tail) = CAST($7::text AS BIGINT) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
+    "UPDATE state_rows SET revision = CAST(?5 AS INTEGER), expires = CAST(NULLIF(?8, '') AS INTEGER) + CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER), payload = ?6, tail = '', pages = pages + 1 WHERE id = ?1 AND owner = ?2 AND fence = CAST(?3 AS INTEGER) AND revision = CAST(?4 AS INTEGER) AND length(CAST(tail AS BLOB)) = CAST(?7 AS INTEGER) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
+    "UPDATE state_rows SET revision = CAST($5::text AS BIGINT), expires = CAST(NULLIF($8::text, '') AS BIGINT) + CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT), payload = $6::text, tail = '', pages = pages + 1 WHERE id = $1::text AND owner = $2::text AND fence = CAST($3::text AS BIGINT) AND revision = CAST($4::text AS BIGINT) AND octet_length(tail) = CAST($7::text AS BIGINT) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
 ];
 const PAGE_IN: Dialects = [
     "INSERT INTO state_pages (id, page, keys, body) SELECT id, pages, ?5, ?6 FROM state_rows WHERE id = ?1 AND owner = ?2 AND fence = CAST(?3 AS INTEGER) AND revision = CAST(?4 AS INTEGER)",
     "INSERT INTO state_pages (id, page, keys, body) SELECT id, pages, $5::text, CASE WHEN left($6::text, 1) = chr(10) THEN decode('0a', 'hex') || decode(substr($6::text, 2), 'base64') ELSE convert_to($6::text, 'UTF8') END FROM state_rows WHERE id = $1::text AND owner = $2::text AND fence = CAST($3::text AS BIGINT) AND revision = CAST($4::text AS BIGINT)",
 ];
 const PAGED: Dialects = [
-    "UPDATE state_rows SET revision = CAST(?5 AS INTEGER), payload = ?6, pages = pages + 1 WHERE id = ?1 AND owner = ?2 AND fence = CAST(?3 AS INTEGER) AND revision = CAST(?4 AS INTEGER) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
-    "UPDATE state_rows SET revision = CAST($5::text AS BIGINT), payload = $6::text, pages = pages + 1 WHERE id = $1::text AND owner = $2::text AND fence = CAST($3::text AS BIGINT) AND revision = CAST($4::text AS BIGINT) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
+    "UPDATE state_rows SET revision = CAST(?5 AS INTEGER), expires = CAST(NULLIF(?7, '') AS INTEGER) + CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER), payload = ?6, pages = pages + 1 WHERE id = ?1 AND owner = ?2 AND fence = CAST(?3 AS INTEGER) AND revision = CAST(?4 AS INTEGER) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
+    "UPDATE state_rows SET revision = CAST($5::text AS BIGINT), expires = CAST(NULLIF($7::text, '') AS BIGINT) + CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT), payload = $6::text, pages = pages + 1 WHERE id = $1::text AND owner = $2::text AND fence = CAST($3::text AS BIGINT) AND revision = CAST($4::text AS BIGINT) RETURNING CAST(revision AS TEXT), CAST(pages AS TEXT)",
 ];
 const UNOWNED: Dialects = [
     "INSERT INTO state_rows (id, owner, fence, revision, payload, tail, pages) VALUES (?1, '', 0, 0, NULL, '', 0) ON CONFLICT (id) DO NOTHING",
@@ -160,24 +165,28 @@ const SIZE: Dialects = [
     "SELECT CAST(COALESCE(octet_length(payload), 0) + octet_length(tail) + COALESCE((SELECT SUM(octet_length(body)) FROM state_pages WHERE state_pages.id = state_rows.id), 0) AS TEXT) FROM state_rows WHERE id = $1::text",
 ];
 const DROP_PAGES: Dialects = [
-    "DELETE FROM state_pages WHERE id = ?1 AND EXISTS (SELECT 1 FROM state_rows WHERE id = ?1 AND revision = CAST(?2 AS INTEGER) AND pages = CAST(?3 AS INTEGER) AND fence < 9223372036854775807)",
-    "DELETE FROM state_pages WHERE id = $1::text AND EXISTS (SELECT 1 FROM state_rows WHERE id = $1::text AND revision = CAST($2::text AS BIGINT) AND pages = CAST($3::text AS BIGINT) AND fence < 9223372036854775807)",
+    "DELETE FROM state_pages WHERE id = ?1 AND EXISTS (SELECT 1 FROM state_rows WHERE id = ?1 AND revision = CAST(?2 AS INTEGER) AND pages = CAST(?3 AS INTEGER) AND owner = ?4 AND fence = CAST(?5 AS INTEGER))",
+    "DELETE FROM state_pages WHERE id = $1::text AND EXISTS (SELECT 1 FROM state_rows WHERE id = $1::text AND revision = CAST($2::text AS BIGINT) AND pages = CAST($3::text AS BIGINT) AND owner = $4::text AND fence = CAST($5::text AS BIGINT))",
 ];
 const KEEP_PAGE: Dialects = [
-    "INSERT INTO state_pages (id, page, keys, body) SELECT id, CAST(?4 AS INTEGER), ?5, ?6 FROM state_rows WHERE id = ?1 AND revision = CAST(?2 AS INTEGER) AND pages = CAST(?3 AS INTEGER) AND fence < 9223372036854775807",
-    "INSERT INTO state_pages (id, page, keys, body) SELECT id, CAST($4::text AS BIGINT), $5::text, CASE WHEN left($6::text, 1) = chr(10) THEN decode('0a', 'hex') || decode(substr($6::text, 2), 'base64') ELSE convert_to($6::text, 'UTF8') END FROM state_rows WHERE id = $1::text AND revision = CAST($2::text AS BIGINT) AND pages = CAST($3::text AS BIGINT) AND fence < 9223372036854775807",
+    "INSERT INTO state_pages (id, page, keys, body) SELECT id, CAST(?4 AS INTEGER), ?5, ?6 FROM state_rows WHERE id = ?1 AND revision = CAST(?2 AS INTEGER) AND pages = CAST(?3 AS INTEGER) AND owner = ?7 AND fence = CAST(?8 AS INTEGER)",
+    "INSERT INTO state_pages (id, page, keys, body) SELECT id, CAST($4::text AS BIGINT), $5::text, CASE WHEN left($6::text, 1) = chr(10) THEN decode('0a', 'hex') || decode(substr($6::text, 2), 'base64') ELSE convert_to($6::text, 'UTF8') END FROM state_rows WHERE id = $1::text AND revision = CAST($2::text AS BIGINT) AND pages = CAST($3::text AS BIGINT) AND owner = $7::text AND fence = CAST($8::text AS BIGINT)",
 ];
 const KEPT: Dialects = [
-    "UPDATE state_rows SET swept = revision WHERE id = ?1 AND revision = CAST(?2 AS INTEGER) AND pages = CAST(?3 AS INTEGER) RETURNING CAST(pages AS TEXT)",
-    "UPDATE state_rows SET swept = revision WHERE id = $1::text AND revision = CAST($2::text AS BIGINT) AND pages = CAST($3::text AS BIGINT) RETURNING CAST(pages AS TEXT)",
+    "UPDATE state_rows SET swept = revision, expires = CAST(NULLIF(?6, '') AS INTEGER) + CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) WHERE id = ?1 AND revision = CAST(?2 AS INTEGER) AND pages = CAST(?3 AS INTEGER) AND owner = ?4 AND fence = CAST(?5 AS INTEGER) RETURNING CAST(pages AS TEXT)",
+    "UPDATE state_rows SET swept = revision, expires = CAST(NULLIF($6::text, '') AS BIGINT) + CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) WHERE id = $1::text AND revision = CAST($2::text AS BIGINT) AND pages = CAST($3::text AS BIGINT) AND owner = $4::text AND fence = CAST($5::text AS BIGINT) RETURNING CAST(pages AS TEXT)",
 ];
 const UNSWEPT: Dialects = [
     "SELECT id FROM state_rows WHERE id IN (SELECT value FROM json_each(?1)) AND payload IS NOT NULL AND swept IS NOT revision ORDER BY id",
     "SELECT id FROM state_rows WHERE id IN (SELECT wanted.id FROM json_array_elements_text($1::text::json) AS wanted (id)) AND payload IS NOT NULL AND swept IS DISTINCT FROM revision ORDER BY id",
 ];
 const COLLECTED: Dialects = [
-    "UPDATE state_rows SET fence = fence + 1, tail = '', pages = CAST(?4 AS INTEGER), swept = revision WHERE id = ?1 AND revision = CAST(?2 AS INTEGER) AND pages = CAST(?3 AS INTEGER) AND fence < 9223372036854775807 RETURNING CAST(pages AS TEXT)",
-    "UPDATE state_rows SET fence = fence + 1, tail = '', pages = CAST($4::text AS BIGINT), swept = revision WHERE id = $1::text AND revision = CAST($2::text AS BIGINT) AND pages = CAST($3::text AS BIGINT) AND fence < 9223372036854775807 RETURNING CAST(pages AS TEXT)",
+    "UPDATE state_rows SET tail = '', pages = CAST(?4 AS INTEGER), swept = revision WHERE id = ?1 AND revision = CAST(?2 AS INTEGER) AND pages = CAST(?3 AS INTEGER) AND owner = ?5 AND fence = CAST(?6 AS INTEGER) RETURNING CAST(pages AS TEXT)",
+    "UPDATE state_rows SET tail = '', pages = CAST($4::text AS BIGINT), swept = revision WHERE id = $1::text AND revision = CAST($2::text AS BIGINT) AND pages = CAST($3::text AS BIGINT) AND owner = $5::text AND fence = CAST($6::text AS BIGINT) RETURNING CAST(pages AS TEXT)",
+];
+const RELEASE: Dialects = [
+    "UPDATE state_rows SET owner = '', expires = NULL WHERE id = ?1 AND owner = ?2 AND fence = CAST(?3 AS INTEGER) RETURNING CAST(fence AS TEXT)",
+    "UPDATE state_rows SET owner = '', expires = NULL WHERE id = $1::text AND owner = $2::text AND fence = CAST($3::text AS BIGINT) RETURNING CAST(fence AS TEXT)",
 ];
 
 static NAMED: LazyLock<AtomMap<String, &'static str>> = LazyLock::new(AtomMap::new);
@@ -185,11 +194,11 @@ static FORMATS: LazyLock<AtomMap<String, &'static Format>> = LazyLock::new(AtomM
 
 struct Format {
     component: &'static str,
-    migrations: [Migration; 3],
+    migrations: [Migration; 4],
     convert: [&'static [&'static str]; 2],
 }
 
-const MIGRATIONS: [Migration; 3] = [
+const MIGRATIONS: [Migration; 4] = [
     Migration {
         statements: SCHEMA,
         adopt: None,
@@ -200,6 +209,10 @@ const MIGRATIONS: [Migration; 3] = [
     },
     Migration {
         statements: BYTES,
+        adopt: None,
+    },
+    Migration {
+        statements: LEASES,
         adopt: None,
     },
 ];
@@ -251,6 +264,10 @@ fn format_in(schema: &str) -> &'static Format {
             },
             Migration {
                 statements: each(BYTES),
+                adopt: None,
+            },
+            Migration {
+                statements: each(LEASES),
                 adopt: None,
             },
         ],
@@ -537,6 +554,7 @@ pub struct RowStore<H: ?Sized> {
     schema: Option<Arc<str>>,
     codec: Option<Arc<dyn PageCodec>>,
     lent: bool,
+    lease: Option<Lease>,
 }
 
 impl<H: ?Sized> Clone for RowStore<H> {
@@ -550,6 +568,7 @@ impl<H: ?Sized> Clone for RowStore<H> {
             schema: self.schema.clone(),
             codec: self.codec.clone(),
             lent: self.lent,
+            lease: self.lease,
         }
     }
 }
@@ -607,6 +626,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
             schema: None,
             codec: None,
             lent: false,
+            lease: None,
         }
     }
 
@@ -631,6 +651,19 @@ impl<H: Sql + ?Sized> RowStore<H> {
     pub fn migrated(self) -> Self {
         self.ready.store(true, Ordering::Release);
         self
+    }
+
+    #[must_use]
+    pub const fn leased(mut self, lease: Lease) -> Self {
+        self.lease = Some(lease);
+        self
+    }
+
+    fn lease_params(&self) -> (String, String) {
+        self.lease.map_or_else(
+            || (String::new(), String::new()),
+            |lease| (lease.ttl_ms.to_string(), lease.grace_ms.to_string()),
+        )
     }
 
     #[must_use]
@@ -687,6 +720,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
             schema: self.schema.clone(),
             codec: self.codec.clone(),
             lent: true,
+            lease: self.lease,
         }
     }
 
@@ -1034,14 +1068,21 @@ impl<H: Sql + ?Sized> RowStore<H> {
         state_id: &str,
         owner_id: OwnerId,
     ) -> Result<OwnedState, StoreError> {
-        let statement = self.statement(&ACQUIRE, vec![state_id, owner_id.as_str()]);
+        if owner_id.as_str().is_empty() {
+            return Err(StoreError::NotCommitted(
+                "a row store owner needs a non-empty id".to_owned(),
+            ));
+        }
+        let (ttl, grace) = self.lease_params();
+        let statement = self.statement(&ACQUIRE, vec![state_id, owner_id.as_str(), &ttl, &grace]);
         let rows = self
             .transaction("acquire", vec![statement])
             .await?
             .pop()
             .unwrap_or_default();
-        let row = single(&rows)?
-            .ok_or_else(|| StoreError::NotCommitted("row store owner fence overflow".to_owned()))?;
+        let Some(row) = single(&rows)? else {
+            return Err(self.claim_refused(state_id).await);
+        };
         let fence = counter(row, 0)?;
         let revision = counter(row, 1)?;
         let payload = row.get(2).cloned().flatten();
@@ -1080,6 +1121,43 @@ impl<H: Sql + ?Sized> RowStore<H> {
                 None => StoredState::default(),
             },
         })
+    }
+
+    async fn claim_refused(&mut self, state_id: &str) -> StoreError {
+        let fence = match self.query("head", &HEAD, vec![state_id]).await {
+            Ok(rows) => single(&rows).and_then(|row| match row {
+                Some(row) => counter(row, 1),
+                None => Err(invalid(format!(
+                    "claim of {state_id} refused without a row"
+                ))),
+            }),
+            Err(error) => Err(error),
+        };
+        match fence {
+            Ok(fence) if fence >= i64::MAX as u64 => {
+                StoreError::NotCommitted("row store owner fence overflow".to_owned())
+            }
+            Ok(_) => StoreError::Busy,
+            Err(error) => error,
+        }
+    }
+
+    async fn release_owner(
+        &mut self,
+        state_id: &str,
+        owner: &OwnerToken,
+    ) -> Result<bool, StoreError> {
+        let fence = owner.fence().to_string();
+        let statement = self.statement(&RELEASE, vec![state_id, owner.owner_id().as_str(), &fence]);
+        let rows = self
+            .transaction("release", vec![statement])
+            .await?
+            .pop()
+            .unwrap_or_default();
+        match single(&rows)? {
+            Some(_) => Ok(true),
+            None => Err(StoreError::Fenced),
+        }
     }
 
     async fn diagnose(&mut self, state_id: &str, owner: &OwnerToken, expected: u64) -> StoreError {
@@ -1159,6 +1237,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
             }
         }
         let mut fresh = self.fresh(writes).await;
+        let (ttl, _) = self.lease_params();
         for (at, write) in writes.iter().enumerate() {
             if let Some(write) = write
                 && fresh[at].is_none()
@@ -1201,6 +1280,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
                         write.expected.to_string(),
                         write.revision.to_string(),
                         tail.to_string(),
+                        ttl.clone(),
                     ],
                 })
             })
@@ -1214,7 +1294,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
         out: &mut Vec<SqlStatement<'a>>,
     ) -> Result<(), StoreError> {
         let owner = write.owner.owner_id().as_str();
-        let [fence, expected, revision, tail] = &planned.counters;
+        let [fence, expected, revision, tail, ttl] = &planned.counters;
         let fenced = vec![write.state_id, owner, fence.as_str(), expected.as_str()];
         let head = [fenced.clone(), vec![revision.as_str(), write.payload]].concat();
         match &planned.page {
@@ -1223,16 +1303,21 @@ impl<H: Sql + ?Sized> RowStore<H> {
                 let page = [fenced, vec![keys.as_str(), body.as_str()]].concat();
                 if self.lent {
                     out.push(self.statement(&PAGE_IN, page));
-                    out.push(self.statement(&PAGED, head));
+                    out.push(self.statement(&PAGED, [head, vec![ttl.as_str()]].concat()));
                 } else {
                     out.push(self.statement(&SEAL, [page, vec![tail.as_str()]].concat()));
-                    out.push(self.statement(&SEALED, [head, vec![tail.as_str()]].concat()));
+                    out.push(
+                        self.statement(&SEALED, [head, vec![tail.as_str(), ttl.as_str()]].concat()),
+                    );
                 }
             }
-            None if planned.fresh.is_empty() => out.push(self.statement(&MOVE, head)),
-            None => {
-                out.push(self.statement(&APPEND, [head, vec![planned.encoded.as_str()]].concat()))
+            None if planned.fresh.is_empty() => {
+                out.push(self.statement(&MOVE, [head, vec![ttl.as_str()]].concat()))
             }
+            None => out.push(self.statement(
+                &APPEND,
+                [head, vec![planned.encoded.as_str(), ttl.as_str()]].concat(),
+            )),
         }
         Ok(())
     }
@@ -1576,14 +1661,24 @@ impl<H: Sql + ?Sized> RowStore<H> {
             .filter(|examined| examined.revision == unreachable.revision))
     }
 
-    pub async fn compact(&mut self, examined: &Examined) -> Result<Option<Collected>, StoreError> {
+    pub async fn compact(
+        &mut self,
+        examined: &Examined,
+        owner: &OwnerToken,
+    ) -> Result<Option<Collected>, StoreError> {
         let state_id = examined.state.as_str();
         let revision = examined.revision.to_string();
         let before = examined.pages.to_string();
+        let fence = owner.fence().to_string();
+        let (ttl, _) = self.lease_params();
         let fenced = vec![state_id, revision.as_str(), before.as_str()];
+        let owned = vec![owner.owner_id().as_str(), fence.as_str()];
+        let head = self.statement(
+            &KEPT,
+            [fenced.clone(), owned.clone(), vec![ttl.as_str()]].concat(),
+        );
         if !examined.worth {
-            let statement = self.statement(&KEPT, fenced);
-            let results = self.transaction("keep", vec![statement]).await?;
+            let results = self.transaction("keep", vec![head]).await?;
             return Ok(results
                 .last()
                 .map(|rows| single(rows))
@@ -1595,7 +1690,10 @@ impl<H: Sql + ?Sized> RowStore<H> {
             .map(|at| (examined.pages + at).to_string())
             .collect();
         let after = (examined.pages + (examined.kept.len() as u64).max(1)).to_string();
-        let mut statements = vec![self.statement(&DROP_PAGES, fenced.clone())];
+        let mut statements = vec![
+            head,
+            self.statement(&DROP_PAGES, [fenced.clone(), owned.clone()].concat()),
+        ];
         for (number, (keys, body)) in numbers.iter().zip(&examined.kept) {
             statements.push(
                 self.statement(
@@ -1603,12 +1701,13 @@ impl<H: Sql + ?Sized> RowStore<H> {
                     [
                         fenced.clone(),
                         vec![number.as_str(), keys.as_str(), body.as_str()],
+                        owned.clone(),
                     ]
                     .concat(),
                 ),
             );
         }
-        statements.push(self.statement(&COLLECTED, [fenced, vec![after.as_str()]].concat()));
+        statements.push(self.statement(&COLLECTED, [fenced, vec![after.as_str()], owned].concat()));
         let results = self.transaction("compact", statements).await?;
         if results
             .last()
@@ -1631,6 +1730,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
     pub async fn collect(
         &mut self,
         state_id: &str,
+        owner: &OwnerToken,
         revision: u64,
         keys: &[String],
     ) -> Result<Option<Collected>, StoreError> {
@@ -1645,7 +1745,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
             return Ok(None);
         }
         examined.worth = true;
-        self.compact(&examined).await
+        self.compact(&examined, owner).await
     }
 
     pub async fn stored_bytes(&mut self, state_id: &str) -> Result<Option<u64>, StoreError> {
@@ -1689,7 +1789,7 @@ struct Planned {
     fresh: Vec<usize>,
     encoded: String,
     page: Option<Result<(String, String), StoreError>>,
-    counters: [String; 4],
+    counters: [String; 5],
 }
 
 pub trait PageCodec: MaybeSend + MaybeSync {
@@ -1755,6 +1855,14 @@ impl<H: Sql + ?Sized> StateStore for RowStore<H> {
         owner_id: OwnerId,
     ) -> StoreFuture<'a, Result<OwnedState, StoreError>> {
         Box::pin(self.acquire_owner(state_id, owner_id))
+    }
+
+    fn release<'a>(
+        &'a mut self,
+        state_id: &'a str,
+        owner: &'a OwnerToken,
+    ) -> StoreFuture<'a, Result<bool, StoreError>> {
+        Box::pin(self.release_owner(state_id, owner))
     }
 
     fn replace<'a>(
@@ -1878,6 +1986,7 @@ impl<H: Sql + ?Sized> StateStore for RowStore<H> {
             schema: self.schema.clone(),
             codec: self.codec.clone(),
             lent: self.lent,
+            lease: self.lease,
         }))
     }
 
@@ -1893,6 +2002,7 @@ impl<H: Sql + ?Sized> StateStore for RowStore<H> {
             schema: self.schema.clone(),
             codec: self.codec.clone(),
             lent: self.lent,
+            lease: self.lease,
         }))
     }
 }
