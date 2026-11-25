@@ -1,6 +1,6 @@
 use nanocode_sys::libc;
 use std::{
-    fs::{self, File, OpenOptions, TryLockError},
+    fs::{self, File, OpenOptions},
     io::{self, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -199,36 +199,4 @@ pub fn append_output(path: &Path) -> Result<(), PrivateError> {
         })?;
     nanocode_platform::unix::redirect_output(&file)?;
     Ok(())
-}
-
-#[derive(Debug)]
-pub struct Lock {
-    file: File,
-}
-
-impl Lock {
-    pub fn open(path: &Path) -> Result<Self, PrivateError> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc_nofollow())
-            .open(path)?;
-        open(path)?;
-        Ok(Self { file })
-    }
-
-    pub fn lock(&self) -> io::Result<()> {
-        self.file.lock()
-    }
-
-    pub fn try_lock(&self) -> io::Result<()> {
-        match self.file.try_lock() {
-            Ok(()) => Ok(()),
-            Err(TryLockError::WouldBlock) => Err(io::Error::from_raw_os_error(libc::EWOULDBLOCK)),
-            Err(TryLockError::Error(error)) => Err(error),
-        }
-    }
 }
