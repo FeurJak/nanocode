@@ -21,7 +21,7 @@ use std::{
 
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_partitions::Partition;
-use nanocode_sync::{Atom, OrdSet};
+use nanocode_sync::{Atom, OrdSet, Semaphore, Signal};
 use nanocode_turnlog::{
     LogHost,
     parted::{Entry, Fault, ModelParts, PartStore, PartedLog, sim as parted_sim},
@@ -61,6 +61,7 @@ pub struct PlogStats {
     pub pruned: u64,
     pub followed: u64,
     pub drained: u64,
+    pub busy: u64,
 }
 
 impl PlogStats {
@@ -79,6 +80,7 @@ impl PlogStats {
         self.pruned += other.pruned;
         self.followed += other.followed;
         self.drained += other.drained;
+        self.busy += other.busy;
     }
 }
 
@@ -440,6 +442,88 @@ async fn handoff(
     }
 }
 
+/// Recovery capacity under contention: one gain holds the only permit while its recovery waits,
+/// so a second gain must answer Busy when its deadline passes, never wait on for the permit. Then
+/// the first releases what it gained and another node gains it at the cursor the release
+/// recorded.
+async fn gains(nodes: &[Node], part: Partition, patience: u64, ledger: &RefCell<Ledger>) {
+    let capacity = Semaphore::new(1);
+    let parked = Signal::new();
+    let (first, second) = (&nodes[0], &nodes[1]);
+    let mut holding = Box::pin(first.log.gain(
+        part,
+        HANDOFF_TTL_TICKS,
+        &capacity,
+        std::future::pending(),
+        |_| async {
+            parked.wait().await;
+            Ok(())
+        },
+    ));
+    let deadline = async move {
+        for _ in 0..patience {
+            Yield(false).await;
+        }
+    };
+    let mut waiting = Box::pin(second.log.gain(
+        part,
+        HANDOFF_TTL_TICKS,
+        &capacity,
+        deadline,
+        |_| async { Ok(()) },
+    ));
+    let (mut held, mut refused) = (None, None);
+    std::future::poll_fn(|context| {
+        if held.is_none()
+            && let Poll::Ready(answer) = holding.as_mut().poll(context)
+        {
+            held = Some(answer);
+        }
+        if refused.is_none()
+            && let Poll::Ready(answer) = waiting.as_mut().poll(context)
+        {
+            refused = Some((answer, held.is_none()));
+            parked.fire();
+        }
+        if held.is_some() && refused.is_some() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    match refused {
+        Some((Err(nanocode_turnlog::parted::GainError::Busy), _)) => ledger.borrow_mut().stats.busy += 1,
+        Some((answer, true)) => ledger.borrow_mut().wrong.push(format!(
+            "a gain of partition {} answered {answer:?} while another gain held the only recovery permit",
+            part.0
+        )),
+        _ => {}
+    }
+    if !matches!(held, Some(Ok(_))) || first.log.release(part).await.is_err() {
+        return;
+    }
+    let committed = first
+        .log
+        .store()
+        .rows(part)
+        .iter()
+        .map(|(_, _, stored)| stored.pos)
+        .max()
+        .unwrap_or(0);
+    if let Ok((gained, ())) = second
+        .log
+        .gain(part, HANDOFF_TTL_TICKS, &capacity, std::future::pending(), |_| async { Ok(()) })
+        .await
+        && gained.cursor < committed
+    {
+        ledger.borrow_mut().wrong.push(format!(
+            "partition {} was released at position {committed} and gained at cursor {}",
+            part.0, gained.cursor
+        ));
+    }
+}
+
 async fn follow(node: &Node, index: usize, part: Partition, ledger: &RefCell<Ledger>) {
     let reader = format!("reader{index}");
     let mut after = node.log.store().cursor_of(part, &reader);
@@ -557,10 +641,13 @@ fn run(seed: u64, mutation: PlogMutation, stats: &mut PlogStats) -> Result<u64, 
             (index, part, appends)
         })
         .collect();
+    let gained = Partition(u32::try_from(rng.below(u64::from(shape.parts))).unwrap_or(0));
+    let patience = rng.range(1, 9);
     let planned: Vec<Task<'_>> = vec![Box::pin(async {
         for (index, part, appends) in &handoffs {
             handoff(&nodes[*index], *index, *part, *appends, &ledger).await;
         }
+        gains(&nodes, gained, patience, &ledger).await;
     })];
     let handed = drive(&mut rng, planned, 2_000_000);
     let calm: Vec<Task<'_>> = (0..shape.nodes)

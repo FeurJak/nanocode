@@ -25,10 +25,12 @@ use nanocode_sync::{Atom, Map, Slot, Vector, oneshot};
 
 use crate::host::{Compaction, Extension, LogHost, Rider, StoredCheckpoint, Write};
 
+mod gain;
 pub mod model;
 pub mod sim;
 pub mod sql;
 
+pub use gain::{GainError, Gained};
 pub use model::{Fault, Faults, ModelParts};
 pub use sql::SqlParts;
 

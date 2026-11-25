@@ -24,10 +24,12 @@ pub enum Mutation {
     /// A draining partition refuses the appends queued before the drain instead of flushing
     /// them at its epoch.
     DrainRefusesQueued,
+    /// A gain waits for recovery capacity past its deadline instead of answering Busy.
+    GainWaitsUnbounded,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Unfenced,
         Self::Partial,
         Self::Overwrite,
@@ -37,6 +39,7 @@ impl Mutation {
         Self::PruneIgnoresCursors,
         Self::LostAckRejected,
         Self::DrainRefusesQueued,
+        Self::GainWaitsUnbounded,
     ];
 
     #[must_use]
@@ -52,6 +55,7 @@ impl Mutation {
             Self::PruneIgnoresCursors => "prune_ignores_cursors",
             Self::LostAckRejected => "lost_ack_rejected",
             Self::DrainRefusesQueued => "drain_refuses_queued",
+            Self::GainWaitsUnbounded => "gain_waits_unbounded",
         }
     }
 
