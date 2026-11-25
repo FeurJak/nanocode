@@ -174,13 +174,15 @@ impl State {
         &self,
         turn: &str,
         response: &crate::MessageResponse,
+        replayed: bool,
     ) -> Result<()> {
         let Some(facts) = self.facts() else {
             return Ok(());
         };
-        if facts
-            .read(|fold| fold.previous_message_id() == Some(response.id.as_str()))
-            .await?
+        if replayed
+            && facts
+                .read(|fold| fold.previous_message_id() == Some(response.id.as_str()))
+                .await?
         {
             return Ok(());
         }

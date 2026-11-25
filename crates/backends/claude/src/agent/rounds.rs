@@ -643,6 +643,7 @@ pub(super) fn run_rounds<'a>(
                 .fact_model(
                     cursor.operation.as_deref().unwrap_or_default(),
                     &response.message,
+                    response.replayed,
                 )
                 .await?;
             if !response.replayed && cursor.recovered_code_index == Some(index) {

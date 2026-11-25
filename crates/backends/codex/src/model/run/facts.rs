@@ -121,10 +121,12 @@ pub(super) async fn fact_model(
     turn: &str,
     id: &str,
     output: &[ResponseItem],
+    replayed: bool,
 ) -> Result<()> {
-    if facts
-        .read(|fold| fold.previous_response_id() == Some(id))
-        .await?
+    if replayed
+        && facts
+            .read(|fold| fold.previous_response_id() == Some(id))
+            .await?
     {
         return Ok(());
     }

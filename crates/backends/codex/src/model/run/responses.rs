@@ -272,6 +272,7 @@ impl ModelRun {
                 steps.operation_id(),
                 &response.id,
                 &response.output_items,
+                replayed,
             )
             .await?;
         }
