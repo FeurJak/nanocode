@@ -25,6 +25,7 @@ pub enum Mutation {
     BlobsResident,
     CacheInline,
     OpenMigrates,
+    PrepareMigrates,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

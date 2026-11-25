@@ -396,6 +396,7 @@ default_table='
 1 migrated_twice pass --scenario migrated --twice
 1 canary_migrated_open_migrates canary:32 --scenario migrated --mutation open_migrates
 1 canary_migrated_check_misses_formats canary:32 --scenario migrated --mutation check_misses_formats
+1 canary_migrated_prepare_migrates canary:32 --scenario migrated --mutation prepare_migrates
 4 kv_lease pass --scenario kv_lease
 1 kv_lease_twice pass --scenario kv_lease --twice
 1 canary_kv_lease_claim_steals_live canary:16 --scenario kv_lease --mutation claim_steals_live

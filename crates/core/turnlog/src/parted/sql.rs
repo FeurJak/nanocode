@@ -13,8 +13,8 @@ use std::{
 };
 
 use nanocode_durability_core::{
-    Migration, Settle, Sql, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
-    migrate_format_then,
+    Migrated, Migration, Settle, Sql, SqlAccess, SqlDialect, SqlRow, SqlStatement, StoreError,
+    StoreFuture, migrate_format_then,
 };
 use nanocode_partitions::{Partition, Row};
 use nanocode_sync::{Atom, Notify};
@@ -70,9 +70,9 @@ const PARTS_SQLITE: [&str; 2] = [
     "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < CAST(?1 AS INTEGER)) INSERT OR IGNORE INTO nanocode_log_head (part) SELECT i FROM n",
 ];
 const PARTS_PG: &str = "SELECT nanocode_plog_parts(CAST($1::text AS INTEGER))";
-const MIGRATED: Dialects = [
-    "SELECT CAST((SELECT version FROM nanocode_formats WHERE component = 'plog') AS TEXT), CAST((SELECT count(*) FROM nanocode_log_head WHERE part < CAST(?1 AS INTEGER)) AS TEXT)",
-    "SELECT CAST((SELECT version FROM nanocode_formats WHERE component = 'plog') AS TEXT), CAST((SELECT count(*) FROM nanocode_log_head WHERE part < CAST($1::text AS INTEGER)) AS TEXT)",
+const PREPARED: Dialects = [
+    "SELECT CAST(count(*) AS TEXT) FROM nanocode_log_head WHERE part < CAST(?1 AS INTEGER)",
+    "SELECT CAST(count(*) AS TEXT) FROM nanocode_log_head WHERE part < CAST($1::text AS INTEGER)",
 ];
 
 type Dialects = [&'static str; 2];
@@ -504,39 +504,27 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
 
     fn prepare(&self, count: NonZeroU32) -> StoreFuture<'_, Result<(), StoreError>> {
         Box::pin(async move {
+            if crate::sim::mutated(crate::sim::Mutation::PrepareMigrates) {
+                self.migrate(count).await?;
+            }
+            Migrated::check(&*self.host, "plog", &MIGRATIONS).await?;
             let wanted = count.get().to_string();
             let statements = [SqlStatement {
-                sql: self.pick(&MIGRATED),
+                sql: self.pick(&PREPARED),
                 params: vec![wanted.as_str()],
             }];
             let answer = self
                 .host
-                .transaction("plog_migrated", &statements)
-                .await
-                .map_err(|error| behind(&format!("{error}")))?;
+                .run(SqlAccess::Read, "plog_prepared", &statements)
+                .await?;
             let cells = answer
                 .into_iter()
                 .next()
                 .and_then(|rows| rows.into_iter().next())
-                .ok_or_else(|| behind("no format row"))?;
-            let known = MIGRATIONS.len() as u64;
-            let stored = cells
-                .first()
-                .and_then(Option::as_deref)
-                .map_or(Ok(0), str::parse)
-                .map_err(|error| invalid(format!("plog format: {error}")))?;
-            if stored > known {
-                return Err(StoreError::UnsupportedFormat {
-                    component: "plog",
-                    stored,
-                    known: MIGRATIONS.len() as u32,
-                });
-            }
-            let parts = number(&cells, 1)?;
-            if stored < known || parts < u64::from(count.get()) {
-                return Err(behind(&format!(
-                    "format {stored} of {known}, {parts} of {count} partitions"
-                )));
+                .ok_or_else(|| invalid("no partition count"))?;
+            let parts = number(&cells, 0)?;
+            if parts < u64::from(count.get()) {
+                return Err(behind(&format!("{parts} of {count} partitions")));
             }
             Ok(())
         })

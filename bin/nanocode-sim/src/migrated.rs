@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, ops::Range, process::ExitCode, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap, num::NonZeroU32, ops::Range, process::ExitCode, sync::Arc,
+    time::Duration,
+};
 
 use nanocode_durability_core::{
     Migrated, Sql, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
@@ -7,6 +10,7 @@ use nanocode_durability_core::{
 use nanocode_sync::{Atom, block_on};
 use nanocode_turnlog::{
     Compaction, LogHost, SqlLog, WakeIndex, WakeRider, WakeSummary,
+    parted::{PartStore, SqlParts},
     sim::{self as log_sim, Mutation as Rule},
 };
 
@@ -21,7 +25,8 @@ const OPS: Range<u64> = 4..40;
 const SCOPES: u64 = 4;
 const ROWS_MAX: u64 = 3;
 const ABSENT_PPM: u64 = 250_000;
-const DDL: [&str; 3] = ["CREATE ", "ALTER ", "DROP "];
+const DDL: [&str; 4] = ["CREATE ", "ALTER ", "DROP ", "DO "];
+const PARTS: NonZeroU32 = NonZeroU32::MIN;
 const READ_FORMAT: &str = "FROM nanocode_formats WHERE component";
 const WRITE_FORMAT: &str = "INSERT INTO nanocode_formats";
 const CREATE_FORMATS: &str = "CREATE TABLE IF NOT EXISTS nanocode_formats";
@@ -32,10 +37,16 @@ pub enum MigratedMutation {
     None,
     OpenMigrates,
     CheckMissesFormats,
+    PrepareMigrates,
 }
 
 impl MigratedMutation {
-    const ALL: [Self; 3] = [Self::None, Self::OpenMigrates, Self::CheckMissesFormats];
+    const ALL: [Self; 4] = [
+        Self::None,
+        Self::OpenMigrates,
+        Self::CheckMissesFormats,
+        Self::PrepareMigrates,
+    ];
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -48,6 +59,7 @@ impl MigratedMutation {
             Self::None => "none",
             Self::OpenMigrates => "open_migrates",
             Self::CheckMissesFormats => "check_misses_formats",
+            Self::PrepareMigrates => "prepare_migrates",
         }
     }
 
@@ -64,13 +76,14 @@ impl MigratedMutation {
         match self {
             Self::None | Self::CheckMissesFormats => Rule::None,
             Self::OpenMigrates => Rule::OpenMigrates,
+            Self::PrepareMigrates => Rule::PrepareMigrates,
         }
     }
 
     const fn durability(self) -> DurabilityRule {
         match self {
             Self::CheckMissesFormats => DurabilityRule::CheckMissesFormats,
-            Self::None | Self::OpenMigrates => DurabilityRule::None,
+            Self::None | Self::OpenMigrates | Self::PrepareMigrates => DurabilityRule::None,
         }
     }
 }
@@ -252,6 +265,7 @@ async fn serve(
 ) {
     let log = SqlLog::new(Arc::clone(host), &migrated[0]);
     let index = WakeIndex::new(Arc::clone(host), &migrated[1]);
+    let parts = SqlParts::new(Arc::clone(host)).with_notify(false);
     for _ in 0..rng.range(OPS.start, OPS.end) {
         stats.serving_calls += 1;
         let scope = format!("scope-{}", rng.below(SCOPES));
@@ -262,7 +276,7 @@ async fn serve(
             next_due: rng.chance(500_000).then(|| rng.below(1_000)),
             topics: vec![format!("topic-{}", rng.below(SCOPES))],
         };
-        let _answered = match rng.below(7) {
+        let _answered = match rng.below(8) {
             0 => log.load(&scope).await.map(drop),
             1 => log.scan(&scope, 0, rng.below(8)).await.map(drop),
             2 => log.scans(&[(scope.as_str(), 0)]).await.map(drop),
@@ -280,6 +294,7 @@ async fn serve(
                 .await
             }
             5 => index.prepare().await,
+            6 => parts.prepare(PARTS).await,
             _ => index.write(&scope, &summary).await,
         };
     }
