@@ -14,6 +14,7 @@ mod mcp;
 mod policy;
 mod state;
 mod tool;
+mod worker;
 #[cfg(target_os = "windows")]
 mod windows;
 

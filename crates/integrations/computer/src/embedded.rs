@@ -3,10 +3,10 @@ use crate::{
     engine::{Change, Engine},
     macos::{self, Ax},
     tool::STOPPED,
+    worker::Worker,
 };
 use nanocode_io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use nanocode_mcp::RpcError;
-use nanocode_sync::Owned;
 use serde_json::{Map, Value, json};
 use std::{
     collections::HashMap,
@@ -20,6 +20,7 @@ const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INTERNAL_ERROR: i64 = -32603;
+const SHIM_THREAD: &str = "nanocode-cua-driver";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Permissions {
@@ -48,18 +49,19 @@ struct Shim {
 }
 
 pub struct Server {
-    shim: Arc<Owned<Shim>>,
+    shim: Arc<Worker<Shim>>,
     tools: Value,
 }
 
 impl Server {
     pub async fn start(_label: &str) -> Result<Self, String> {
+        let shim = Shim {
+            engine: Native::default().pointer(true).engine(Ax::shown()),
+            epochs: HashMap::new(),
+            epoch: 0,
+        };
         Ok(Self {
-            shim: Arc::new(Owned::new(Shim {
-                engine: Native::default().pointer(true).engine(Ax::shown()),
-                epochs: HashMap::new(),
-                epoch: 0,
-            })),
+            shim: Arc::new(Worker::spawn(SHIM_THREAD, shim).map_err(|error| error.to_string())?),
             tools: tools(),
         })
     }
@@ -100,15 +102,21 @@ impl Server {
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, RpcError> {
-        let mut shim = self.shim.clone().acquire_owned().await;
         let name = name.to_owned();
-        match nanocode_platform::spawn_blocking(move || shim.call(&name, &arguments)).await {
-            Ok(Ok(result)) => Ok(result),
-            Ok(Err(message)) => Ok(json!({
+        let Ok(called) = self
+            .shim
+            .run(None, move |shim| shim.call(&name, &arguments))
+            .await
+        else {
+            return Err(RpcError::new(INTERNAL_ERROR, STOPPED));
+        };
+        match called.await {
+            Ok(Ok(Ok(result))) => Ok(result),
+            Ok(Ok(Err(message))) => Ok(json!({
                 "content": [{"type": "text", "text": message}],
                 "isError": true,
             })),
-            Err(_) => Err(RpcError::new(INTERNAL_ERROR, STOPPED)),
+            Ok(Err(_)) | Err(_) => Err(RpcError::new(INTERNAL_ERROR, STOPPED)),
         }
     }
 }

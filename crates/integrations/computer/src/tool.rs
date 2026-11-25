@@ -4,9 +4,10 @@ use crate::{
     engine::{Desktop, Engine},
     mcp::Mcp,
     policy::{Leases, Policy, app_key},
+    worker::{Owner, Refused, Worker},
 };
 use nanocode_platform::timeout;
-use nanocode_sync::{Atom, Owned};
+use nanocode_sync::{Atom, Mailbox};
 use nanocode_tool_contracts::{
     Tool, ToolContext, ToolDefinition, ToolError, ToolInput, ToolOutput, ToolResult,
 };
@@ -75,6 +76,8 @@ impl Limits {
     }
 }
 
+const DESKTOP_THREAD: &str = "nanocode-computer";
+
 pub(crate) const STOPPED: &str = "Computer use stopped during this step; whether it took effect is unknown. Read the app's state before trying again.";
 
 #[derive(Clone, Default)]
@@ -124,7 +127,7 @@ impl Native {
     }
 }
 
-type Shared = Arc<Owned<Box<dyn Desktop>>>;
+type Shared = Arc<Worker<Box<dyn Desktop>>>;
 
 type Make = Box<dyn Fn() -> Option<Box<dyn Desktop>> + Send + Sync>;
 
@@ -141,37 +144,48 @@ pub struct Lanes {
 }
 
 impl Lanes {
-    fn new(desktop: Box<dyn Desktop>, make: Option<Make>) -> Self {
-        Self {
-            front: Arc::new(Owned::new(desktop)),
+    fn new(desktop: Box<dyn Desktop>, make: Option<Make>) -> std::io::Result<Self> {
+        Ok(Self {
+            front: Arc::new(Worker::spawn(DESKTOP_THREAD, desktop)?),
             make,
             apps: Atom::new(HashMap::new()),
-        }
+        })
     }
 
-    fn lane(&self, key: &str, idle: Duration) -> Shared {
+    fn lane(&self, key: &str, idle: Duration) -> std::io::Result<Shared> {
         let Some(make) = &self.make else {
-            return self.front.clone();
+            return Ok(self.front.clone());
         };
         let now = Instant::now();
         let key = app_key(key);
-        self.apps.update(|apps| {
+        let kept = |apps: &mut HashMap<String, Lane>| {
             apps.retain(|_, lane| {
                 Arc::strong_count(&lane.desktop) > 1 || now.duration_since(lane.used) < idle
             });
-            let lane = match apps.get_mut(&key) {
-                Some(lane) => lane,
-                None => match make() {
-                    Some(desktop) => apps.entry(key.clone()).or_insert(Lane {
-                        desktop: Arc::new(Owned::new(desktop)),
+            apps.get_mut(&key).map(|lane| {
+                lane.used = now;
+                lane.desktop.clone()
+            })
+        };
+        if let Some(desktop) = self.apps.update(kept) {
+            return Ok(desktop);
+        }
+        let Some(desktop) = make() else {
+            return Ok(self.front.clone());
+        };
+        let made = Arc::new(Worker::spawn(DESKTOP_THREAD, desktop)?);
+        Ok(self.apps.update(|apps| {
+            kept(apps).unwrap_or_else(|| {
+                apps.insert(
+                    key.clone(),
+                    Lane {
+                        desktop: made.clone(),
                         used: now,
-                    }),
-                    None => return self.front.clone(),
-                },
-            };
-            lane.used = now;
-            lane.desktop.clone()
-        })
+                    },
+                );
+                made.clone()
+            })
+        }))
     }
 }
 
@@ -180,7 +194,7 @@ pub enum Provider {
         lanes: Arc<Lanes>,
         capabilities: Capabilities,
     },
-    Driver(Owned<Driver>),
+    Driver(Owner<Driver>),
     Mcp(Mcp),
     Missing(String),
 }
@@ -201,14 +215,18 @@ impl Provider {
     }
 
     fn lanes(desktop: Box<dyn Desktop>, make: Option<Make>) -> Self {
-        Self::Native {
-            capabilities: desktop.capabilities(),
-            lanes: Arc::new(Lanes::new(desktop, make)),
+        let capabilities = desktop.capabilities();
+        match Lanes::new(desktop, make) {
+            Ok(lanes) => Self::Native {
+                capabilities,
+                lanes: Arc::new(lanes),
+            },
+            Err(error) => Self::Missing(unstarted(&error)),
         }
     }
 
     pub fn driver(driver: Driver) -> Self {
-        Self::Driver(Owned::new(driver))
+        Self::Driver(Owner::new(driver))
     }
 
     pub const fn mcp(mcp: Mcp) -> Self {
@@ -241,12 +259,13 @@ impl Provider {
         let Self::Native { lanes, .. } = self else {
             return None;
         };
-        let mut engine = timeout(limits.step, lanes.front.clone().acquire_owned())
+        let app = app.to_owned();
+        let key = lanes
+            .front
+            .run(Some(limits.step), move |engine| engine.lease_key(&app))
             .await
             .ok()?;
-        let app = app.to_owned();
-        let key = nanocode_platform::spawn_blocking(move || engine.lease_key(&app));
-        timeout(limits.step, key).await.ok()?.ok()?
+        timeout(limits.step, key).await.ok()?.ok()?.ok()?
     }
 
     async fn step(
@@ -260,19 +279,34 @@ impl Provider {
         match self {
             Self::Missing(reason) => ToolOutput::error(reason.clone()),
             Self::Native { lanes, .. } => {
-                let desktop = lanes.lane(key.unwrap_or_default(), limits.lease_idle);
-                native(&desktop, action, input, limits).await
+                match lanes.lane(key.unwrap_or_default(), limits.lease_idle) {
+                    Ok(desktop) => native(&desktop, action, input, limits).await,
+                    Err(error) => ToolOutput::error(unstarted(&error)),
+                }
             }
             Self::Driver(driver) => {
-                let mut driver = driver.acquire().await;
-                let step = driver.step(action, input, scope, limits.screenshot);
-                let step = match timeout(limits.step, step).await {
+                let (action, owned_input, scope, limits_step) =
+                    (action.to_owned(), input.clone(), scope.to_owned(), *limits);
+                let stepped_driver = driver
+                    .run(move |driver| {
+                        Box::pin(async move {
+                            let limits = limits_step;
+                            let step =
+                                driver.step(&action, &owned_input, &scope, limits.screenshot);
+                            match timeout(limits.step, step).await {
+                                Ok(Ok(step)) => Ok(step),
+                                Ok(Err(failure)) => Err(failure.message),
+                                Err(_) => {
+                                    driver.reset();
+                                    Err(limits.slow())
+                                }
+                            }
+                        })
+                    })
+                    .await;
+                let step = match stepped_driver {
                     Ok(Ok(step)) => step,
-                    Ok(Err(failure)) => return ToolOutput::error(failure.message),
-                    Err(_) => {
-                        driver.reset();
-                        return ToolOutput::error(limits.slow());
-                    }
+                    Ok(Err(message)) | Err(message) => return ToolOutput::error(message),
                 };
                 let media_type = step.screenshot_mime.unwrap_or_else(|| "image/png".into());
                 let screenshot = step
@@ -290,25 +324,36 @@ impl Provider {
     }
 }
 
+fn unstarted(error: &std::io::Error) -> String {
+    format!("Computer use could not start ({error}), so nothing ran.")
+}
+
 async fn native(desktop: &Shared, action: &str, input: &Value, limits: &Limits) -> ToolOutput {
-    let Ok(mut engine) = timeout(limits.step, desktop.clone().acquire_owned()).await else {
-        return ToolOutput::error(format!(
-            "Computer use was busy with other steps for {} seconds, so nothing ran. Try again.",
-            limits.step.as_secs()
-        ));
-    };
     let (owned_action, owned_input, max) = (action.to_owned(), input.clone(), limits.screenshot);
-    let step =
-        nanocode_platform::spawn_blocking(move || engine.step(&owned_action, &owned_input, max));
+    let step = desktop
+        .run(Some(limits.step), move |engine| {
+            engine.step(&owned_action, &owned_input, max)
+        })
+        .await;
+    let step = match step {
+        Ok(step) => step,
+        Err(Refused::Busy) => {
+            return ToolOutput::error(format!(
+                "Computer use was busy with other steps for {} seconds, so nothing ran. Try again.",
+                limits.step.as_secs()
+            ));
+        }
+        Err(Refused::Stopped) => return ToolOutput::error(STOPPED),
+    };
     match timeout(limits.step, step).await {
-        Ok(Ok(Ok(step))) => {
+        Ok(Ok(Ok(Ok(step)))) => {
             let screenshot = step
                 .screenshot
                 .map(|data| json!({"media_type": "image/jpeg", "data": data}));
             stepped(input, limits.clip(step.text), screenshot, step.omitted)
         }
-        Ok(Ok(Err(message))) => ToolOutput::error(limits.clip(message)),
-        Ok(Err(_)) => ToolOutput::error(STOPPED),
+        Ok(Ok(Ok(Err(message)))) => ToolOutput::error(limits.clip(message)),
+        Ok(Ok(Err(_)) | Err(_)) => ToolOutput::error(STOPPED),
         Err(_) => ToolOutput::error(limits.slow()),
     }
 }
@@ -317,7 +362,7 @@ type Refusal = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 pub struct Computer {
     providers: Vec<(String, Provider)>,
-    leases: Owned<Leases>,
+    leases: Mailbox<Leases>,
     limits: Limits,
     refusal: Refusal,
     definition: Option<ToolDefinition>,
@@ -328,7 +373,7 @@ impl Computer {
         let limits = Limits::default();
         Self {
             providers: vec![(String::new(), provider)],
-            leases: Owned::new(Leases::new(limits.lease_idle)),
+            leases: Mailbox::new(Leases::new(limits.lease_idle)),
             limits,
             refusal: Arc::new(|app| {
                 format!(
@@ -347,7 +392,7 @@ impl Computer {
 
     #[must_use]
     pub fn limits(mut self, limits: Limits) -> Self {
-        self.leases = Owned::new(Leases::new(limits.lease_idle));
+        self.leases = Mailbox::new(Leases::new(limits.lease_idle));
         self.limits = limits;
         self
     }
@@ -390,6 +435,14 @@ impl Computer {
                 .await
                 .unwrap_or_else(|| app.to_owned()),
         )
+    }
+
+    async fn lease(&self, key: &str, session_id: &str, turn_id: &str) -> bool {
+        let (key, session_id, turn_id) =
+            (key.to_owned(), session_id.to_owned(), turn_id.to_owned());
+        self.leases
+            .call(move |leases| leases.take(&key, &session_id, &turn_id, Instant::now()))
+            .await
     }
 
     pub async fn step(&self, input: &Value, scope: &str) -> ToolOutput {
@@ -438,12 +491,13 @@ impl Tool for Computer {
                 }
                 let key = self.key(&input).await;
                 if let Some(key) = &key
-                    && !self.leases.acquire().await.take(
-                        key,
-                        context.session_id(),
-                        context.turn_id().unwrap_or_default(),
-                        Instant::now(),
-                    )
+                    && !self
+                        .lease(
+                            key,
+                            context.session_id(),
+                            context.turn_id().unwrap_or_default(),
+                        )
+                        .await
                 {
                     return Ok(ToolOutput::error((self.refusal)(
                         input["app"].as_str().unwrap_or(key),
@@ -471,7 +525,10 @@ impl Tool for Computer {
     {
         Box::pin(async move {
             let output: Result<(), ToolError> = {
-                self.leases.acquire().await.end(session_id, turn_id);
+                let (session_id, turn_id) = (session_id.to_owned(), turn_id.to_owned());
+                self.leases
+                    .call(move |leases| leases.end(&session_id, &turn_id))
+                    .await;
                 Ok(())
             };
             output
