@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    io::{self, Write as _},
+    io,
     net::Ipv4Addr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -9,6 +9,7 @@ use std::{
 
 use nanocode_executor::{TcpListener, TcpStream};
 use nanocode_io::{AsyncReadExt as _, AsyncWriteExt as _};
+use nanocode_platform::Revisioned;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -43,11 +44,14 @@ struct HomeHost {
 
 impl HomeHost {
     fn read(path: &Path) -> io::Result<BTreeMap<String, Entry>> {
-        match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-            Err(error) => Err(error),
-        }
+        Self::parse(Revisioned::new(path).read()?.bytes.as_deref())
+    }
+
+    fn parse(bytes: Option<&[u8]>) -> io::Result<BTreeMap<String, Entry>> {
+        bytes.map_or_else(
+            || Ok(BTreeMap::new()),
+            |bytes| serde_json::from_slice(bytes).map_err(io::Error::other),
+        )
     }
 
     fn swap(
@@ -59,35 +63,23 @@ impl HomeHost {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path.with_extension("json.lock"))?;
-        lock.lock()?;
-        let mut entries = Self::read(path)?;
-        let current = entries.get(key).map_or(0, |entry| entry.revision);
-        if current != expected {
-            return Ok(ClaudeSubscriptionCommit::Conflict(current));
-        }
-        let revision = expected.saturating_add(1);
-        entries.insert(
-            key.to_owned(),
-            Entry {
-                revision,
-                payload: Some(payload.to_owned()),
-            },
-        );
-        let temporary = path.with_extension("json.tmp");
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut file = options.open(&temporary)?;
-        file.write_all(&serde_json::to_vec(&entries).map_err(io::Error::other)?)?;
-        file.sync_all()?;
-        std::fs::rename(&temporary, path)?;
-        Ok(ClaudeSubscriptionCommit::Committed(revision))
+        Revisioned::new(path).update(|bytes| {
+            let mut entries = Self::parse(bytes)?;
+            let current = entries.get(key).map_or(0, |entry| entry.revision);
+            if current != expected {
+                return Ok((None, ClaudeSubscriptionCommit::Conflict(current)));
+            }
+            let revision = expected.saturating_add(1);
+            entries.insert(
+                key.to_owned(),
+                Entry {
+                    revision,
+                    payload: Some(payload.to_owned()),
+                },
+            );
+            let bytes = serde_json::to_vec(&entries).map_err(io::Error::other)?;
+            Ok((Some(bytes), ClaudeSubscriptionCommit::Committed(revision)))
+        })
     }
 }
 
