@@ -172,6 +172,37 @@ pub async fn migrate_format_then<H: Sql + ?Sized>(
     migrations: &[Migration],
     then: &[SqlStatement<'_>],
 ) -> Result<Vec<Vec<SqlRow>>, StoreError> {
+    let mut last: Option<String> = None;
+    loop {
+        match migrate_once(host, component, migrations, then).await {
+            Err(StoreError::Backend(text))
+                if created_concurrently(&text) && last.as_deref() != Some(text.as_str()) =>
+            {
+                last = Some(text);
+            }
+            answer => return answer,
+        }
+    }
+}
+
+const CREATED_CONCURRENTLY: [&str; 5] = [
+    "pg_type_typname_nsp_index",
+    "pg_class_relname_nsp_index",
+    "pg_proc_proname_args_nsp_index",
+    "(ERROR 42710)",
+    "(ERROR 42P07)",
+];
+
+fn created_concurrently(text: &str) -> bool {
+    CREATED_CONCURRENTLY.iter().any(|mark| text.contains(mark))
+}
+
+async fn migrate_once<H: Sql + ?Sized>(
+    host: &H,
+    component: &'static str,
+    migrations: &[Migration],
+    then: &[SqlStatement<'_>],
+) -> Result<Vec<Vec<SqlRow>>, StoreError> {
     let dialect = host.dialect();
     let check = [
         statement(dialect, &CREATE_FORMATS, Vec::new()),
@@ -215,20 +246,7 @@ pub async fn migrate_format_then<H: Sql + ?Sized>(
                 .chain([write])
                 .chain(trailing.iter().cloned())
                 .collect();
-            let mut results =
-                match run_checked(host, SqlAccess::Schema, "format", &statements).await {
-                    Ok(results) => results,
-                    Err(_) if stored_format(host, component).await? > index as u64 => {
-                        if index == last && !trailing.is_empty() {
-                            return run_checked(host, SqlAccess::Schema, "format", trailing).await;
-                        }
-                        if index == last {
-                            return Ok(Vec::new());
-                        }
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
+            let mut results = run_checked(host, SqlAccess::Schema, "format", &statements).await?;
             if index == last {
                 return Ok(results.split_off(statements.len() - trailing.len()));
             }
@@ -284,16 +302,6 @@ pub(crate) async fn check_format<H: Sql + ?Sized>(
         });
     }
     Ok(())
-}
-
-async fn stored_format<H: Sql + ?Sized>(host: &H, component: &str) -> Result<u64, StoreError> {
-    let read = [statement(host.dialect(), &READ_FORMAT, vec![component])];
-    Ok(
-        match single(&run_checked(host, SqlAccess::Schema, "format", &read).await?[0])? {
-            Some(row) => counter(row, 0)?,
-            None => 0,
-        },
-    )
 }
 
 fn column_present(rows: &[SqlRow]) -> Result<bool, StoreError> {
