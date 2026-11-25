@@ -16,8 +16,8 @@ use crate::{
     SqlRow, SqlStatement, SqlStore, StateCommit, StateStore, StoreError, StoreFuture, StoreRecord,
     StoredState, Unreachable,
     sql::{
-        SqlAccess, check_format, counter, invalid, keys_json, limit_param, migrate_format, names, run_checked,
-        single, text, unreachable_in, written,
+        SqlAccess, check_format, counter, invalid, keys_json, limit_param, migrate_format, names,
+        run_checked, single, text, unreachable_in, written,
     },
 };
 

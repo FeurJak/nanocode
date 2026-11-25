@@ -325,7 +325,10 @@ pub fn check(root: &Path) -> std::io::Result<Vec<String>> {
     Ok(problems)
 }
 
-const LOCK_FREE_SQL: &[&str] = &["crates/core/turnlog/src/parted/sql.rs"];
+const LOCK_FREE_SQL: &[&str] = &[
+    "crates/core/turnlog/src/parted/sql.rs",
+    "crates/core/durability/src/sql.rs",
+];
 const ROW_LOCKS: &[&str] = &[
     "FOR UPDATE",
     "FOR NO KEY UPDATE",

@@ -22,6 +22,7 @@ mod dispatcher;
 #[cfg(target_os = "linux")]
 mod dns;
 mod drive;
+mod durable;
 #[cfg(unix)]
 mod egress;
 mod executor;
@@ -39,6 +40,7 @@ mod httpserver;
 mod imports;
 mod inboxstress;
 mod interpdrop;
+mod lease;
 mod live;
 mod log;
 mod longthread;
@@ -50,7 +52,6 @@ mod nestedmeta;
 mod network;
 mod onelog;
 mod onelogfacts;
-mod lease;
 mod partitions;
 mod plog;
 mod repocache;
@@ -98,6 +99,7 @@ use crate::{
     controlplane::{ControlplaneMutation, ControlplaneStats},
     cost::{CostMutation, CostStats},
     dispatcher::{DispatcherMutation, DispatcherStats},
+    durable::{DurableMutation, DurableStats},
     facts::FactsMutation,
     gcunwind::{GcUnwindMutation, GcUnwindStats},
     gitremote::{GitRemoteMutation, GitRemoteStats},
@@ -110,6 +112,7 @@ use crate::{
     imports::{ImportsMutation, ImportsStats},
     inboxstress::InboxStressStats,
     interpdrop::{InterpDropMutation, InterpDropStats},
+    lease::{LeaseMutation, LeaseStats},
     live::{LiveMutation, LiveStats},
     longthread::{LongThreadMutation, LongThreadStats},
     model::Stats,
@@ -117,7 +120,6 @@ use crate::{
     nestedmeta::{NestedMetaMutation, NestedMetaStats},
     onelog::{LiveSeqs, Protections},
     onelogfacts::{OneLogFactsMutation, OneLogFactsStats},
-    lease::{LeaseMutation, LeaseStats},
     partitions::{PartitionsMutation, PartitionsStats},
     plog::{PlogMutation, PlogStats},
     repocache::{RepoCacheMutation, RepoCacheStats},
@@ -191,6 +193,7 @@ enum Scenario {
     WorkspaceCrash,
     Partitions,
     Lease,
+    Durable,
     Scale,
     HandAuto,
     NestedMeta,
@@ -251,6 +254,7 @@ struct Args {
     workspace_crash: WorkspaceCrashMutation,
     partitions: PartitionsMutation,
     lease: LeaseMutation,
+    durable: DurableMutation,
     scale: ScaleConfig,
     hand_auto: HandAutoMutation,
     nested_meta: NestedMetaMutation,
@@ -272,7 +276,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|lease|scale|gc_unwind|interp_drop|holds|one_log_facts] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|lease|durable|scale|gc_unwind|interp_drop|holds|one_log_facts] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -307,6 +311,7 @@ fn usage() -> ExitCode {
        workspace_crash: [--mutation {}]
        partitions: [--mutation {}]
        lease: [--mutation {}]
+       durable: [--mutation {}]
        scale: [--load uniform|skewed] [--nodes 1,2,..,10] [--mutation {}]
        hand_auto: [--mutation {}]
        nested_meta: [--mutation {}]
@@ -350,6 +355,7 @@ fn usage() -> ExitCode {
         WorkspaceCrashMutation::names(),
         PartitionsMutation::names(),
         LeaseMutation::names(),
+        DurableMutation::names(),
         ScaleMutation::names(),
         HandAutoMutation::names(),
         NestedMetaMutation::names(),
@@ -439,6 +445,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut workspace_crash = WorkspaceCrashMutation::None;
     let mut partitions = PartitionsMutation::None;
     let mut lease = LeaseMutation::None;
+    let mut durable = DurableMutation::None;
     let mut scale = ScaleConfig::default();
     let mut hand_auto = HandAutoMutation::None;
     let mut nested_meta = NestedMetaMutation::None;
@@ -544,6 +551,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "workspace_crash" => Scenario::WorkspaceCrash,
                     "partitions" => Scenario::Partitions,
                     "lease" => Scenario::Lease,
+                    "durable" => Scenario::Durable,
                     "scale" => Scenario::Scale,
                     "hand_auto" => Scenario::HandAuto,
                     "nested_meta" => Scenario::NestedMeta,
@@ -614,6 +622,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::HandRouter, Some(name)) => hand_router = HandRouterMutation::parse(name)?,
         (Scenario::Partitions, Some(name)) => partitions = PartitionsMutation::parse(name)?,
         (Scenario::Lease, Some(name)) => lease = LeaseMutation::parse(name)?,
+        (Scenario::Durable, Some(name)) => durable = DurableMutation::parse(name)?,
         (Scenario::Scale, Some(name)) => scale.mutation = ScaleMutation::parse(name)?,
         (Scenario::WorkspaceHost, Some(name)) => {
             workspace_host = WorkspaceHostMutation::parse(name)?
@@ -715,6 +724,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         workspace_crash,
         partitions,
         lease,
+        durable,
         scale,
         hand_auto,
         nested_meta,
@@ -850,6 +860,9 @@ fn scenario_replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::Lease {
         return lease::replay(seed, args.lease);
+    }
+    if args.scenario == Scenario::Durable {
+        return durable::replay(seed, args.durable);
     }
     if args.scenario == Scenario::Scale {
         return scale::replay(seed, &args.scale);
@@ -1252,6 +1265,7 @@ fn mutations() -> ExitCode {
     add("workspace_crash", WorkspaceCrashMutation::names());
     add("partitions", PartitionsMutation::names());
     add("lease", LeaseMutation::names());
+    add("durable", DurableMutation::names());
     add("scale", ScaleMutation::names());
     add("hand_auto", HandAutoMutation::names());
     add("nested_meta", NestedMetaMutation::names());
@@ -1333,6 +1347,7 @@ struct Totals {
     workspace_crash_totals: WorkspaceCrashStats,
     partitions_totals: PartitionsStats,
     lease_totals: LeaseStats,
+    durable_totals: DurableStats,
     scale_totals: ScaleStats,
     hand_auto_totals: HandAutoStats,
     nested_meta_totals: NestedMetaStats,
@@ -1393,6 +1408,7 @@ impl Totals {
             .add(&other.workspace_crash_totals);
         self.partitions_totals.add(&other.partitions_totals);
         self.lease_totals.add(&other.lease_totals);
+        self.durable_totals.add(&other.durable_totals);
         self.scale_totals.add(&other.scale_totals);
         self.hand_auto_totals.add(&other.hand_auto_totals);
         self.nested_meta_totals.add(&other.nested_meta_totals);
@@ -1679,6 +1695,13 @@ fn judge_one(seed: u64, args: &Args, totals: &mut Totals, caught: &mut Caught) -
             args.options.verbose,
             &mut totals.lease_totals,
         ),
+        Scenario::Durable => durable::judge(
+            seed,
+            args.durable,
+            args.twice,
+            args.options.verbose,
+            &mut totals.durable_totals,
+        ),
         Scenario::Scale => scale::judge(
             seed,
             &args.scale,
@@ -1915,6 +1938,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::HandRouter && args.hand_router != HandRouterMutation::None)
         || (args.scenario == Scenario::Partitions && args.partitions != PartitionsMutation::None)
         || (args.scenario == Scenario::Lease && args.lease != LeaseMutation::None)
+        || (args.scenario == Scenario::Durable && args.durable != DurableMutation::None)
         || (args.scenario == Scenario::Scale && args.scale.mutation != ScaleMutation::None)
         || (args.scenario == Scenario::WorkspaceHost
             && args.workspace_host != WorkspaceHostMutation::None)
@@ -2027,6 +2051,7 @@ fn main() -> ExitCode {
         workspace_crash_totals,
         partitions_totals,
         lease_totals,
+        durable_totals,
         scale_totals,
         hand_auto_totals,
         nested_meta_totals,
@@ -2371,6 +2396,16 @@ fn main() -> ExitCode {
             args.twice,
             args.lease,
             &lease_totals,
+        );
+    }
+    if args.scenario == Scenario::Durable {
+        return durable::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.durable,
+            &durable_totals,
         );
     }
     if args.scenario == Scenario::HandAuto {

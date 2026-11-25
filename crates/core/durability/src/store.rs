@@ -48,6 +48,12 @@ impl OwnerToken {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Lease {
+    pub ttl_ms: u64,
+    pub grace_ms: u64,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct StoredState {
     pub revision: u64,
@@ -65,6 +71,8 @@ pub struct OwnedState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StoreError {
     Fenced,
+
+    Busy,
 
     Conflict {
         expected: u64,
@@ -92,6 +100,7 @@ impl std::fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Fenced => formatter.write_str("durability state owner was fenced"),
+            Self::Busy => formatter.write_str("durability state is held by a live owner"),
             Self::Conflict { expected, actual } => write!(
                 formatter,
                 "durability state revision conflict: expected {expected}, found {actual}"
@@ -616,6 +625,14 @@ pub trait StateStore: MaybeSend {
         acquisitions: Vec<(String, OwnerId)>,
     ) -> StoreFuture<'_, Vec<Result<OwnedState, StoreError>>> {
         Box::pin(acquire_each(self, acquisitions))
+    }
+
+    fn release<'a>(
+        &'a mut self,
+        _state_id: &'a str,
+        _owner: &'a OwnerToken,
+    ) -> StoreFuture<'a, Result<bool, StoreError>> {
+        Box::pin(async { Ok(false) })
     }
 
     fn acquire_with<'a>(
