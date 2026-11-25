@@ -9,7 +9,7 @@ use nanocode_partitions::Partition;
 use nanocode_store_sql::{PgOptions, PgPool, PgSql};
 use nanocode_turnlog::parted::{PartStore, PartedLog, SqlParts};
 
-const USAGE: &str = "scoped-api migrate URL [parts=N] | serve URL listen=HOST:PORT [parts= pool= lease_pool= threads= lease_ms= member_ms= grace_ms= tick_ms= renew_ms= batch= queue= forward_idle=] | drive ADMIN_URL replicas=A,B [parts= concurrency= scopes= seconds= writes= threads= retry_ms= pause_ms= sample_ms= ready_s= kill=PID@S victim=ADDR | handoff=ADDR@S]";
+const USAGE: &str = "scoped-api migrate URL [parts=N] | serve URL listen=HOST:PORT [parts= pool= lease_pool= threads= lease_ms= member_ms= grace_ms= tick_ms= renew_ms= batch= queue= forward_idle=] | drive ADMIN_URL replicas=A,B [parts= concurrency= scopes= seconds= writes= threads= retry_ms= pause_ms= sample_ms= ready_s= route=any|owner route_ms= kill=PID@S victim=ADDR | handoff=ADDR@S]";
 const MEMBERS_CREATE: &str =
     "CREATE TABLE IF NOT EXISTS scoped_api_member (node TEXT PRIMARY KEY, seen_ms BIGINT NOT NULL)";
 const MEMBERS_CHECK: &str = "SELECT CAST(count(*) AS TEXT) FROM scoped_api_member";

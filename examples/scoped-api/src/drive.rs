@@ -3,7 +3,7 @@ use std::{
     num::NonZeroU32,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -48,6 +48,9 @@ enum Event {
 
 struct Plan {
     replicas: Vec<String>,
+    route: bool,
+    owners: Vec<AtomicUsize>,
+    route_every: Duration,
     parts: NonZeroU32,
     concurrency: u64,
     scopes: u64,
@@ -142,9 +145,18 @@ fn planned(options: &Options) -> Result<Plan, String> {
         (Some(_), Some(_)) => return Err("one of kill= and handoff= per run".to_owned()),
     };
     let millis = |key: &str, default: u64| options.number(key, default).map(Duration::from_millis);
+    let parts = options.parts()?;
+    let route = match options.text("route") {
+        None | Some("any") => false,
+        Some("owner") => true,
+        Some(other) => return Err(format!("route={other}: expected any or owner")),
+    };
     Ok(Plan {
         replicas,
-        parts: options.parts()?,
+        route,
+        owners: (0..parts.get()).map(|_| AtomicUsize::new(usize::MAX)).collect(),
+        route_every: millis("route_ms", 100)?,
+        parts,
         concurrency: options.number("concurrency", 20)?.max(1),
         scopes: options.number("scopes", 10_000)?.max(1),
         seconds: options.number("seconds", 30)?,
@@ -164,6 +176,10 @@ pub fn run(admin: &str, options: &Options) -> Result<(), String> {
         ready(&plan).await?;
         let stop = Arc::new(AtomicBool::new(false));
         let sampler = spawn(sample(Arc::clone(&admin), Arc::clone(&stop), plan.sample));
+        if plan.route {
+            route(&plan).await;
+            spawn(routing(Arc::clone(&plan), Arc::clone(&stop)));
+        }
         let started = Instant::now();
         let until = started + Duration::from_secs(plan.seconds);
         let event = spawn(happen(Arc::clone(&plan), started));
@@ -225,6 +241,37 @@ fn held(value: &Value) -> Vec<u32> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+async fn route(plan: &Plan) {
+    let answers = join_all(
+        plan.replicas
+            .iter()
+            .map(|replica| get(replica, "/admin/held", plan.retry)),
+    )
+    .await;
+    let mut owners = vec![usize::MAX; plan.owners.len()];
+    for (index, answer) in answers.iter().enumerate() {
+        let Ok(answer) = answer else { continue };
+        if answer["draining"].as_bool() == Some(true) {
+            continue;
+        }
+        for part in held(answer) {
+            if let Some(owner) = owners.get_mut(part as usize) {
+                *owner = index;
+            }
+        }
+    }
+    for (slot, owner) in plan.owners.iter().zip(owners) {
+        slot.store(owner, Ordering::Relaxed);
+    }
+}
+
+async fn routing(plan: Arc<Plan>, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::Relaxed) {
+        sleep(plan.route_every).await;
+        route(&plan).await;
+    }
 }
 
 async fn ready(plan: &Plan) -> Result<(), String> {
@@ -452,8 +499,18 @@ async fn work(plan: Arc<Plan>, index: u64, started: Instant, until: Instant) -> 
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ (index + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9));
     let mut target = usize::try_from(index).unwrap_or_default() % plan.replicas.len();
     let (mut conn, mut tally, mut made) = (None, Tally::default(), 0);
+    let mut conns: Vec<Option<Conn>> = plan.replicas.iter().map(|_| None).collect();
     while Instant::now() < until {
         let scope = rng.below(plan.scopes);
+        if plan.route {
+            let part = place(&format!("s{scope}"), plan.parts).0 as usize;
+            let owner = plan.owners[part].load(Ordering::Relaxed);
+            if owner != usize::MAX && owner != target {
+                conns[target] = conn.take();
+                target = owner;
+                conn = conns[target].take();
+            }
+        }
         let write = rng.below(100) < plan.writes;
         let begun = Instant::now();
         if write {
@@ -567,6 +624,9 @@ async fn verify(plan: &Plan, acks: &[Ack], alive: &[String]) -> Verified {
 async fn check(plan: &Plan, alive: &[String], lane: usize, scopes: &[(u64, Vec<Ack>)]) -> Verified {
     let replicas = Plan {
         replicas: alive.to_vec(),
+        route: false,
+        owners: Vec::new(),
+        route_every: plan.route_every,
         parts: plan.parts,
         concurrency: 1,
         scopes: 0,

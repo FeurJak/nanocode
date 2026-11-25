@@ -51,11 +51,17 @@ option.
 
 The driver (`scoped-api drive`) runs C closed-loop clients (default 20) over K scopes (default
 10000), half appends and half reads, each client pinned to one replica so most requests are
-forwarded. It reports throughput, p50/p99 latency, errors and retries by kind, and checks at
+forwarded. With `route=owner` each request goes to the replica that holds its partition instead,
+as a partition-aware client or load balancer would, from `/admin/held` polled every `route_ms`
+(default 100). It reports throughput, p50/p99 latency, errors and retries by kind, and checks at
 the end that every acknowledged append is in its scope's log at its seq with its body and that
 every log is gapless. A sampler polls Postgres every 100 ms for backends waiting on a lock, for
 ungranted `pg_locks` and for the statements that wait; `run.sh` adds the Postgres log's
-`still waiting for`, statement-timeout, lock-timeout and deadlock counts. With `kill=I@S` or
-`handoff=I@S`, `event.stall_ms_max` is the longest gap between acknowledged appends in the
-partitions that moved, from the event on. The clients are closed-loop, so while they retry on
-moved scopes they stop issuing work elsewhere: `unmoved_gap_ms_max` shows that effect.
+`still waiting for`, statement-timeout, lock-timeout and deadlock counts. It also adds Postgres CPU
+(`pg_cpu_pct`, from the container's cgroup), each replica's and the driver's CPU (`app_cpu_pct`,
+`drive_cpu_pct`, 100 per core), Postgres commits, WAL bytes and WAL fsyncs per second, appends
+per owner commit (`rows_per_commit`) and the share of client requests forwarded (`forward_pct`).
+With `kill=I@S` or `handoff=I@S`, `event.stall_ms_max` is the longest gap between acknowledged
+appends in the partitions that moved, from the event on. The clients are closed-loop, so while
+they retry on moved scopes they stop issuing work elsewhere: `unmoved_gap_ms_max` shows that
+effect.
