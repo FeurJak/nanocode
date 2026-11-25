@@ -120,6 +120,10 @@ const READ_FORMAT: Dialects = [
     "SELECT CAST(version AS TEXT) FROM nanocode_formats WHERE component = ?1",
     "SELECT CAST(version AS TEXT) FROM nanocode_formats WHERE component = $1::text",
 ];
+const FORMATS_PRESENT: Dialects = [
+    "SELECT CAST(count(*) AS TEXT) FROM sqlite_master WHERE type = 'table' AND name = 'nanocode_formats'",
+    "SELECT CAST(CASE WHEN to_regclass('nanocode_formats') IS NULL THEN 0 ELSE 1 END AS TEXT)",
+];
 const MIGRATE_LOCK_TIMEOUT_MS: u64 = 2_000;
 const MIGRATE_LOCK_TRIES: u32 = 3;
 const LOCK_NOT_AVAILABLE: &str = "55P03";
@@ -392,9 +396,17 @@ pub(crate) async fn check_format<H: Sql + ?Sized>(
     known: u32,
 ) -> Result<(), StoreError> {
     let read = [statement(host.dialect(), &READ_FORMAT, vec![component])];
-    let stored = match single(&run_checked(host, SqlAccess::Read, "format", &read).await?[0])? {
-        Some(row) => counter(row, 0)?,
-        None => 0,
+    let stored = match run_checked(host, SqlAccess::Read, "format", &read).await {
+        Ok(results) => match single(&results[0])? {
+            Some(row) => counter(row, 0)?,
+            None => 0,
+        },
+        Err(error) => {
+            if !formats_absent(host).await? {
+                return Err(error);
+            }
+            0
+        }
     };
     if stored > u64::from(known) {
         return Err(StoreError::UnsupportedFormat {
@@ -411,6 +423,15 @@ pub(crate) async fn check_format<H: Sql + ?Sized>(
         });
     }
     Ok(())
+}
+
+async fn formats_absent<H: Sql + ?Sized>(host: &H) -> Result<bool, StoreError> {
+    if crate::sim::mutated(crate::sim::Mutation::CheckMissesFormats) {
+        return Ok(false);
+    }
+    let probe = [statement(host.dialect(), &FORMATS_PRESENT, Vec::new())];
+    let results = run_checked(host, SqlAccess::Read, "format", &probe).await?;
+    Ok(!column_present(&results[0])?)
 }
 
 fn column_present(rows: &[SqlRow]) -> Result<bool, StoreError> {

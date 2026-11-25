@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, ops::Range, process::ExitCode, sync::Arc, time:
 
 use nanocode_durability_core::{
     Migrated, Sql, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
+    sim::{self as durability_sim, Mutation as DurabilityRule},
 };
 use nanocode_sync::{Atom, block_on};
 use nanocode_turnlog::{
@@ -24,15 +25,17 @@ const DDL: [&str; 3] = ["CREATE ", "ALTER ", "DROP "];
 const READ_FORMAT: &str = "FROM nanocode_formats WHERE component";
 const WRITE_FORMAT: &str = "INSERT INTO nanocode_formats";
 const CREATE_FORMATS: &str = "CREATE TABLE IF NOT EXISTS nanocode_formats";
+const FORMATS_PRESENT: &str = "to_regclass('nanocode_formats')";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MigratedMutation {
     None,
     OpenMigrates,
+    CheckMissesFormats,
 }
 
 impl MigratedMutation {
-    const ALL: [Self; 2] = [Self::None, Self::OpenMigrates];
+    const ALL: [Self; 3] = [Self::None, Self::OpenMigrates, Self::CheckMissesFormats];
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -44,6 +47,7 @@ impl MigratedMutation {
         match self {
             Self::None => "none",
             Self::OpenMigrates => "open_migrates",
+            Self::CheckMissesFormats => "check_misses_formats",
         }
     }
 
@@ -58,8 +62,15 @@ impl MigratedMutation {
 
     const fn rule(self) -> Rule {
         match self {
-            Self::None => Rule::None,
+            Self::None | Self::CheckMissesFormats => Rule::None,
             Self::OpenMigrates => Rule::OpenMigrates,
+        }
+    }
+
+    const fn durability(self) -> DurabilityRule {
+        match self {
+            Self::CheckMissesFormats => DurabilityRule::CheckMissesFormats,
+            Self::None | Self::OpenMigrates => DurabilityRule::None,
         }
     }
 }
@@ -123,6 +134,9 @@ impl Recorder {
                 if statement.sql.starts_with(CREATE_FORMATS) {
                     next.formats_table = true;
                     results.push(Vec::new());
+                } else if statement.sql.contains(FORMATS_PRESENT) {
+                    let present = u8::from(next.formats_table);
+                    results.push(vec![vec![Some(present.to_string())]]);
                 } else if statement.sql.contains(READ_FORMAT) {
                     if !next.formats_table {
                         return Err(StoreError::Backend(
@@ -202,8 +216,11 @@ fn judged(
 ) -> Option<String> {
     match (want, answer) {
         (Expect::Current, Ok(migrated)) if migrated.component() == component => None,
-        (Expect::Behind, Err(StoreError::SchemaBehind { .. })) => None,
-        (Expect::Behind, Err(StoreError::Backend(_))) if !formats_table => None,
+        (Expect::Behind, Err(StoreError::SchemaBehind { stored, .. }))
+            if formats_table || *stored == 0 =>
+        {
+            None
+        }
         (Expect::Ahead, Err(StoreError::UnsupportedFormat { .. })) => None,
         _ => Some(format!(
             "{component} check expected {want:?}, answered {answer:?}"
@@ -295,6 +312,7 @@ fn run_seed(seed: u64, mutation: MigratedMutation) -> Outcome {
         database: Atom::new(database),
     });
     log_sim::mutate(mutation.rule());
+    durability_sim::mutate(mutation.durability());
     let wrong = block_on(async {
         let before = (*host.database.get()).clone();
         let wants = COMPONENTS.map(|component| expect(&before, component));
@@ -343,6 +361,7 @@ fn run_seed(seed: u64, mutation: MigratedMutation) -> Outcome {
         ddl_in(&host.database.get(), Phase::Serve)
     });
     log_sim::mutate(Rule::None);
+    durability_sim::mutate(DurabilityRule::None);
     let database = host.database.get();
     stats.statements = database.issued.len() as u64;
     let digest = database
