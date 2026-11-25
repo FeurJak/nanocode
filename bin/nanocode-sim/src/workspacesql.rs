@@ -76,17 +76,31 @@ const SWEEP: Sweep = Sweep {
 const OBJECT: &str = "@object";
 const GONE: &str = "@gone:";
 const OBJECT_PREFIX: &str = "blobs/";
-const TOMBSTONE: &str =
-    "INSERT INTO nanocode_workspace_blobs (digest, data, refs) SELECT value, ?2, 0 ";
-const DEAD: &str = "SELECT digest, data FROM nanocode_workspace_blobs WHERE refs <= 0 ";
+const COLLECT_PPM: u64 = 150_000;
+const COLLECT_LIMIT: usize = 4;
+const COLLECT_TICKS_MAX: u64 = 8;
+const GRACE_MS_MAX: u64 = 12;
+const COLLECT_ALL_PPM: u64 = 200_000;
+const TOMBSTONE: &str = "INSERT INTO nanocode_workspace_blobs (digest, data) SELECT value, ?2 ";
+const DEAD: &str = "SELECT digest, data FROM nanocode_workspace_blobs WHERE data LIKE ";
+const BACKFILL_REFS: &str =
+    "INSERT INTO nanocode_workspace_refs (digest, workspace) SELECT DISTINCT ";
+const BACKFILL_ORPHANS: &str = "UPDATE nanocode_workspace_blobs SET orphaned = CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) WHERE data NOT LIKE ";
+const PAGE: &str = "SELECT digest FROM nanocode_workspace_blobs WHERE digest > ?1 ";
+const UNMARK: &str =
+    "UPDATE nanocode_workspace_blobs SET orphaned = NULL WHERE digest IN (SELECT digest FROM ";
+const MARK: &str = "UPDATE nanocode_workspace_blobs SET orphaned = CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) WHERE digest IN (SELECT digest FROM ";
+const PURGE: &str = "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT digest FROM nanocode_workspace_blobs WHERE orphaned IS NOT NULL ";
+const UNREFERENCED: &str = "NOT EXISTS (SELECT 1 FROM nanocode_workspace_refs ";
 const EXPIRE: &str = "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT value FROM json_each(?1)) AND data IN ";
 const CAS: &str = "AND version = ";
-const GATED: [&str; 5] = [
+const GATED: [&str; 6] = [
     "DELETE FROM nanocode_workspace_entries ",
     "INSERT INTO nanocode_workspace_entries ",
     "INSERT INTO nanocode_workspace_blobs ",
-    "UPDATE nanocode_workspace_blobs SET refs = refs - 1 ",
-    "DELETE FROM nanocode_workspace_blobs ",
+    "UPDATE nanocode_workspace_blobs SET orphaned = NULL WHERE digest IN (SELECT value ",
+    "INSERT INTO nanocode_workspace_refs ",
+    "DELETE FROM nanocode_workspace_refs ",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,16 +110,18 @@ pub enum WorkspaceSqlMutation {
     ReleaseBeforeCommit,
     SplitTransaction,
     SweepSkipsTombstone,
+    SweepIgnoresRefs,
     StaleReadSkipsReload,
 }
 
 impl WorkspaceSqlMutation {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::None,
         Self::SkipVersionCas,
         Self::ReleaseBeforeCommit,
         Self::SplitTransaction,
         Self::SweepSkipsTombstone,
+        Self::SweepIgnoresRefs,
         Self::StaleReadSkipsReload,
     ];
 
@@ -122,6 +138,7 @@ impl WorkspaceSqlMutation {
             Self::ReleaseBeforeCommit => "release_before_commit",
             Self::SplitTransaction => "split_transaction",
             Self::SweepSkipsTombstone => "sweep_skips_tombstone",
+            Self::SweepIgnoresRefs => "sweep_ignores_refs",
             Self::StaleReadSkipsReload => "stale_read_skips_reload",
         }
     }
@@ -142,6 +159,7 @@ impl WorkspaceSqlMutation {
             Self::ReleaseBeforeCommit => FsRule::SqlReleaseBeforeCommit,
             Self::SplitTransaction => FsRule::SqlSplitTransaction,
             Self::SweepSkipsTombstone => FsRule::SqlSweepSkipsTombstone,
+            Self::SweepIgnoresRefs => FsRule::SqlSweepIgnoresRefs,
             Self::StaleReadSkipsReload => FsRule::StaleReadSkipsReload,
         }
     }
@@ -166,6 +184,8 @@ pub struct WorkspaceSqlStats {
     pub max_version: u64,
     pub sweeps: u64,
     pub reaped: u64,
+    pub collects: u64,
+    pub purged: u64,
 }
 
 impl WorkspaceSqlStats {
@@ -186,6 +206,8 @@ impl WorkspaceSqlStats {
         self.shared += other.shared;
         self.sweeps += other.sweeps;
         self.reaped += other.reaped;
+        self.collects += other.collects;
+        self.purged += other.purged;
         if other.max_version > self.max_version {
             self.max_version = other.max_version;
         }
@@ -207,7 +229,8 @@ struct Tables {
     formats: BTreeMap<String, String>,
     heads: BTreeMap<String, (u64, String)>,
     entries: BTreeMap<(String, String), Row>,
-    blobs: BTreeMap<String, (String, i64)>,
+    blobs: BTreeMap<String, (String, Option<u64>)>,
+    refs: BTreeSet<(String, String)>,
 }
 
 fn refused(why: impl Into<String>) -> StoreError {
@@ -328,10 +351,134 @@ impl Tables {
             .collect()
     }
 
-    fn execute(&mut self, statement: &SqlStatement<'_>) -> Result<Vec<SqlRow>, StoreError> {
+    fn referenced(&self, digest: &str) -> bool {
+        self.refs
+            .range((digest.to_owned(), String::new())..)
+            .next()
+            .is_some_and(|(held, _)| held == digest)
+    }
+
+    fn page(&self, statement: &SqlStatement<'_>) -> Result<Vec<String>, StoreError> {
+        let after = param(statement, 0)?.to_owned();
+        let limit: usize = param(statement, 1)?
+            .parse()
+            .map_err(|_| refused("a limit does not parse"))?;
+        Ok(self
+            .blobs
+            .range::<String, _>((
+                std::ops::Bound::Excluded(&after),
+                std::ops::Bound::Unbounded,
+            ))
+            .take(limit)
+            .map(|(digest, _)| digest.clone())
+            .collect())
+    }
+
+    fn collect(
+        &mut self,
+        statement: &SqlStatement<'_>,
+        now: u64,
+    ) -> Result<Option<Vec<SqlRow>>, StoreError> {
         let sql = statement.sql;
-        if sql.starts_with("CREATE TABLE IF NOT EXISTS ") {
+        let checks = sql.contains(UNREFERENCED);
+        let mut touched = Vec::new();
+        if sql.starts_with(PAGE) {
+            touched = self.page(statement)?;
+        } else if sql.starts_with(UNMARK) {
+            for digest in self.page(statement)? {
+                let referenced = self.referenced(&digest);
+                if let Some((_, orphaned)) = self.blobs.get_mut(&digest)
+                    && orphaned.is_some()
+                    && referenced
+                {
+                    *orphaned = None;
+                    touched.push(digest);
+                }
+            }
+        } else if sql.starts_with(MARK) {
+            for digest in self.page(statement)? {
+                let free = !checks || !self.referenced(&digest);
+                if let Some((data, orphaned)) = self.blobs.get_mut(&digest)
+                    && orphaned.is_none()
+                    && !data.starts_with(GONE)
+                    && free
+                {
+                    *orphaned = Some(now);
+                    touched.push(digest);
+                }
+            }
+        } else if sql.starts_with(PURGE) {
+            let grace: u64 = param(statement, 0)?
+                .parse()
+                .map_err(|_| refused("a grace does not parse"))?;
+            let limit: usize = param(statement, 1)?
+                .parse()
+                .map_err(|_| refused("a limit does not parse"))?;
+            let Some(edge) = now.checked_sub(grace) else {
+                return Ok(Some(Vec::new()));
+            };
+            let mut old: Vec<(u64, String)> = self
+                .blobs
+                .iter()
+                .filter_map(|(digest, (_, orphaned))| {
+                    orphaned
+                        .filter(|at| *at < edge)
+                        .map(|at| (at, digest.clone()))
+                })
+                .collect();
+            old.sort_unstable();
+            for (_, digest) in old.into_iter().take(limit) {
+                if !checks || !self.referenced(&digest) {
+                    self.blobs.remove(&digest);
+                    touched.push(digest);
+                }
+            }
+        } else if sql.starts_with(BACKFILL_REFS) {
+            let held: Vec<(String, String)> = self
+                .entries
+                .iter()
+                .filter_map(|((workspace, _), row)| {
+                    row.digest.clone().map(|digest| (digest, workspace.clone()))
+                })
+                .collect();
+            self.refs.extend(held);
+        } else if sql.starts_with(BACKFILL_ORPHANS) {
+            let free: Vec<String> = self
+                .blobs
+                .iter()
+                .filter(|(digest, (data, _))| !data.starts_with(GONE) && !self.referenced(digest))
+                .map(|(digest, _)| digest.clone())
+                .collect();
+            for digest in free {
+                if let Some((_, orphaned)) = self.blobs.get_mut(&digest) {
+                    *orphaned = Some(now);
+                }
+            }
+        } else {
+            return Ok(None);
+        }
+        Ok(Some(
+            touched
+                .into_iter()
+                .map(|digest| vec![Some(digest)])
+                .collect(),
+        ))
+    }
+
+    fn execute(
+        &mut self,
+        statement: &SqlStatement<'_>,
+        now: u64,
+    ) -> Result<Vec<SqlRow>, StoreError> {
+        let sql = statement.sql;
+        if sql.starts_with("CREATE TABLE IF NOT EXISTS ")
+            || sql.starts_with("ALTER TABLE ")
+            || sql.starts_with("DROP INDEX IF EXISTS ")
+        {
             return Ok(Vec::new());
+        }
+        if let Some(rows) = self.collect(statement, now)? {
+            return Ok(rows);
         }
         if sql.starts_with("SELECT CAST(version AS TEXT) FROM nanocode_formats ") {
             let held = self.formats.get(param(statement, 0)?);
@@ -351,7 +498,7 @@ impl Tables {
             for digest in texts(param(statement, 0)?)? {
                 self.blobs
                     .entry(digest)
-                    .or_insert_with(|| (mark.to_owned(), 0));
+                    .or_insert_with(|| (mark.to_owned(), None));
             }
             return Ok(Vec::new());
         }
@@ -362,7 +509,7 @@ impl Tables {
             return Ok(self
                 .blobs
                 .iter()
-                .filter(|(_, (_, refs))| *refs <= 0)
+                .filter(|(_, (data, _))| data.starts_with(GONE))
                 .take(limit)
                 .map(|(digest, (data, _))| vec![Some(digest.clone()), Some(data.clone())])
                 .collect());
@@ -373,7 +520,7 @@ impl Tables {
                 if self
                     .blobs
                     .get(&digest)
-                    .is_some_and(|(data, refs)| *refs <= 0 && marks.contains(data))
+                    .is_some_and(|(data, _)| marks.contains(data))
                 {
                     self.blobs.remove(&digest);
                 }
@@ -468,24 +615,24 @@ impl Tables {
             let data = param(statement, 3)?;
             self.blobs
                 .entry(list.to_owned())
-                .and_modify(|(held, refs)| {
-                    *refs += 1;
-                    if held.starts_with(GONE) {
-                        data.clone_into(held);
-                    }
-                })
-                .or_insert_with(|| (data.to_owned(), 1));
+                .or_insert_with(|| (data.to_owned(), None));
         } else if sql.starts_with(GATED[3]) {
             for digest in texts(list)? {
-                if let Some((_, refs)) = self.blobs.get_mut(&digest) {
-                    *refs -= 1;
+                if let Some((_, orphaned)) = self.blobs.get_mut(&digest) {
+                    *orphaned = None;
+                }
+            }
+        } else if sql.starts_with(GATED[4]) {
+            for digest in texts(list)? {
+                if !self.refs.insert((digest.clone(), workspace.to_owned())) {
+                    return Err(refused(format!(
+                        "UNIQUE constraint failed: {workspace} already references {digest}"
+                    )));
                 }
             }
         } else {
             for digest in texts(list)? {
-                if self.blobs.get(&digest).is_some_and(|(_, refs)| *refs <= 0) {
-                    self.blobs.remove(&digest);
-                }
+                self.refs.remove(&(digest, workspace.to_owned()));
             }
         }
         Ok(())
@@ -605,6 +752,7 @@ struct SimSql {
     transactions: AtomicU64,
     aborts: AtomicU64,
     crashes_after: AtomicU64,
+    now: AtomicU64,
 }
 
 impl SimSql {
@@ -631,7 +779,7 @@ impl SimSql {
             if cut == Some(results.len()) {
                 break;
             }
-            results.push(scratch.execute(statement)?);
+            results.push(scratch.execute(statement, self.now.load(Ordering::Relaxed))?);
         }
         if let Some(cut) = cut {
             self.aborts.fetch_add(1, Ordering::Relaxed);
@@ -814,6 +962,9 @@ struct World {
     sweeper: Option<Rc<SqlStore>>,
     cursor: Rc<RefCell<String>>,
     reaped: Rc<Cell<u64>>,
+    collected: Rc<RefCell<String>>,
+    purged: Rc<Cell<u64>>,
+    grace_ms: u64,
 }
 
 impl World {
@@ -830,9 +981,6 @@ impl World {
     }
 
     fn open_sweeper(&mut self) -> Result<(), String> {
-        if self.objects.is_none() {
-            return Ok(());
-        }
         for _ in 0..OPENS_MAX {
             if let Ok(store) = self.store()? {
                 self.sweeper = Some(Rc::new(store));
@@ -863,6 +1011,64 @@ impl World {
             *cursor.borrow_mut() = swept.next.unwrap_or_default();
             Ok(())
         }))
+    }
+
+    fn collect(&mut self) -> Option<Flying> {
+        let collector = Rc::clone(self.sweeper.as_ref()?);
+        if !self.rng.chance(COLLECT_PPM) {
+            return None;
+        }
+        let ticks = self.rng.below(COLLECT_TICKS_MAX + 1);
+        self.host.now.fetch_add(ticks, Ordering::Relaxed);
+        self.stats.collects += 1;
+        let (cursor, purged) = (Rc::clone(&self.collected), Rc::clone(&self.purged));
+        let grace_ms = self.grace_ms;
+        Some(Box::pin(async move {
+            let after = cursor.borrow().clone();
+            let collected = collector
+                .collect(&after, grace_ms, COLLECT_LIMIT)
+                .await
+                .map_err(|failure| io::Error::other(failure.to_string()))?;
+            purged.set(purged.get() + collected.deleted as u64);
+            *cursor.borrow_mut() = collected.next.unwrap_or_default();
+            Ok(())
+        }))
+    }
+
+    fn collect_all(&mut self) -> Result<(), String> {
+        let Some(collector) = self.sweeper.clone() else {
+            return Ok(());
+        };
+        self.stats.collects += 1;
+        for _ in 0..2 {
+            self.host
+                .now
+                .fetch_add(self.grace_ms + 1, Ordering::Relaxed);
+            let mut after = String::new();
+            loop {
+                let Ok(collected) = drive(collector.collect(&after, self.grace_ms, COLLECT_LIMIT))?
+                else {
+                    break;
+                };
+                self.purged
+                    .set(self.purged.get() + collected.deleted as u64);
+                match collected.next {
+                    Some(next) => after = next,
+                    None => break,
+                }
+            }
+        }
+        self.check_commits()
+    }
+
+    fn migrate(&mut self) -> Result<(), String> {
+        for _ in 0..OPENS_MAX {
+            if drive(SqlStore::migrate(&*self.host))?.is_ok() {
+                return Ok(());
+            }
+            self.stats.failed_opens += 1;
+        }
+        Err(format!("the store failed to migrate {OPENS_MAX} times"))
     }
 
     fn open(&mut self, workspace: usize) -> Result<WorkspaceFs, String> {
@@ -969,59 +1175,62 @@ impl World {
     }
 
     fn check_refs(&mut self, snapshot: &Tables) -> Result<(), String> {
-        let mut holders: BTreeMap<&str, i64> = BTreeMap::new();
+        let short = |digest: &str| digest[..digest.len().min(DIGEST_SHOWN)].to_owned();
+        let mut held: BTreeSet<(&str, &str)> = BTreeSet::new();
         for name in WORKSPACES {
-            let held: BTreeSet<&str> = snapshot
-                .rows_of(name)
-                .filter(|(_, row)| row.kind == FILE)
-                .filter_map(|(_, row)| row.digest.as_deref())
-                .collect();
-            for digest in held {
-                *holders.entry(digest).or_default() += 1;
+            for (_, row) in snapshot.rows_of(name).filter(|(_, row)| row.kind == FILE) {
+                if let Some(digest) = row.digest.as_deref() {
+                    held.insert((digest, name));
+                }
             }
         }
-        if holders.values().any(|count| *count > 1) {
+        let holders: BTreeSet<&str> = held.iter().map(|(digest, _)| *digest).collect();
+        if holders.len() < held.len() {
             self.stats.shared += 1;
         }
-        for (digest, (data, refs)) in &snapshot.blobs {
-            let short = &digest[..digest.len().min(DIGEST_SHOWN)];
+        let rows: BTreeSet<(&str, &str)> = snapshot
+            .refs
+            .iter()
+            .map(|(digest, name)| (digest.as_str(), name.as_str()))
+            .collect();
+        if let Some((digest, name)) = held.difference(&rows).next() {
+            return Err(format!(
+                "{name} holds blob {} with no reference row",
+                short(digest)
+            ));
+        }
+        if let Some((digest, name)) = rows.difference(&held).next() {
+            return Err(format!(
+                "{name} has a reference row for blob {} that its manifest does not hold",
+                short(digest)
+            ));
+        }
+        for digest in holders {
+            let Some((data, _)) = snapshot.blobs.get(digest) else {
+                return Err(format!(
+                    "the held digest {digest} has no blob: a collect deleted a referenced blob"
+                ));
+            };
             if data.starts_with(GONE) {
-                if holders.contains_key(digest.as_str()) || *refs > 0 {
-                    return Err(format!("the tombstoned blob {short} is still held"));
-                }
-                continue;
-            }
-            match holders.get(digest.as_str()) {
-                Some(count) if count == refs => {}
-                Some(count) => {
-                    return Err(format!(
-                        "blob {short} counts {refs} references for {count} holders"
-                    ));
-                }
-                None => {
-                    return Err(format!(
-                        "blob {short} outlives its last holder with {refs} references"
-                    ));
-                }
+                return Err(format!(
+                    "the tombstoned blob {} is still held",
+                    short(digest)
+                ));
             }
             let bytes = match (&self.objects, data == OBJECT) {
                 (Some(objects), true) => objects
                     .bytes(digest)
-                    .ok_or_else(|| format!("blob {short} lost its object"))?,
-                (None, true) => return Err(format!("blob {short} points at no object store")),
+                    .ok_or_else(|| format!("blob {} lost its object", short(digest)))?,
+                (None, true) => {
+                    return Err(format!("blob {} points at no object store", short(digest)));
+                }
                 _ => STANDARD
                     .decode(data)
-                    .map_err(|_| format!("blob {short} is not base64"))?,
+                    .map_err(|_| format!("blob {} is not base64", short(digest)))?,
             };
-            if Digest::of(&bytes).hex() != *digest {
-                return Err(format!("blob {short} holds other bytes"));
+            if Digest::of(&bytes).hex() != digest {
+                return Err(format!("blob {} holds other bytes", short(digest)));
             }
-        }
-        if let Some(digest) = holders
-            .keys()
-            .find(|digest| !snapshot.blobs.contains_key(**digest))
-        {
-            return Err(format!("the held digest {digest} has no blob"));
         }
         Ok(())
     }
@@ -1111,6 +1320,10 @@ impl World {
         };
         if let Some(sweep) = self.sweep() {
             flight.future = Some(sweep);
+            return Ok(flight);
+        }
+        if let Some(collect) = self.collect() {
+            flight.future = Some(collect);
             return Ok(flight);
         }
         let kind = self.rng.below(10);
@@ -1255,6 +1468,9 @@ impl World {
         for flight in &flights {
             self.judge(flight, &flights, &crashed)?;
         }
+        if self.rng.chance(COLLECT_ALL_PPM) {
+            self.collect_all()?;
+        }
         self.check_stale_reads()?;
         for writer in crashed {
             self.reopen(writer)?;
@@ -1351,15 +1567,16 @@ impl World {
             .iter()
             .map(|(name, (version, _))| (name, *version))
             .collect();
-        let refs: Vec<(&String, i64)> = self
+        let blobs: Vec<(&String, Option<u64>)> = self
             .seen
             .blobs
             .iter()
-            .map(|(digest, (_, refs))| (digest, *refs))
+            .map(|(digest, (_, orphaned))| (digest, *orphaned))
             .collect();
         let mut hash = fnv(FNV_OFFSET, format!("{heads:?}").as_bytes());
         hash = fnv(hash, format!("{:?}", self.seen.entries).as_bytes());
-        hash = fnv(hash, format!("{refs:?}").as_bytes());
+        hash = fnv(hash, format!("{blobs:?}").as_bytes());
+        hash = fnv(hash, format!("{:?}", self.seen.refs).as_bytes());
         fnv(hash, format!("{:?}", self.stats).as_bytes())
     }
 }
@@ -1399,6 +1616,7 @@ fn world(seed: u64) -> (World, u64, String) {
         transactions: AtomicU64::new(0),
         aborts: AtomicU64::new(0),
         crashes_after: AtomicU64::new(0),
+        now: AtomicU64::new(0),
     });
     let objects = (fs_sim::mutated(FsRule::SqlSweepSkipsTombstone)
         || Rng::derive(seed, "workspace-sql-objects").chance(OBJECTS_PPM))
@@ -1408,7 +1626,8 @@ fn world(seed: u64) -> (World, u64, String) {
             now: Arc::new(AtomicU64::new(0)),
         })
     });
-    let shape = format!("{shape} objects={}", objects.is_some());
+    let grace_ms = Rng::derive(seed, "workspace-sql-grace").below(GRACE_MS_MAX + 1);
+    let shape = format!("{shape} objects={} grace_ms={grace_ms}", objects.is_some());
     let world = World {
         rng,
         caps,
@@ -1429,11 +1648,15 @@ fn world(seed: u64) -> (World, u64, String) {
         sweeper: None,
         cursor: Rc::new(RefCell::new(String::new())),
         reaped: Rc::new(Cell::new(0)),
+        collected: Rc::new(RefCell::new(String::new())),
+        purged: Rc::new(Cell::new(0)),
+        grace_ms,
     };
     (world, rounds, shape)
 }
 
 fn play(world: &mut World, rounds: u64) -> Result<(), String> {
+    world.migrate()?;
     for workspace in WRITERS {
         let opened = world
             .open(workspace)
@@ -1465,6 +1688,7 @@ fn simulate(seed: u64, mutation: WorkspaceSqlMutation) -> WorkspaceSqlOutcome {
     world.stats.aborts = world.host.aborts.load(Ordering::Relaxed);
     world.stats.crashes_after = world.host.crashes_after.load(Ordering::Relaxed);
     world.stats.reaped = world.reaped.get();
+    world.stats.purged = world.purged.get();
     WorkspaceSqlOutcome {
         digest: world.digest(),
         wrong,

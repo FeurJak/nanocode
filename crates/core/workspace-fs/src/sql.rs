@@ -33,7 +33,29 @@ const DEAD_INDEX: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS nanocode_workspace_blobs_dead ON nanocode_workspace_blobs (digest) WHERE refs <= 0",
 ];
 
-const MIGRATIONS: [Migration; 2] = [
+const REFS_SQLITE: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS nanocode_workspace_refs (digest TEXT NOT NULL, workspace TEXT NOT NULL, PRIMARY KEY (digest, workspace)) WITHOUT ROWID",
+    "INSERT INTO nanocode_workspace_refs (digest, workspace) SELECT DISTINCT digest, workspace FROM nanocode_workspace_entries WHERE digest IS NOT NULL ON CONFLICT DO NOTHING",
+    "ALTER TABLE nanocode_workspace_blobs ADD COLUMN orphaned INTEGER",
+    "UPDATE nanocode_workspace_blobs SET orphaned = CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) WHERE data NOT LIKE '@gone:%' AND NOT EXISTS (SELECT 1 FROM nanocode_workspace_refs WHERE nanocode_workspace_refs.digest = nanocode_workspace_blobs.digest)",
+    "DROP INDEX IF EXISTS nanocode_workspace_blobs_dead",
+    "ALTER TABLE nanocode_workspace_blobs DROP COLUMN refs",
+    "CREATE INDEX IF NOT EXISTS nanocode_workspace_blobs_gone ON nanocode_workspace_blobs (digest) WHERE data LIKE '@gone:%'",
+    "CREATE INDEX IF NOT EXISTS nanocode_workspace_blobs_orphaned ON nanocode_workspace_blobs (orphaned) WHERE orphaned IS NOT NULL",
+];
+
+const REFS_POSTGRES: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS nanocode_workspace_refs (digest TEXT NOT NULL, workspace TEXT NOT NULL, PRIMARY KEY (digest, workspace))",
+    "INSERT INTO nanocode_workspace_refs (digest, workspace) SELECT DISTINCT digest, workspace FROM nanocode_workspace_entries WHERE digest IS NOT NULL ON CONFLICT DO NOTHING",
+    "ALTER TABLE nanocode_workspace_blobs ADD COLUMN IF NOT EXISTS orphaned BIGINT",
+    "UPDATE nanocode_workspace_blobs SET orphaned = CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) WHERE orphaned IS NULL AND data NOT LIKE '@gone:%' AND NOT EXISTS (SELECT 1 FROM nanocode_workspace_refs WHERE nanocode_workspace_refs.digest = nanocode_workspace_blobs.digest)",
+    "DROP INDEX IF EXISTS nanocode_workspace_blobs_dead",
+    "ALTER TABLE nanocode_workspace_blobs DROP COLUMN IF EXISTS refs",
+    "CREATE INDEX IF NOT EXISTS nanocode_workspace_blobs_gone ON nanocode_workspace_blobs (digest) WHERE data LIKE '@gone:%'",
+    "CREATE INDEX IF NOT EXISTS nanocode_workspace_blobs_orphaned ON nanocode_workspace_blobs (orphaned) WHERE orphaned IS NOT NULL",
+];
+
+const MIGRATIONS: [Migration; 3] = [
     Migration {
         statements: [SCHEMA_SQLITE, SCHEMA_POSTGRES],
         adopt: None,
@@ -42,6 +64,15 @@ const MIGRATIONS: [Migration; 2] = [
         statements: [DEAD_INDEX, DEAD_INDEX],
         adopt: None,
     },
+    Migration {
+        statements: [REFS_SQLITE, REFS_POSTGRES],
+        adopt: None,
+    },
+];
+
+const FORMAT: Dialects = [
+    "SELECT CAST(version AS TEXT) FROM nanocode_formats WHERE component = ?1",
+    "SELECT CAST(version AS TEXT) FROM nanocode_formats WHERE component = $1::text",
 ];
 
 const LOAD: Dialects = [
@@ -74,29 +105,59 @@ const PUT: Dialects = [
     "INSERT INTO nanocode_workspace_entries (workspace, path, kind, digest, size, mode, mtime, target) SELECT $1::text, e->>0, e->>1, e->>2, CAST(e->>3 AS BIGINT), CAST(e->>4 AS BIGINT), CAST(e->>5 AS BIGINT), e->>6 FROM jsonb_array_elements($3::text::jsonb) AS e WHERE EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = $1::text AND token = $2::text)",
 ];
 
+const REVIVE: Dialects = [
+    "UPDATE nanocode_workspace_blobs SET orphaned = NULL WHERE digest IN (SELECT value FROM json_each(?3)) AND orphaned IS NOT NULL AND EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = ?1 AND token = ?2)",
+    "UPDATE nanocode_workspace_blobs SET orphaned = NULL FROM (SELECT e FROM jsonb_array_elements_text($3::text::jsonb) AS e ORDER BY e) AS fresh WHERE nanocode_workspace_blobs.digest = fresh.e AND nanocode_workspace_blobs.orphaned IS NOT NULL AND EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = $1::text AND token = $2::text)",
+];
+
 const ADD_BLOB: Dialects = [
-    "INSERT INTO nanocode_workspace_blobs (digest, data, refs) SELECT ?3, ?4, 1 WHERE EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = ?1 AND token = ?2) ON CONFLICT (digest) DO UPDATE SET refs = nanocode_workspace_blobs.refs + 1, data = CASE WHEN nanocode_workspace_blobs.data LIKE '@gone:%' THEN excluded.data ELSE nanocode_workspace_blobs.data END",
-    "INSERT INTO nanocode_workspace_blobs (digest, data, refs) SELECT $3::text, $4::text, 1 WHERE EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = $1::text AND token = $2::text) ON CONFLICT (digest) DO UPDATE SET refs = nanocode_workspace_blobs.refs + 1, data = CASE WHEN nanocode_workspace_blobs.data LIKE '@gone:%' THEN excluded.data ELSE nanocode_workspace_blobs.data END",
+    "INSERT INTO nanocode_workspace_blobs (digest, data) SELECT ?3, ?4 WHERE EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = ?1 AND token = ?2) ON CONFLICT (digest) DO NOTHING",
+    "INSERT INTO nanocode_workspace_blobs (digest, data) SELECT $3::text, $4::text WHERE EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = $1::text AND token = $2::text) ON CONFLICT (digest) DO NOTHING",
 ];
 
-const RELEASE_BLOBS: Dialects = [
-    "UPDATE nanocode_workspace_blobs SET refs = refs - 1 WHERE digest IN (SELECT value FROM json_each(?3)) AND EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = ?1 AND token = ?2)",
-    "UPDATE nanocode_workspace_blobs SET refs = refs - 1 WHERE digest IN (SELECT jsonb_array_elements_text($3::text::jsonb)) AND EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = $1::text AND token = $2::text)",
+const ADD_REFS: Dialects = [
+    "INSERT INTO nanocode_workspace_refs (digest, workspace) SELECT value, ?1 FROM json_each(?3) WHERE EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = ?1 AND token = ?2)",
+    "INSERT INTO nanocode_workspace_refs (digest, workspace) SELECT e, $1::text FROM jsonb_array_elements_text($3::text::jsonb) AS e WHERE EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = $1::text AND token = $2::text)",
 ];
 
-const DROP_BLOBS: Dialects = [
-    "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT value FROM json_each(?3)) AND refs <= 0 AND EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = ?1 AND token = ?2)",
-    "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT jsonb_array_elements_text($3::text::jsonb)) AND refs <= 0 AND EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = $1::text AND token = $2::text)",
-];
-
-const RELEASE_EARLY: Dialects = [
-    "UPDATE nanocode_workspace_blobs SET refs = refs - 1 WHERE digest IN (SELECT value FROM json_each(?3)) AND ?1 IS NOT NULL AND ?2 IS NOT NULL",
-    "UPDATE nanocode_workspace_blobs SET refs = refs - 1 WHERE digest IN (SELECT jsonb_array_elements_text($3::text::jsonb)) AND $1::text IS NOT NULL AND $2::text IS NOT NULL",
+const DROP_REFS: Dialects = [
+    "DELETE FROM nanocode_workspace_refs WHERE workspace = ?1 AND digest IN (SELECT value FROM json_each(?3)) AND EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = ?1 AND token = ?2)",
+    "DELETE FROM nanocode_workspace_refs WHERE workspace = $1::text AND digest IN (SELECT jsonb_array_elements_text($3::text::jsonb)) AND EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = $1::text AND token = $2::text)",
 ];
 
 const DROP_EARLY: Dialects = [
-    "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT value FROM json_each(?3)) AND refs <= 0 AND ?1 IS NOT NULL AND ?2 IS NOT NULL",
-    "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT jsonb_array_elements_text($3::text::jsonb)) AND refs <= 0 AND $1::text IS NOT NULL AND $2::text IS NOT NULL",
+    "DELETE FROM nanocode_workspace_refs WHERE workspace = ?1 AND digest IN (SELECT value FROM json_each(?3)) AND ?2 IS NOT NULL",
+    "DELETE FROM nanocode_workspace_refs WHERE workspace = $1::text AND digest IN (SELECT jsonb_array_elements_text($3::text::jsonb)) AND $2::text IS NOT NULL",
+];
+
+const PAGE: Dialects = [
+    "SELECT digest FROM nanocode_workspace_blobs WHERE digest > ?1 ORDER BY digest LIMIT CAST(?2 AS INTEGER)",
+    "SELECT digest FROM nanocode_workspace_blobs WHERE digest > $1::text ORDER BY digest LIMIT CAST($2::text AS BIGINT)",
+];
+
+const UNMARK: Dialects = [
+    "UPDATE nanocode_workspace_blobs SET orphaned = NULL WHERE digest IN (SELECT digest FROM nanocode_workspace_blobs WHERE digest > ?1 ORDER BY digest LIMIT CAST(?2 AS INTEGER)) AND orphaned IS NOT NULL AND EXISTS (SELECT 1 FROM nanocode_workspace_refs WHERE nanocode_workspace_refs.digest = nanocode_workspace_blobs.digest) RETURNING digest",
+    "UPDATE nanocode_workspace_blobs SET orphaned = NULL FROM (SELECT digest FROM nanocode_workspace_blobs WHERE digest > $1::text ORDER BY digest LIMIT CAST($2::text AS BIGINT)) AS page WHERE nanocode_workspace_blobs.digest = page.digest AND nanocode_workspace_blobs.orphaned IS NOT NULL AND EXISTS (SELECT 1 FROM nanocode_workspace_refs WHERE nanocode_workspace_refs.digest = nanocode_workspace_blobs.digest) RETURNING nanocode_workspace_blobs.digest",
+];
+
+const MARK: Dialects = [
+    "UPDATE nanocode_workspace_blobs SET orphaned = CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) WHERE digest IN (SELECT digest FROM nanocode_workspace_blobs WHERE digest > ?1 ORDER BY digest LIMIT CAST(?2 AS INTEGER)) AND orphaned IS NULL AND data NOT LIKE '@gone:%' AND NOT EXISTS (SELECT 1 FROM nanocode_workspace_refs WHERE nanocode_workspace_refs.digest = nanocode_workspace_blobs.digest) RETURNING digest",
+    "UPDATE nanocode_workspace_blobs SET orphaned = CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) FROM (SELECT digest FROM nanocode_workspace_blobs WHERE digest > $1::text ORDER BY digest LIMIT CAST($2::text AS BIGINT)) AS page WHERE nanocode_workspace_blobs.digest = page.digest AND nanocode_workspace_blobs.orphaned IS NULL AND nanocode_workspace_blobs.data NOT LIKE '@gone:%' AND NOT EXISTS (SELECT 1 FROM nanocode_workspace_refs WHERE nanocode_workspace_refs.digest = nanocode_workspace_blobs.digest) RETURNING nanocode_workspace_blobs.digest",
+];
+
+const MARK_ANY: Dialects = [
+    "UPDATE nanocode_workspace_blobs SET orphaned = CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) WHERE digest IN (SELECT digest FROM nanocode_workspace_blobs WHERE digest > ?1 ORDER BY digest LIMIT CAST(?2 AS INTEGER)) AND orphaned IS NULL AND data NOT LIKE '@gone:%' RETURNING digest",
+    "UPDATE nanocode_workspace_blobs SET orphaned = CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) FROM (SELECT digest FROM nanocode_workspace_blobs WHERE digest > $1::text ORDER BY digest LIMIT CAST($2::text AS BIGINT)) AS page WHERE nanocode_workspace_blobs.digest = page.digest AND nanocode_workspace_blobs.orphaned IS NULL AND nanocode_workspace_blobs.data NOT LIKE '@gone:%' RETURNING nanocode_workspace_blobs.digest",
+];
+
+const PURGE: Dialects = [
+    "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT digest FROM nanocode_workspace_blobs WHERE orphaned IS NOT NULL AND orphaned < CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) - CAST(?1 AS INTEGER) ORDER BY orphaned, digest LIMIT CAST(?2 AS INTEGER)) AND orphaned < CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) - CAST(?1 AS INTEGER) AND NOT EXISTS (SELECT 1 FROM nanocode_workspace_refs WHERE nanocode_workspace_refs.digest = nanocode_workspace_blobs.digest) RETURNING digest",
+    "DELETE FROM nanocode_workspace_blobs USING (SELECT digest FROM nanocode_workspace_blobs WHERE orphaned IS NOT NULL AND orphaned < CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) - CAST($1::text AS BIGINT) ORDER BY orphaned, digest LIMIT CAST($2::text AS BIGINT)) AS dead WHERE nanocode_workspace_blobs.digest = dead.digest AND nanocode_workspace_blobs.orphaned < CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) - CAST($1::text AS BIGINT) AND NOT EXISTS (SELECT 1 FROM nanocode_workspace_refs WHERE nanocode_workspace_refs.digest = nanocode_workspace_blobs.digest) RETURNING nanocode_workspace_blobs.digest",
+];
+
+const PURGE_ANY: Dialects = [
+    "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT digest FROM nanocode_workspace_blobs WHERE orphaned IS NOT NULL AND orphaned < CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) - CAST(?1 AS INTEGER) ORDER BY orphaned, digest LIMIT CAST(?2 AS INTEGER)) AND orphaned < CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) - CAST(?1 AS INTEGER) RETURNING digest",
+    "DELETE FROM nanocode_workspace_blobs USING (SELECT digest FROM nanocode_workspace_blobs WHERE orphaned IS NOT NULL AND orphaned < CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) - CAST($1::text AS BIGINT) ORDER BY orphaned, digest LIMIT CAST($2::text AS BIGINT)) AS dead WHERE nanocode_workspace_blobs.digest = dead.digest AND nanocode_workspace_blobs.orphaned < CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) - CAST($1::text AS BIGINT) RETURNING nanocode_workspace_blobs.digest",
 ];
 
 const HEAD: Dialects = [
@@ -110,18 +171,18 @@ const BLOB: Dialects = [
 ];
 
 const TOMBSTONE: Dialects = [
-    "INSERT INTO nanocode_workspace_blobs (digest, data, refs) SELECT value, ?2, 0 FROM json_each(?1) WHERE true ON CONFLICT (digest) DO NOTHING",
-    "INSERT INTO nanocode_workspace_blobs (digest, data, refs) SELECT e, $2::text, 0 FROM jsonb_array_elements_text($1::text::jsonb) AS e ON CONFLICT (digest) DO NOTHING",
+    "INSERT INTO nanocode_workspace_blobs (digest, data) SELECT value, ?2 FROM json_each(?1) WHERE true ON CONFLICT (digest) DO NOTHING",
+    "INSERT INTO nanocode_workspace_blobs (digest, data) SELECT e, $2::text FROM jsonb_array_elements_text($1::text::jsonb) AS e ON CONFLICT (digest) DO NOTHING",
 ];
 
 const DEAD: Dialects = [
-    "SELECT digest, data FROM nanocode_workspace_blobs WHERE refs <= 0 ORDER BY digest LIMIT CAST(?1 AS INTEGER)",
-    "SELECT digest, data FROM nanocode_workspace_blobs WHERE refs <= 0 ORDER BY digest LIMIT CAST($1::text AS BIGINT)",
+    "SELECT digest, data FROM nanocode_workspace_blobs WHERE data LIKE '@gone:%' ORDER BY digest LIMIT CAST(?1 AS INTEGER)",
+    "SELECT digest, data FROM nanocode_workspace_blobs WHERE data LIKE '@gone:%' ORDER BY digest LIMIT CAST($1::text AS BIGINT)",
 ];
 
 const EXPIRE: Dialects = [
-    "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT value FROM json_each(?1)) AND data IN (SELECT value FROM json_each(?2)) AND refs <= 0",
-    "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT jsonb_array_elements_text($1::text::jsonb)) AND data IN (SELECT jsonb_array_elements_text($2::text::jsonb)) AND refs <= 0",
+    "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT value FROM json_each(?1)) AND data IN (SELECT value FROM json_each(?2))",
+    "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT jsonb_array_elements_text($1::text::jsonb)) AND data IN (SELECT jsonb_array_elements_text($2::text::jsonb))",
 ];
 
 const OBJECT: &str = "@object";
@@ -155,6 +216,14 @@ impl Sweep {
             .saturating_add(self.window_ms)
             .saturating_add(self.put_ms)
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Collected {
+    pub next: Option<String>,
+    pub marked: usize,
+    pub unmarked: usize,
+    pub deleted: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -291,11 +360,43 @@ fn json(values: Vec<Value>) -> String {
 }
 
 impl SqlStore {
+    pub const FORMAT: u32 = MIGRATIONS.len() as u32;
+
+    pub async fn migrate(host: &dyn Sql) -> Result<(), Failure> {
+        migrate_format(host, COMPONENT, &MIGRATIONS)
+            .await
+            .map_err(backend)
+    }
+
     pub async fn open(host: Arc<dyn Sql>) -> Result<Self, Failure> {
-        migrate_format(&*host, COMPONENT, &MIGRATIONS)
+        let dialect = host.dialect();
+        let statements = [SqlStatement {
+            sql: dialect.pick(&FORMAT),
+            params: vec![COMPONENT],
+        }];
+        let results = host
+            .run(SqlAccess::Read, "workspace_format", &statements)
             .await
             .map_err(backend)?;
-        let dialect = host.dialect();
+        let stored: u64 = match results.first().and_then(|rows| rows.first()) {
+            Some(row) => number(row, 0, "")?,
+            None => 0,
+        };
+        let known = Self::FORMAT;
+        if stored > u64::from(known) {
+            return Err(backend(StoreError::UnsupportedFormat {
+                component: COMPONENT,
+                stored,
+                known,
+            }));
+        }
+        if stored < u64::from(known) {
+            return Err(backend(StoreError::SchemaBehind {
+                component: COMPONENT,
+                stored,
+                known,
+            }));
+        }
         Ok(Self {
             host,
             dialect,
@@ -386,6 +487,62 @@ impl SqlStore {
             .map_err(backend)?;
         swept.marked = marked;
         Ok(swept)
+    }
+
+    pub async fn collect(
+        &self,
+        after: &str,
+        grace_ms: u64,
+        limit: usize,
+    ) -> Result<Collected, Failure> {
+        let (limit_text, grace) = (limit.to_string(), grace_ms.to_string());
+        let page = vec![after, limit_text.as_str()];
+        let ignores = mutated(Mutation::SqlSweepIgnoresRefs);
+        let statements = [
+            SqlStatement {
+                sql: self.pick(&PAGE),
+                params: page.clone(),
+            },
+            SqlStatement {
+                sql: self.pick(&UNMARK),
+                params: page.clone(),
+            },
+            SqlStatement {
+                sql: self.pick(if ignores { &MARK_ANY } else { &MARK }),
+                params: page,
+            },
+            SqlStatement {
+                sql: self.pick(if ignores { &PURGE_ANY } else { &PURGE }),
+                params: vec![&grace, &limit_text],
+            },
+        ];
+        let results = self
+            .host
+            .transaction("workspace_collect", &statements)
+            .await
+            .map_err(backend)?;
+        if results.len() != statements.len() {
+            return Err(Failure::Backend(format!(
+                "the SQL host answered {} of {} statements",
+                results.len(),
+                statements.len()
+            )));
+        }
+        let paged = &results[0];
+        let next = (paged.len() >= limit)
+            .then(|| {
+                paged
+                    .last()
+                    .and_then(|row| column(row, 0))
+                    .map(str::to_owned)
+            })
+            .flatten();
+        Ok(Collected {
+            next,
+            unmarked: results[1].len(),
+            marked: results[2].len(),
+            deleted: results[3].len(),
+        })
     }
 
     async fn reap(&self, bucket: &Bucket, limit: usize) -> Result<Swept, Failure> {
@@ -503,8 +660,7 @@ impl SqlStore {
                 .collect(),
         );
         let early = mutated(Mutation::SqlReleaseBeforeCommit) && !change.dropped.is_empty();
-        let released = change.dropped.iter().filter(|_| !early);
-        let mut blobs: Vec<(String, Option<String>)> = batch
+        let mut blobs: Vec<(String, String)> = batch
             .blobs()
             .iter()
             .map(|blob| {
@@ -513,19 +669,11 @@ impl SqlStore {
                 } else {
                     STANDARD.encode(blob.bytes())
                 };
-                (blob.digest().hex(), Some(data))
+                (blob.digest().hex(), data)
             })
-            .chain(released.map(|digest| (digest.hex(), None)))
             .collect();
         blobs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        let lists: Vec<String> = blobs
-            .iter()
-            .map(|(digest, data)| match data {
-                Some(_) => String::new(),
-                None => json(vec![Value::String(digest.clone())]),
-            })
-            .collect();
-        let mut statements = Vec::with_capacity(5 + blobs.len());
+        let mut statements = Vec::with_capacity(7 + blobs.len());
         statements.push(if change.base == 0 {
             SqlStatement {
                 sql: self.pick(&CLAIM_FIRST),
@@ -551,23 +699,29 @@ impl SqlStore {
                 params: vec![workspace, &token, &put],
             });
         }
-        for ((digest, data), list) in blobs.iter().zip(&lists) {
-            statements.push(match data {
-                Some(data) => SqlStatement {
-                    sql: self.pick(&ADD_BLOB),
-                    params: vec![workspace, &token, digest, data],
-                },
-                None => SqlStatement {
-                    sql: self.pick(&RELEASE_BLOBS),
-                    params: vec![workspace, &token, list],
-                },
+        if !blobs.is_empty() {
+            statements.push(SqlStatement {
+                sql: self.pick(&REVIVE),
+                params: vec![workspace, &token, &fresh],
+            });
+        }
+        for (digest, data) in &blobs {
+            statements.push(SqlStatement {
+                sql: self.pick(&ADD_BLOB),
+                params: vec![workspace, &token, digest, data],
+            });
+        }
+        if !blobs.is_empty() {
+            statements.push(SqlStatement {
+                sql: self.pick(&ADD_REFS),
+                params: vec![workspace, &token, &fresh],
             });
         }
         if early {
-            let release = [&RELEASE_EARLY, &DROP_EARLY].map(|sql| SqlStatement {
-                sql: self.pick(sql),
+            let release = [SqlStatement {
+                sql: self.pick(&DROP_EARLY),
                 params: vec![workspace, &token, &dropped],
-            });
+            }];
             self.host
                 .run(SqlAccess::Write, "workspace_release", &release)
                 .await
@@ -575,7 +729,7 @@ impl SqlStore {
         }
         if !change.dropped.is_empty() && !early {
             statements.push(SqlStatement {
-                sql: self.pick(&DROP_BLOBS),
+                sql: self.pick(&DROP_REFS),
                 params: vec![workspace, &token, &dropped],
             });
         }

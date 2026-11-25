@@ -12,6 +12,7 @@ pub enum Mutation {
     SqlReleaseBeforeCommit,
     SqlSplitTransaction,
     SqlSweepSkipsTombstone,
+    SqlSweepIgnoresRefs,
     AnswersNow,
     StaleReadSkipsReload,
     BackendFailureAcked,
