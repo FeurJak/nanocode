@@ -53,7 +53,7 @@ use history::HistoryMessage;
 use nanocode_http::layer::retry;
 use nanocode_platform::Instant;
 use nanocode_platform::sleep;
-use nanocode_sync::{Atom, Sequencer, Slot};
+use nanocode_sync::{Atom, Slot};
 use nanocode_sync::{Notify, oneshot, watch};
 use nanocode_tool_host::image::{ImageHistory, ImageWindow};
 use nanocode_trace::Instrument as _;
@@ -3716,7 +3716,6 @@ struct State {
     parallel_safe_tools: HashSet<String>,
     conversation: Owner<Conversation>,
     developer_notices: Atom<Vec<(String, String)>>,
-    persistence_update: Sequencer,
     persistence_ready: Notify,
     paging: Slot<durable::Paging>,
 
@@ -3744,7 +3743,7 @@ struct State {
     boundary_stale: AtomicBool,
     summary_refused: AtomicBool,
     policy: Option<Arc<dyn ClaudeExecutionPolicy>>,
-    admission: Sequencer,
+    session: crate::session::Session,
     idle: Notify,
 
     attempts: std::sync::atomic::AtomicUsize,
@@ -4017,7 +4016,7 @@ async fn start_turn(
     resolution: crate::prompt::ImageResolution,
     attempt: Option<AttemptGuard>,
     cancellation: Arc<Cancellation>,
-) -> BackendTurn {
+) -> AdmittedTurn {
     let state = state.clone();
 
     let turn_id = request
@@ -4074,9 +4073,9 @@ async fn start_turn(
         })
         .await
     {
-        return BackendTurn {
+        return AdmittedTurn {
             request_id,
-            result: Box::pin(async move { Err(error) }),
+            result: TurnSettled::Ready(Err(error)),
         };
     }
     state.cancellations.update(|cancellations| {
@@ -4134,9 +4133,36 @@ async fn start_turn(
     }
     .instrument(turn_span);
     spawn_task(Box::pin(task));
-    BackendTurn {
+    AdmittedTurn {
         request_id,
-        result: Box::pin(async move { receiver.await.unwrap_or(Err(NanocodeError::TurnStopped)) }),
+        result: TurnSettled::Running(receiver),
+    }
+}
+
+struct AdmittedTurn {
+    request_id: Option<String>,
+    result: TurnSettled,
+}
+
+enum TurnSettled {
+    Ready(Result<TurnResult>),
+    Running(oneshot::Receiver<Result<TurnResult>>),
+}
+
+impl AdmittedTurn {
+    fn turn(self) -> BackendTurn {
+        let result = self.result;
+        BackendTurn {
+            request_id: self.request_id,
+            result: Box::pin(async move {
+                match result {
+                    TurnSettled::Ready(result) => result,
+                    TurnSettled::Running(receiver) => {
+                        receiver.await.unwrap_or(Err(NanocodeError::TurnStopped))
+                    }
+                }
+            }),
+        }
     }
 }
 
@@ -4148,7 +4174,7 @@ async fn defer_turn(
     id: String,
     order: u64,
     automatic: bool,
-) -> BackendTurn {
+) -> AdmittedTurn {
     state.waiters.update(|waiters| {
         waiters.insert(order);
     });
@@ -4168,43 +4194,47 @@ async fn defer_turn(
                 break Err((cancellation.interruption(automatic), false));
             }
 
-            let admission = nanocode_sync::select! {
-                () = cancellation.cancelled() => break Err((cancellation.interruption(automatic), false)),
-                admission = state.admission.enter() => admission,
-            };
-            if state.life.stopped() {
-                break Err((NanocodeError::AgentStopped, false));
-            }
-            match policy.begin_attempt(id.clone()).await {
-                Ok(()) => {
-                    let attempt = AttemptGuard::begin(state.clone());
-                    state.waiters.update(|waiters| {
-                        waiters.remove(&order);
-                    });
-                    let frozen = crate::prompt::freeze_admitted(
-                        request.prompt,
-                        policy.as_ref(),
-                        &id,
-                        resolution,
-                        &state.images,
-                    )
-                    .await;
-                    let (prompt, resolution) = match frozen {
-                        Ok(admitted) => admitted,
-                        Err(error) => {
-                            fail_begun(&state, policy.as_ref(), id.clone(), &error).await;
-                            drop(attempt);
-                            break Err((error, true));
+            let claim = Arc::new(AtomicBool::new(false));
+            let admitted = {
+                let claimed = Arc::clone(&claim);
+                let deferred = Deferred {
+                    state: Arc::clone(&state),
+                    policy: Arc::clone(&policy),
+                    request,
+                    resolution,
+                    id: id.clone(),
+                    order,
+                    cancellation: Arc::clone(&cancellation),
+                };
+                state.session.admit(move || {
+                    Box::pin(async move {
+                        if claimed.swap(true, Ordering::SeqCst) {
+                            return None;
                         }
-                    };
-                    request.prompt = prompt;
-                    let turn =
-                        start_turn(&state, request, resolution, Some(attempt), cancellation).await;
-                    drop(admission);
-                    break Ok(turn);
-                }
-                Err(error) => {
-                    drop(admission);
+                        Some(deferred.begin().await)
+                    })
+                })
+            };
+            let mut admitted = std::pin::pin!(admitted);
+            let outcome = nanocode_sync::select! {
+                () = cancellation.cancelled() => {
+                    if !claim.swap(true, Ordering::SeqCst) {
+                        break Err((cancellation.interruption(automatic), false));
+                    }
+                    None
+                },
+                outcome = admitted.as_mut() => Some(outcome),
+            };
+            let outcome = match outcome {
+                Some(outcome) => outcome,
+                None => admitted.await,
+            };
+            match outcome.map(|begun| begun.expect("a claimed deferred admission runs")) {
+                Err(error) => break Err((error, false)),
+                Ok(Begun::Started(turn)) => break Ok(turn),
+                Ok(Begun::Failed(error, begun)) => break Err((error, begun)),
+                Ok(Begun::Blocked(error, returned)) => {
+                    request = returned;
                     let blocked = error.execution_policy_disposition()
                         == Some(nanocode_agent_core::ExecutionPolicyDisposition::Retry);
                     if blocked && state.local_blocker(order) {
@@ -4222,7 +4252,7 @@ async fn defer_turn(
             }
         };
         let result = match started {
-            Ok(turn) => turn.result.await,
+            Ok(turn) => turn.turn().result.await,
             Err((error, begun)) => Err(abandon_deferred(
                 &state,
                 policy.as_ref(),
@@ -4240,9 +4270,67 @@ async fn defer_turn(
     }
     .instrument(nanocode_trace::Span::current());
     spawn_task(Box::pin(task));
-    BackendTurn {
+    AdmittedTurn {
         request_id,
-        result: Box::pin(async move { receiver.await.unwrap_or(Err(NanocodeError::TurnStopped)) }),
+        result: TurnSettled::Running(receiver),
+    }
+}
+
+struct Deferred {
+    state: Arc<State>,
+    policy: Arc<dyn ClaudeExecutionPolicy>,
+    request: BackendPrompt,
+    resolution: crate::prompt::ImageResolution,
+    id: String,
+    order: u64,
+    cancellation: Arc<Cancellation>,
+}
+
+enum Begun {
+    Started(AdmittedTurn),
+    Failed(NanocodeError, bool),
+    Blocked(NanocodeError, BackendPrompt),
+}
+
+impl Deferred {
+    async fn begin(self) -> Begun {
+        let Self {
+            state,
+            policy,
+            mut request,
+            resolution,
+            id,
+            order,
+            cancellation,
+        } = self;
+        if state.life.stopped() {
+            return Begun::Failed(NanocodeError::AgentStopped, false);
+        }
+        if let Err(error) = policy.begin_attempt(id.clone()).await {
+            return Begun::Blocked(error, request);
+        }
+        let attempt = AttemptGuard::begin(state.clone());
+        state.waiters.update(|waiters| {
+            waiters.remove(&order);
+        });
+        let frozen = crate::prompt::freeze_admitted(
+            request.prompt,
+            policy.as_ref(),
+            &id,
+            resolution,
+            &state.images,
+        )
+        .await;
+        let (prompt, resolution) = match frozen {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                fail_begun(&state, policy.as_ref(), id, &error).await;
+                drop(attempt);
+                return Begun::Failed(error, true);
+            }
+        };
+        request.prompt = prompt;
+        Begun::Started(start_turn(&state, request, resolution, Some(attempt), cancellation).await)
     }
 }
 
@@ -6616,20 +6704,23 @@ impl LifecycleBackend for Driver {
     fn set_harness_model(&self, model: ModelSelection) -> BackendFuture<Result<()>> {
         let state = self.state.clone();
         Box::pin(async move {
-            let _admission = state.admission.enter().await;
-            if state.life.stopped() {
-                return Err(NanocodeError::AgentStopped);
-            }
-            if model.family() != HarnessFamily::Claude {
-                return Err(unsupported("model belongs to another harness family"));
-            }
+            state
+                .admitted(move |state| {
+                    if state.life.stopped() {
+                        return Err(NanocodeError::AgentStopped);
+                    }
+                    if model.family() != HarnessFamily::Claude {
+                        return Err(unsupported("model belongs to another harness family"));
+                    }
 
-            if model.as_str() != state.model {
-                return Err(unsupported(
-                    "the model is fixed for this thread; start a new thread to use another model",
-                ));
-            }
-            Ok(())
+                    if model.as_str() != state.model {
+                        return Err(unsupported(
+                            "the model is fixed for this thread; start a new thread to use another model",
+                        ));
+                    }
+                    Ok(())
+                })
+                .await?
         })
     }
     fn submit(&self, request: BackendPrompt) -> BackendFuture<Result<BackendTurn>> {
@@ -6767,48 +6858,57 @@ impl LifecycleBackend for Driver {
     fn set_thinking(&self, thinking: Thinking) -> BackendFuture<Result<()>> {
         let state = self.state.clone();
         Box::pin(async move {
-            let _admission = state.admission.enter().await;
-            if state.life.stopped() {
-                return Err(NanocodeError::AgentStopped);
-            }
+            state
+                .admitted(move |state| {
+                    if state.life.stopped() {
+                        return Err(NanocodeError::AgentStopped);
+                    }
 
-            claude_selection(&state.model())
-                .capabilities(ModelTransport::Native)
-                .check_thinking(thinking)?;
-            state.effort.set(thinking_effort(thinking));
-            state.thinking_mode.set(ThinkingMode::selected(thinking));
-            Ok(())
+                    claude_selection(&state.model())
+                        .capabilities(ModelTransport::Native)
+                        .check_thinking(thinking)?;
+                    state.effort.set(thinking_effort(thinking));
+                    state.thinking_mode.set(ThinkingMode::selected(thinking));
+                    Ok(())
+                })
+                .await?
         })
     }
     fn set_auto_compact_token_limit(&self, limit: Option<u64>) -> BackendFuture<Result<()>> {
         let state = self.state.clone();
         Box::pin(async move {
-            let _admission = state.admission.enter().await;
-            if state.life.stopped() {
-                return Err(NanocodeError::AgentStopped);
-            }
-            state.auto_compact_token_limit.set(limit);
-            Ok(())
+            state
+                .admitted(move |state| {
+                    if state.life.stopped() {
+                        return Err(NanocodeError::AgentStopped);
+                    }
+                    state.auto_compact_token_limit.set(limit);
+                    Ok(())
+                })
+                .await?
         })
     }
     fn set_fast_mode(&self, enabled: bool) -> BackendFuture<Result<()>> {
         let state = self.state.clone();
         Box::pin(async move {
-            let _admission = state.admission.enter().await;
-            if state.life.stopped() {
-                return Err(NanocodeError::AgentStopped);
-            }
-            if let Ok(model) = state
-                .model()
-                .parse::<nanocode_agent_core::ClaudeModel>()
-                .map(ModelSelection::Claude)
-            {
-                model
-                    .capabilities(ModelTransport::Native)
-                    .check_fast_mode(enabled)?;
-            }
-            state.fast_mode.store(enabled, Ordering::SeqCst);
-            Ok(())
+            state
+                .admitted(move |state| {
+                    if state.life.stopped() {
+                        return Err(NanocodeError::AgentStopped);
+                    }
+                    if let Ok(model) = state
+                        .model()
+                        .parse::<nanocode_agent_core::ClaudeModel>()
+                        .map(ModelSelection::Claude)
+                    {
+                        model
+                            .capabilities(ModelTransport::Native)
+                            .check_fast_mode(enabled)?;
+                    }
+                    state.fast_mode.store(enabled, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await?
         })
     }
     fn preconnect(&self) -> BackendFuture<Result<()>> {
@@ -6891,11 +6991,8 @@ impl LifecycleBackend for Driver {
         }
         let state = self.state.clone();
         Box::pin(async move {
-            {
-                let _admission = state.admission.enter().await;
-                if !state.life.stop() {
-                    return Ok(());
-                }
+            if !state.admitted(|state| state.life.stop()).await? {
+                return Ok(());
             }
             let release = async move {
                 state.wait_idle().await;
@@ -6938,6 +7035,19 @@ impl LifecycleBackend for Driver {
 }
 
 impl State {
+    fn admitted<R, F>(
+        self: &Arc<Self>,
+        work: F,
+    ) -> impl Future<Output = Result<R>> + nanocode_platform::MaybeSend + use<R, F>
+    where
+        R: Send + 'static,
+        F: FnOnce(&Self) -> R + Send + 'static,
+    {
+        let state = Arc::clone(self);
+        self.session
+            .admit(move || Box::pin(async move { work(&state) }))
+    }
+
     async fn wait_idle(&self) {
         loop {
             let notified = self.idle.notified();

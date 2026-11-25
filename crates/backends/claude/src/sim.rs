@@ -6,6 +6,9 @@ pub enum Mutation {
     None,
     AbandonedCommitPoisons,
     DemandWaitsAnyPrefetch,
+    PersistenceOnAdmissionLane,
+    PersistIgnoresRevision,
+    AbandonedPersistKeepsRevision,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

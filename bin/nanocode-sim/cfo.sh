@@ -453,6 +453,9 @@ default_table='
 1 canary_backend_facts_undecided_notice canary:20 --scenario backend_facts --mutation undecided_notice
 1 canary_backend_facts_abandoned_commit_poisons canary:20 --scenario backend_facts --mutation abandoned_commit_poisons
 1 canary_backend_facts_demand_waits_any_prefetch canary:20 --scenario backend_facts --mutation demand_waits_any_prefetch
+1 canary_backend_facts_persistence_on_admission_lane canary:20 --scenario backend_facts --mutation persistence_on_admission_lane
+1 canary_backend_facts_persist_ignores_revision canary:20 --scenario backend_facts --mutation persist_ignores_revision
+1 canary_backend_facts_abandoned_persist_keeps_revision canary:20 --scenario backend_facts --mutation abandoned_persist_keeps_revision
 8 secrets pass --scenario secrets
 2 secrets_twice pass --scenario secrets --twice
 1 canary_secrets_paths_ignored canary:20 --scenario secrets --mutation paths_ignored

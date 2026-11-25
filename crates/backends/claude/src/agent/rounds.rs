@@ -199,7 +199,6 @@ pub(super) fn run_rounds<'a>(
                         .await?,
                 );
             }
-            let _update = state.persistence_update.enter().await;
             let mut notices = state.context_notices(conversation);
             notices.extend(state.developer_notices.update(|queued| {
                 let mut notices = Vec::new();
@@ -320,7 +319,7 @@ pub(super) fn run_rounds<'a>(
             state.retain_pending(&mut cursor, &pending);
             cursor.usage = usage.clone();
             state
-                .defer_cursor_locked(&mut cursor, conversation, journal)
+                .defer_cursor(&mut cursor, conversation, journal)
                 .await?;
         }
         let mut previous_message_id = conversation.previous_message_id.clone();

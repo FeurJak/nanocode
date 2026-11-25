@@ -9,32 +9,37 @@ pub(super) fn compact(this: &Driver) -> BackendFuture<Result<()>> {
             let cleanup = state.clone();
             let cancellation = Arc::new(Cancellation::default());
             let cleanup_cancellation = cancellation.clone();
-            let result = async move {
-                let _admission = state.admission.enter().await;
-                state.compaction_cancel.set(Some(cancellation.clone()));
-                if state.life.stopped() {
-                    return Err(NanocodeError::AgentStopped);
-                }
+            let admitted = Arc::clone(&state);
+            let result = admitted
+                .session
+                .admit(move || {
+                    Box::pin(async move {
+                        state.compaction_cancel.set(Some(cancellation.clone()));
+                        if state.life.stopped() {
+                            return Err(NanocodeError::AgentStopped);
+                        }
 
-                for cancel in state.cancellations.get().values() {
-                    cancel.cancel();
-                }
-                loop {
-                    let notified = state.idle.notified();
-                    let mut notified = std::pin::pin!(notified);
-                    notified.as_mut().enable();
-                    if state.cancellations.get().is_empty() {
-                        break;
-                    }
-                    notified.await;
-                }
-                let held = Arc::clone(&state);
-                state
-                    .conversation
-                    .run(move |context| compact_held(held, context, cancellation))
-                    .await?
-            }
-            .await;
+                        for cancel in state.cancellations.get().values() {
+                            cancel.cancel();
+                        }
+                        loop {
+                            let notified = state.idle.notified();
+                            let mut notified = std::pin::pin!(notified);
+                            notified.as_mut().enable();
+                            if state.cancellations.get().is_empty() {
+                                break;
+                            }
+                            notified.await;
+                        }
+                        let held = Arc::clone(&state);
+                        state
+                            .conversation
+                            .run(move |context| compact_held(held, context, cancellation))
+                            .await?
+                    })
+                })
+                .await
+                .and_then(std::convert::identity);
             cleanup.compaction_cancel.update(|registered| {
                 if registered
                     .as_ref()
@@ -80,139 +85,140 @@ pub(super) fn submit(
         }
         let (accepted, receipt) = oneshot::channel();
         let task = async move {
-            let result = async move {
-                let _admission = state.admission.enter().await;
-                if state.life.stopped() {
-                    return Err(NanocodeError::AgentStopped);
-                }
-                let resolution = crate::prompt::ImageResolution::of(&state.model());
-                let Some(policy) = state.policy.clone() else {
-                    if request.request_id.is_some() {
-                        return Err(unsupported(
-                            "Claude request_id requires an attached durability policy",
-                        ));
-                    }
-                    request.prompt =
-                        crate::prompt::freeze(request.prompt, resolution, &state.images).await?;
-                    let cancellation = Arc::new(Cancellation::default());
-                    return Ok(start_turn(&state, request, resolution, None, cancellation).await);
-                };
-                let automatic = request.request_id.is_none();
-                let candidate = request
-                    .request_id
-                    .clone()
-                    .unwrap_or_else(|| durable::candidate_id("turn"));
-                let input = json!({"provider":"claude","kind":"prompt","prompt":request.prompt});
-                let (id, admission) = policy.admit(candidate, input, automatic).await?;
-
-                let order = state.admission_order.fetch_add(1, Ordering::SeqCst);
-                request.request_id = Some(id.clone());
-                request.events = request.events.with_turn_id(id.clone());
-                let mut terminal = match admission {
-                    Admission::Completed { output, checkpoint } => Some(
-                        durable::replay(id.clone(), output)
-                            .map(|completed| state.replayed_boundary(completed, checkpoint)),
-                    ),
-                    Admission::Failed { error, .. } => {
-                        Some(Err(NanocodeError::ReplayedExecutionFailed(error)))
-                    }
-                    Admission::Cancelled => Some(Err(NanocodeError::TurnCancelled)),
-                    Admission::Execute | Admission::Resume => None,
-                };
-                let mut attempt = None;
-                if terminal.is_none() {
-                    match policy.begin_attempt(id.clone()).await {
-                        Ok(()) => attempt = Some(AttemptGuard::begin(state.clone())),
-                        Err(error) => {
-                            let blocked = error.execution_policy_disposition()
-                                == Some(nanocode_agent_core::ExecutionPolicyDisposition::Retry);
-
-                            if blocked
-                                && request.cancel_on_admission
-                                && policy.cancel_unstarted(id.clone()).await.unwrap_or(false)
-                            {
-                                terminal = Some(Err(NanocodeError::TurnCancelled));
-                            } else if blocked && state.local_blocker(order) {
-                                return Ok(defer_turn(
-                                    state.clone(),
-                                    policy,
-                                    request,
-                                    resolution,
-                                    id,
-                                    order,
-                                    automatic,
-                                )
-                                .await);
-                            } else {
-                                if automatic {
-                                    retire_unstarted(policy.as_ref(), id).await;
-                                } else {
-                                    let _ = policy.release(id).await;
-                                }
-                                if blocked && state.life.stopped() {
-                                    return Err(NanocodeError::AgentStopped);
-                                }
-                                return Err(error);
-                            }
-                        }
-                    }
-                }
-                if let Some(result) = terminal {
-                    state.accepted_turns.fetch_add(1, Ordering::SeqCst);
-                    let (status, kind) = match &result {
-                        Ok(_) => ("completed", AgentEventKind::RunCompleted),
-                        Err(NanocodeError::TurnCancelled) => {
-                            ("cancelled", AgentEventKind::RunFailed)
-                        }
-                        Err(_) => ("failed", AgentEventKind::RunFailed),
-                    };
-
-                    state.emit(
-                        &request.events,
-                        kind,
-                        json!({
-                            "status":status,"model":state.model(),
-                            "effort":state.thinking().as_str(),
-                            "transport":"messages_sse","orchestration":"claude",
-                            "replayed":true,"model_calls":0,"tool_calls":0,
-                            "duration_ms":0,"duration_ns":0,
-                            "final_message":result.as_ref().ok().map(TurnResult::final_message),
-                            "usage":result.as_ref().ok().and_then(TurnResult::usage),
-                            "error":result.as_ref().err().map(ToString::to_string),
-                            "estimated_cost":null,"cost_usd":null,"cost_status":"other"
-                        }),
-                    );
-                    return Ok(BackendTurn {
-                        request_id: Some(id),
-                        result: Box::pin(async move { result }),
-                    });
-                }
-                let (prompt, resolution) = match crate::prompt::freeze_admitted(
-                    request.prompt,
-                    policy.as_ref(),
-                    &id,
-                    resolution,
-                    &state.images,
-                )
+            let admitted = Arc::clone(&state);
+            let result = state
+                .session
+                .admit(move || Box::pin(admit_prompt(admitted, request)))
                 .await
-                {
-                    Ok(admitted) => admitted,
-                    Err(error) => {
-                        fail_begun(&state, policy.as_ref(), id, &error).await;
-                        return Err(error);
-                    }
-                };
-                request.prompt = prompt;
-                let cancellation = Arc::new(Cancellation::default());
-                Ok(start_turn(&state, request, resolution, attempt, cancellation).await)
-            }
-            .await;
+                .and_then(std::convert::identity)
+                .map(AdmittedTurn::turn);
             let _ = accepted.send(result);
         }
         .instrument(parent);
         spawn_task(Box::pin(task));
         receipt.await.unwrap_or(Err(NanocodeError::TurnStopped))
     })
+}
+
+async fn admit_prompt(state: Arc<State>, mut request: BackendPrompt) -> Result<AdmittedTurn> {
+    if state.life.stopped() {
+        return Err(NanocodeError::AgentStopped);
+    }
+    let resolution = crate::prompt::ImageResolution::of(&state.model());
+    let Some(policy) = state.policy.clone() else {
+        if request.request_id.is_some() {
+            return Err(unsupported(
+                "Claude request_id requires an attached durability policy",
+            ));
+        }
+        request.prompt = crate::prompt::freeze(request.prompt, resolution, &state.images).await?;
+        let cancellation = Arc::new(Cancellation::default());
+        return Ok(start_turn(&state, request, resolution, None, cancellation).await);
+    };
+    let automatic = request.request_id.is_none();
+    let candidate = request
+        .request_id
+        .clone()
+        .unwrap_or_else(|| durable::candidate_id("turn"));
+    let input = json!({"provider":"claude","kind":"prompt","prompt":request.prompt});
+    let (id, admission) = policy.admit(candidate, input, automatic).await?;
+
+    let order = state.admission_order.fetch_add(1, Ordering::SeqCst);
+    request.request_id = Some(id.clone());
+    request.events = request.events.with_turn_id(id.clone());
+    let mut terminal = match admission {
+        Admission::Completed { output, checkpoint } => Some(
+            durable::replay(id.clone(), output)
+                .map(|completed| state.replayed_boundary(completed, checkpoint)),
+        ),
+        Admission::Failed { error, .. } => Some(Err(NanocodeError::ReplayedExecutionFailed(error))),
+        Admission::Cancelled => Some(Err(NanocodeError::TurnCancelled)),
+        Admission::Execute | Admission::Resume => None,
+    };
+    let mut attempt = None;
+    if terminal.is_none() {
+        match policy.begin_attempt(id.clone()).await {
+            Ok(()) => attempt = Some(AttemptGuard::begin(state.clone())),
+            Err(error) => {
+                let blocked = error.execution_policy_disposition()
+                    == Some(nanocode_agent_core::ExecutionPolicyDisposition::Retry);
+
+                if blocked
+                    && request.cancel_on_admission
+                    && policy.cancel_unstarted(id.clone()).await.unwrap_or(false)
+                {
+                    terminal = Some(Err(NanocodeError::TurnCancelled));
+                } else if blocked && state.local_blocker(order) {
+                    return Ok(defer_turn(
+                        state.clone(),
+                        policy,
+                        request,
+                        resolution,
+                        id,
+                        order,
+                        automatic,
+                    )
+                    .await);
+                } else {
+                    if automatic {
+                        retire_unstarted(policy.as_ref(), id).await;
+                    } else {
+                        let _ = policy.release(id).await;
+                    }
+                    if blocked && state.life.stopped() {
+                        return Err(NanocodeError::AgentStopped);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+    if let Some(result) = terminal {
+        state.accepted_turns.fetch_add(1, Ordering::SeqCst);
+        let (status, kind) = match &result {
+            Ok(_) => ("completed", AgentEventKind::RunCompleted),
+            Err(NanocodeError::TurnCancelled) => ("cancelled", AgentEventKind::RunFailed),
+            Err(_) => ("failed", AgentEventKind::RunFailed),
+        };
+
+        state.emit(
+            &request.events,
+            kind,
+            json!({
+                "status":status,"model":state.model(),
+                "effort":state.thinking().as_str(),
+                "transport":"messages_sse","orchestration":"claude",
+                "replayed":true,"model_calls":0,"tool_calls":0,
+                "duration_ms":0,"duration_ns":0,
+                "final_message":result.as_ref().ok().map(TurnResult::final_message),
+                "usage":result.as_ref().ok().and_then(TurnResult::usage),
+                "error":result.as_ref().err().map(ToString::to_string),
+                "estimated_cost":null,"cost_usd":null,"cost_status":"other"
+            }),
+        );
+        return Ok(AdmittedTurn {
+            request_id: Some(id),
+            result: TurnSettled::Ready(result),
+        });
+    }
+    let (prompt, resolution) = match crate::prompt::freeze_admitted(
+        request.prompt,
+        policy.as_ref(),
+        &id,
+        resolution,
+        &state.images,
+    )
+    .await
+    {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            fail_begun(&state, policy.as_ref(), id, &error).await;
+            return Err(error);
+        }
+    };
+    request.prompt = prompt;
+    let cancellation = Arc::new(Cancellation::default());
+    Ok(start_turn(&state, request, resolution, attempt, cancellation).await)
 }
 
 pub(super) fn shutdown(this: &Driver) -> BackendFuture<Result<()>> {
@@ -227,37 +233,46 @@ pub(super) fn shutdown(this: &Driver) -> BackendFuture<Result<()>> {
         for cancel in state.cancellations.get().values() {
             cancel.stop();
         }
-        let _admission = state.admission.enter().await;
-        loop {
-            let notified = state.idle.notified();
-            let mut notified = std::pin::pin!(notified);
-            notified.as_mut().enable();
-            let cancels = state.cancellations.get();
-            if cancels.is_empty() {
-                break;
-            }
-            for cancel in cancels.values() {
-                cancel.stop();
-            }
-            drop(cancels);
-            notified.await;
-        }
-        let end_event = crate::ClaudeLifecycleEvent::SessionEnd {
-            reason: "other".into(),
-        };
-        if first_shutdown
-            && state
-                .tool_hooks
-                .iter()
-                .any(|hook| hook.handles_lifecycle(&end_event))
-        {
-            let held = Arc::clone(&state);
-            state
-                .conversation
-                .run(move |context| end_session(held, context))
-                .await??;
-        }
-        state.release_local().await
+        let admitted = Arc::clone(&state);
+        state
+            .session
+            .admit(move || {
+                Box::pin(async move {
+                    let state = admitted;
+                    loop {
+                        let notified = state.idle.notified();
+                        let mut notified = std::pin::pin!(notified);
+                        notified.as_mut().enable();
+                        let cancels = state.cancellations.get();
+                        if cancels.is_empty() {
+                            break;
+                        }
+                        for cancel in cancels.values() {
+                            cancel.stop();
+                        }
+                        drop(cancels);
+                        notified.await;
+                    }
+                    let end_event = crate::ClaudeLifecycleEvent::SessionEnd {
+                        reason: "other".into(),
+                    };
+                    if first_shutdown
+                        && state
+                            .tool_hooks
+                            .iter()
+                            .any(|hook| hook.handles_lifecycle(&end_event))
+                    {
+                        let held = Arc::clone(&state);
+                        state
+                            .conversation
+                            .run(move |context| end_session(held, context))
+                            .await??;
+                    }
+                    state.release_local().await
+                })
+            })
+            .await
+            .and_then(std::convert::identity)
     })
 }
 

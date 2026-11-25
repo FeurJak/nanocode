@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     MessageResponse,
-    execution::{BeginRequest, EncodedState, JournalWrite, Settlement},
+    execution::{BeginRequest, ClaudeContinuation, EncodedState, JournalWrite, Settlement},
 };
 use nanocode_durability::{EncodedPayload, Sequence, SequenceLog};
 use serde_json::value::RawValue;
@@ -149,6 +149,12 @@ impl Snapshot {
         !self.conversation.messages.is_empty() || !self.conversation.summary.is_empty()
     }
 }
+struct Loaded {
+    conversation: Option<Conversation>,
+    cursor: Result<Option<Cursor>>,
+    selected: HashSet<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Cursor {
@@ -482,6 +488,87 @@ impl State {
         Ok(())
     }
 
+    async fn load(&self, operation: String, mut selected: HashSet<String>) -> Loaded {
+        let policy = self
+            .policy
+            .as_deref()
+            .expect("a Claude continuation loads only under a policy");
+        let mut conversation = None;
+        let cursor = match policy.continuation_paged(operation.clone()).await {
+            Ok(Some(continuation)) => self
+                .continued(policy, &operation, continuation, &mut conversation)
+                .await
+                .map(Some),
+            Ok(None) => self
+                .merge_developer_notices(policy, &operation, &mut selected)
+                .await
+                .map(|()| None),
+            Err(error) => Err(error),
+        };
+        Loaded {
+            conversation,
+            cursor,
+            selected,
+        }
+    }
+
+    async fn continued(
+        &self,
+        policy: &dyn ClaudeExecutionPolicy,
+        operation: &str,
+        continuation: ClaudeContinuation,
+        restored: &mut Option<Conversation>,
+    ) -> Result<Cursor> {
+        let mut cursor: Cursor =
+            serde_json::from_value(continuation.head).map_err(recovery_error)?;
+        if let Some(pages) = continuation.pages {
+            let conversation = &mut cursor.snapshot.conversation;
+            conversation.messages = decode_stored(pages.messages)?;
+            if let Some(code_calls) = pages.code_calls {
+                conversation.code_calls = decode_pages(code_calls)?;
+            }
+            if let Some(compacted) = pages.compacted {
+                conversation.compacted = decode_pages(compacted)?;
+            }
+            if let Some(sequence) = pages.compacted_pages {
+                conversation.compacted_pages = Some(sequence);
+            }
+        }
+        if let Some(base) = cursor.pending_base.take() {
+            let prefix = usize::try_from(base)
+                .ok()
+                .and_then(|base| cursor.snapshot.conversation.messages.get(..base))
+                .ok_or_else(|| {
+                    recovery_error("Claude continuation pending prefix exceeds its conversation")
+                })?;
+            cursor.pending = prefix
+                .iter()
+                .cloned()
+                .chain(std::mem::take(&mut cursor.pending))
+                .collect();
+        }
+        cursor.recovered_code_index = Some(cursor.index);
+
+        if cursor.model_receipt_start.is_none() {
+            cursor.model_receipt_start = Some(cursor.index.saturating_add(1));
+        }
+        if cursor.operation.as_deref() != Some(operation)
+            || cursor.snapshot.provider != "claude"
+            || cursor.snapshot.version != 1
+        {
+            return Err(recovery_error("invalid Claude execution continuation"));
+        }
+
+        let mut conversation = Conversation::default();
+        self.restore_snapshot(&mut conversation, std::mem::take(&mut cursor.snapshot))
+            .await
+            .map_err(recovery_error)?;
+        *restored = Some(conversation);
+        self.merge_developer_notices(policy, operation, &mut cursor.developer_notice_ids)
+            .await?;
+        Ok(cursor)
+    }
+
     pub(super) async fn cursor(
         &self,
         conversation: &mut Conversation,
@@ -491,69 +578,24 @@ impl State {
         mut developer_notice_ids: HashSet<String>,
         journal: &mut Journal,
     ) -> Result<Cursor> {
-        let update = self.persistence_update.enter().await;
-        if let (Some(policy), Some(operation)) = (&self.policy, operation)
-            && let Some(continuation) = policy.continuation_paged(operation.to_owned()).await?
-        {
-            let mut cursor: Cursor =
-                serde_json::from_value(continuation.head).map_err(recovery_error)?;
-            if let Some(pages) = continuation.pages {
-                let conversation = &mut cursor.snapshot.conversation;
-                conversation.messages = decode_stored(pages.messages)?;
-                if let Some(code_calls) = pages.code_calls {
-                    conversation.code_calls = decode_pages(code_calls)?;
-                }
-                if let Some(compacted) = pages.compacted {
-                    conversation.compacted = decode_pages(compacted)?;
-                }
-                if let Some(sequence) = pages.compacted_pages {
-                    conversation.compacted_pages = Some(sequence);
-                }
-            }
-            if let Some(base) = cursor.pending_base.take() {
-                let prefix = usize::try_from(base)
-                    .ok()
-                    .and_then(|base| cursor.snapshot.conversation.messages.get(..base))
-                    .ok_or_else(|| {
-                        recovery_error(
-                            "Claude continuation pending prefix exceeds its conversation",
-                        )
-                    })?;
-                cursor.pending = prefix
-                    .iter()
-                    .cloned()
-                    .chain(std::mem::take(&mut cursor.pending))
-                    .collect();
-            }
-            cursor.recovered_code_index = Some(cursor.index);
-
-            if cursor.model_receipt_start.is_none() {
-                cursor.model_receipt_start = Some(cursor.index.saturating_add(1));
-            }
-            if cursor.operation.as_deref() != Some(operation)
-                || cursor.snapshot.provider != "claude"
-                || cursor.snapshot.version != 1
-            {
-                return Err(recovery_error("invalid Claude execution continuation"));
-            }
-
-            self.restore_snapshot(conversation, std::mem::take(&mut cursor.snapshot))
-                .await
-                .map_err(recovery_error)?;
-            self.merge_developer_notices(
-                policy.as_ref(),
-                operation,
-                &mut cursor.developer_notice_ids,
-            )
-            .await?;
-            journal.operation.clone_from(&cursor.operation);
-            return Ok(cursor);
-        }
-        if let (Some(policy), Some(operation)) = (&self.policy, operation) {
-            self.merge_developer_notices(policy.as_ref(), operation, &mut developer_notice_ids)
+        if let (Some(_), Some(operation)) = (&self.policy, operation) {
+            let state = self.shared();
+            let operation = operation.to_owned();
+            let loaded = self
+                .session
+                .persist(move || {
+                    Box::pin(async move { state.load(operation, developer_notice_ids).await })
+                })
                 .await?;
+            developer_notice_ids = loaded.selected;
+            if let Some(restored) = loaded.conversation {
+                *conversation = restored;
+            }
+            if let Some(cursor) = loaded.cursor? {
+                journal.operation.clone_from(&cursor.operation);
+                return Ok(cursor);
+            }
         }
-        drop(update);
         self.outlived_cache();
         let mut template = self.request_template(speed, conversation.effort_pin);
         if self.lineage.depth > 0 {
@@ -679,16 +721,6 @@ impl State {
         conversation: &mut Conversation,
         journal: &mut Journal,
     ) -> Result<()> {
-        let _update = self.persistence_update.enter().await;
-        self.defer_cursor_locked(cursor, conversation, journal)
-            .await
-    }
-    pub(super) async fn defer_cursor_locked(
-        &self,
-        cursor: &mut Cursor,
-        conversation: &mut Conversation,
-        journal: &mut Journal,
-    ) -> Result<()> {
         if self.code_only && !is_code_only_catalog(&cursor.template.tools) {
             cursor.template.tools = self.code_only_tools();
             self.classify_code_only_tools(cursor);
@@ -793,7 +825,6 @@ impl State {
         request: &BackendPrompt,
         result: &Result<TurnResult>,
     ) -> Result<()> {
-        let _update = self.persistence_update.enter().await;
         let (Some(policy), Some(operation)) = (&self.policy, &request.request_id) else {
             return Ok(());
         };
@@ -806,12 +837,56 @@ impl State {
             self.life.stop();
             return Ok(());
         }
+        let state = self.shared();
+        let (policy, operation, key) = (Arc::clone(policy), operation.clone(), request.key);
         if matches!(result, Err(NanocodeError::TurnCancelled)) && self.life.closing() {
-            let released = policy.release(operation.clone()).await;
-            let cleared = self.clear_operation(request.key).await;
-            self.persistence_ready.notify_waiters();
-            return released.and(cleared);
+            return self
+                .session
+                .persist(move || {
+                    Box::pin(async move {
+                        let released = policy.release(operation).await;
+                        let cleared = state.clear_operation(key).await;
+                        state.persistence_ready.notify_waiters();
+                        released.and(cleared)
+                    })
+                })
+                .await?;
         }
+        loop {
+            let seen = self.session.revision();
+            let (checkpoint, settlement) = self.settlement(conversation, &policy, result).await?;
+            let (state, policy, operation) =
+                (Arc::clone(&state), Arc::clone(&policy), operation.clone());
+            let settled = self
+                .session
+                .persist_at(seen, move || {
+                    Box::pin(async move {
+                        let settled = policy
+                            .settle_encoded(operation, checkpoint, settlement)
+                            .await;
+                        if settled.is_err() {
+                            state.life.stop();
+                        } else {
+                            state.committed();
+                        }
+                        let cleared = state.clear_operation(key).await;
+                        state.persistence_ready.notify_waiters();
+                        settled.and(cleared)
+                    })
+                })
+                .await?;
+            if let Some(settled) = settled {
+                return settled;
+            }
+        }
+    }
+
+    async fn settlement(
+        &self,
+        conversation: &mut Conversation,
+        policy: &Arc<dyn ClaudeExecutionPolicy>,
+        result: &Result<TurnResult>,
+    ) -> Result<(EncodedState, Settlement)> {
         let mut snapshot = self.snapshot(&Conversation::default()).await?;
         snapshot.conversation = std::mem::take(conversation);
         let mut paging = self.paging.take().unwrap_or_default();
@@ -834,17 +909,7 @@ impl State {
             }
             Err(error) => Settlement::Fail(error.to_string()),
         };
-        let settled = policy
-            .settle_encoded(operation.clone(), checkpoint, settlement)
-            .await;
-        if settled.is_err() {
-            self.life.stop();
-        } else {
-            self.committed();
-        }
-        let cleared = self.clear_operation(request.key).await;
-        self.persistence_ready.notify_waiters();
-        settled.and(cleared)
+        Ok((checkpoint, settlement))
     }
 
     async fn clear_operation(&self, key: BackendTurnKey) -> Result<()> {

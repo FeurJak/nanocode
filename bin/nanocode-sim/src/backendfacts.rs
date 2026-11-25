@@ -26,6 +26,7 @@ use crate::rng::{FNV_OFFSET, Rng, fnv};
 
 mod abandoned;
 mod prefetch;
+mod session;
 
 const SCOPE: &str = "backend-facts";
 const LEGACY_STATE: &str = "session";
@@ -53,15 +54,21 @@ pub enum BackendFactsMutation {
     UndecidedNotice,
     AbandonedCommitPoisons,
     DemandWaitsAnyPrefetch,
+    PersistenceOnAdmissionLane,
+    PersistIgnoresRevision,
+    AbandonedPersistKeepsRevision,
 }
 
 impl BackendFactsMutation {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 8] = [
         Self::ResultWithoutIntent,
         Self::MediaUnrendered,
         Self::UndecidedNotice,
         Self::AbandonedCommitPoisons,
         Self::DemandWaitsAnyPrefetch,
+        Self::PersistenceOnAdmissionLane,
+        Self::PersistIgnoresRevision,
+        Self::AbandonedPersistKeepsRevision,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -72,6 +79,9 @@ impl BackendFactsMutation {
             Self::UndecidedNotice => "undecided_notice",
             Self::AbandonedCommitPoisons => "abandoned_commit_poisons",
             Self::DemandWaitsAnyPrefetch => "demand_waits_any_prefetch",
+            Self::PersistenceOnAdmissionLane => "persistence_on_admission_lane",
+            Self::PersistIgnoresRevision => "persist_ignores_revision",
+            Self::AbandonedPersistKeepsRevision => "abandoned_persist_keeps_revision",
         }
     }
 
@@ -825,6 +835,18 @@ fn owned_mutation(mutation: BackendFactsMutation) {
             nanocode::claude::sim::Mutation::DemandWaitsAnyPrefetch,
             nanocode_backend_codex::sim::Mutation::None,
         ),
+        BackendFactsMutation::PersistenceOnAdmissionLane => (
+            nanocode::claude::sim::Mutation::PersistenceOnAdmissionLane,
+            nanocode_backend_codex::sim::Mutation::None,
+        ),
+        BackendFactsMutation::PersistIgnoresRevision => (
+            nanocode::claude::sim::Mutation::PersistIgnoresRevision,
+            nanocode_backend_codex::sim::Mutation::None,
+        ),
+        BackendFactsMutation::AbandonedPersistKeepsRevision => (
+            nanocode::claude::sim::Mutation::AbandonedPersistKeepsRevision,
+            nanocode_backend_codex::sim::Mutation::None,
+        ),
         _ => (
             nanocode::claude::sim::Mutation::None,
             nanocode_backend_codex::sim::Mutation::None,
@@ -847,7 +869,11 @@ fn run_seed(seed: u64, mutation: BackendFactsMutation) -> Result<u64, String> {
         }?;
         let owned = abandoned::run(seed, claude)?;
         let prefetched = prefetch::run(seed)?;
-        Ok(fnv(fnv(digest, &owned.to_le_bytes()), &prefetched.to_le_bytes()))
+        let session = session::run(seed)?;
+        Ok(fnv(
+            fnv(fnv(digest, &owned.to_le_bytes()), &prefetched.to_le_bytes()),
+            &session.to_le_bytes(),
+        ))
     });
     MUTATION.store(BackendFactsMutation::None as u8, Ordering::SeqCst);
     owned_mutation(BackendFactsMutation::None);
