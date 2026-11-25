@@ -1,36 +1,45 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::OpenOptions,
     io::Read as _,
     num::NonZeroU32,
     os::unix::process::ExitStatusExt as _,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, ExitCode},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use nanocode_board::{
-    Board, BoardError, ClaimId, Entry, EventId, NewTask, Op, Outcome, Phase, Rejection, Task,
-    TaskId,
+    Applied, Board, BoardError, ClaimId, Entry, EventId, NewTask, Op, Outcome, Phase, Rejection,
+    Task, TaskId,
     access::{Can, Grant, Identity, Verifier, Who},
     schedule::Retry,
     tasks::{OnFail, Planned, TaskOp, Terms},
-    watch::{Filter, Kind, Plan},
+    watch::{Filter, Kind, Step},
 };
-use nanocode_durability_core::{Migration, Sql as _, SqlRow, SqlStatement, migrate_format};
+use nanocode_durability_core::{
+    Migration, Sql as _, SqlRow, SqlStatement, StoreError, migrate_format,
+};
 use nanocode_executor::signal::unix::{SignalKind, signal};
 use nanocode_store_sql::{Host, PgConnection, PgError, PgOptions, PgPool, PgSql, log_wake};
 use nanocode_sync::Signal;
 use nanocode_turnlog::{
-    FileLog, FileOptions, LogHost,
+    LogHost,
     parted::{PartedLog, SqlParts},
 };
 use serde_json::{Value, json};
 
+use crate::dir::DirLog;
+
 const SCOPE: &str = "board";
 
 const SPREAD: usize = 8;
+
+static SUBMITTED: AtomicU64 = AtomicU64::new(0);
 
 const HELP: &str = "nc-board: a nanocode task board kept in a directory or on Postgres
 usage: nc-board [--dir DIR | --sql URL] [--as ACTOR] COMMAND
@@ -336,6 +345,7 @@ fn held(board: &Board, id: &TaskId, given: Option<String>) -> Result<ClaimId, Fa
 async fn claim_next(
     parsed: &Parsed,
     board: &mut Board,
+    ids: Ids,
     at_ms: u64,
 ) -> Result<Option<TaskId>, Failure> {
     let lease_ms = parsed.lease_ms()?;
@@ -362,7 +372,7 @@ async fn claim_next(
             fence: None,
             cap: None,
         };
-        match board.submit(at_ms, claim).await {
+        match ids.submit(board, at_ms, claim).await {
             Err(BoardError::Rejected(
                 rejection @ (Rejection::Held { .. } | Rejection::Terminal),
             )) => {
@@ -382,9 +392,8 @@ async fn claim_next(
     }
 }
 
-async fn submit(board: &mut Board, at_ms: u64, op: Op) -> Result<(), Failure> {
-    board
-        .submit(at_ms, op)
+async fn submit(board: &mut Board, ids: Ids, at_ms: u64, op: Op) -> Result<(), Failure> {
+    ids.submit(board, at_ms, op)
         .await
         .map(drop)
         .map_err(|error| match error {
@@ -395,7 +404,7 @@ async fn submit(board: &mut Board, at_ms: u64, op: Op) -> Result<(), Failure> {
         })
 }
 
-async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failure> {
+async fn run(parsed: &Parsed, board: &mut Board, ids: Ids) -> Result<Option<Value>, Failure> {
     let at_ms = now_ms()?;
     let command = parsed.words[0].as_str();
     let id = |word: &str| TaskId(word.to_owned());
@@ -450,7 +459,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
         "claim-next" => {
             parsed.allow(&["label", "lease", "spread", "wait", "poll-ms"])?;
             parsed.words::<0>()?;
-            let Some(task) = claim_next(parsed, board, at_ms).await? else {
+            let Some(task) = claim_next(parsed, board, ids, at_ms).await? else {
                 return Ok(None);
             };
             task
@@ -518,7 +527,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
                     ..Terms::default()
                 },
             };
-            submit(board, at_ms, Op::Post { task: new }).await?;
+            submit(board, ids, at_ms, Op::Post { task: new }).await?;
             id(&task)
         }
         "claim" => {
@@ -527,6 +536,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             let lease_ms = parsed.lease_ms()?;
             submit(
                 board,
+                ids,
                 at_ms,
                 Op::Claim {
                     task: id(&task),
@@ -545,6 +555,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             let claim = held(board, &id(&task), parsed.one("claim")?)?;
             submit(
                 board,
+                ids,
                 at_ms,
                 Op::Renew {
                     task: id(&task),
@@ -566,6 +577,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             };
             submit(
                 board,
+                ids,
                 at_ms,
                 Op::Finish {
                     task: id(&task),
@@ -582,6 +594,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             let claim = held(board, &id(&task), parsed.one("claim")?)?;
             submit(
                 board,
+                ids,
                 at_ms,
                 Op::Release {
                     task: id(&task),
@@ -603,6 +616,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             };
             submit(
                 board,
+                ids,
                 at_ms,
                 Op::Tasks(TaskOp::Block {
                     task: id(&task),
@@ -622,7 +636,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             } else {
                 TaskOp::Reopen { task: id(&task) }
             };
-            submit(board, at_ms, Op::Tasks(op)).await?;
+            submit(board, ids, at_ms, Op::Tasks(op)).await?;
             id(&task)
         }
         "cancel" => {
@@ -630,6 +644,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             let [task, reason] = parsed.words()?;
             submit(
                 board,
+                ids,
                 at_ms,
                 Op::Cancel {
                     task: id(&task),
@@ -644,6 +659,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             let [task, body] = parsed.words()?;
             submit(
                 board,
+                ids,
                 at_ms,
                 Op::Reply {
                     task: id(&task),
@@ -663,6 +679,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             }
             submit(
                 board,
+                ids,
                 at_ms,
                 Op::Relabel {
                     task: id(&task),
@@ -678,6 +695,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             let [task] = parsed.words()?;
             submit(
                 board,
+                ids,
                 at_ms,
                 Op::Tasks(TaskOp::Assign {
                     task: id(&task),
@@ -695,21 +713,19 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
                 .checked_add(wait_ms)
                 .ok_or("--in overflows the clock")?;
             let schedule = format!("{}/{task}/{at_ms}", board.writer());
-            board
-                .schedule(
-                    at_ms,
-                    Plan {
-                        id: schedule.clone(),
-                        send: Op::Reply {
-                            task: id(&task),
-                            body,
-                        },
-                        first_ms,
-                        every_ms: parsed.secs_ms("every")?,
-                        until_ms: None,
-                        times: parsed.count("times")?,
-                    },
-                )
+            let step = Step::Schedule {
+                id: schedule.clone(),
+                by: board.writer().to_owned(),
+                send: Box::new(Op::Reply {
+                    task: id(&task),
+                    body,
+                }),
+                first_ms,
+                every_ms: parsed.secs_ms("every")?,
+                until_ms: None,
+                times: parsed.count("times")?,
+            };
+            ids.submit(board, at_ms, Op::Watch(step))
                 .await
                 .map_err(|error| error.to_string())?;
             return Ok(Some(
@@ -818,6 +834,12 @@ struct Postgres {
     log: Arc<PartedLog<SqlParts<PgSql>>>,
 }
 
+#[derive(Clone, Copy)]
+enum Ids {
+    Minted,
+    Unique,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Access {
     Read,
@@ -861,6 +883,37 @@ const WOKEN: &str = "SELECT CAST(count(*) AS TEXT) FROM (SELECT pg_notify('nanoc
 enum Claimed {
     Holding(String),
     Busy(Duration),
+}
+
+impl Ids {
+    const fn of(store: &Store) -> Self {
+        match store {
+            Store::Dir(_) => Self::Unique,
+            Store::Postgres(_) => Self::Minted,
+        }
+    }
+
+    async fn submit(self, board: &mut Board, at_ms: u64, op: Op) -> Result<Applied, BoardError> {
+        match self {
+            Self::Minted => board.submit(at_ms, op).await,
+            Self::Unique => {
+                let nanos = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| {
+                        BoardError::Store(StoreError::Backend(
+                            "the clock is before 1970".to_owned(),
+                        ))
+                    })?
+                    .as_nanos();
+                let key = format!(
+                    "{:x}-{nanos:x}-{:x}",
+                    std::process::id(),
+                    SUBMITTED.fetch_add(1, Ordering::Relaxed)
+                );
+                board.submit_keyed(&key, at_ms, op).await
+            }
+        }
+    }
 }
 
 impl Store {
@@ -1134,28 +1187,9 @@ impl Wake {
     }
 }
 
-fn open(dir: &Path) -> Result<std::fs::File, Failure> {
-    std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("board.lock"))
-        .map_err(|error| format!("{}: {error}", dir.join("board.lock").display()))?;
-    lock.lock()
-        .map_err(|error| format!("{}: {error}", dir.join("board.lock").display()))?;
-    Ok(lock)
-}
-
 async fn opened(store: &Store, identity: Identity) -> Result<Board, Failure> {
     let host: Arc<dyn LogHost> = match store {
-        Store::Dir(dir) => Arc::new(FileLog::open(
-            &dir.join("board.log"),
-            FileOptions {
-                scope: SCOPE,
-                sync: true,
-            },
-        )?),
+        Store::Dir(dir) => Arc::new(DirLog::open(dir, SCOPE)?),
         Store::Postgres(postgres) => Arc::clone(&postgres.log) as Arc<dyn LogHost>,
     };
     Board::open(host, SCOPE, identity)
@@ -1171,15 +1205,10 @@ fn locked<T>(
     work: impl AsyncFnOnce(&mut Board) -> Result<T, Failure>,
 ) -> Result<T, Failure> {
     match store {
-        Store::Dir(dir) => {
-            let lock = open(dir)?;
-            let result = runtime.block_on(async {
-                let mut board = opened(store, identity.clone()).await?;
-                work(&mut board).await
-            });
-            drop(lock);
-            result
-        }
+        Store::Dir(_) => runtime.block_on(async {
+            let mut board = opened(store, identity.clone()).await?;
+            work(&mut board).await
+        }),
         Store::Postgres(postgres) => runtime.block_on(async {
             let work = async {
                 let mut board = opened(store, identity.clone()).await?;
@@ -1241,6 +1270,7 @@ fn running(
     parsed.allow(&[
         "lease", "label", "spread", "result", "wait", "poll-ms", "on-exit",
     ])?;
+    let ids = Ids::of(store);
     let lease_ms = parsed.lease_ms()?;
     let renew_every = Duration::from_millis(lease_ms / 3);
     if renew_every.is_zero() {
@@ -1261,7 +1291,7 @@ fn running(
             runtime,
             (Access::Write, wait_ms, poll_ms),
             async |board| {
-                let Some(task) = claim_next(parsed, board, now_ms()?).await? else {
+                let Some(task) = claim_next(parsed, board, ids, now_ms()?).await? else {
                     return Ok(None);
                 };
                 let claim = held(board, &task, None)?;
@@ -1277,13 +1307,14 @@ fn running(
             async |board| {
                 let at_ms = now_ms()?;
                 let task = if target == "next" {
-                    claim_next(parsed, board, at_ms)
+                    claim_next(parsed, board, ids, at_ms)
                         .await?
                         .ok_or("no ready task matches")?
                 } else {
                     let task = TaskId(target.clone());
                     submit(
                         board,
+                        ids,
                         at_ms,
                         Op::Claim {
                             task: task.clone(),
@@ -1381,8 +1412,7 @@ fn running(
                 claim: claim.clone(),
                 lease_ms,
             };
-            board
-                .submit(now_ms()?, op)
+            ids.submit(board, now_ms()?, op)
                 .await
                 .map(drop)
                 .map_err(|error| error.to_string().into())
@@ -1428,7 +1458,7 @@ fn running(
                     outcome: Outcome::Failed(format!("exit {code}")),
                 },
             };
-            submit(board, now_ms()?, op).await?;
+            submit(board, ids, now_ms()?, op).await?;
         }
         Ok(Some(
             json!({"task": shown(board, &task, now_ms()?)?, "exit_code": code}),
@@ -1540,6 +1570,7 @@ fn session(parsed: &Parsed) -> Result<Option<Value>, Failure> {
     let identity = identity(&actor)?;
     let runtime = nanocode_executor::Runtime::new()?;
     let store = Store::open(parsed, &runtime)?;
+    let ids = Ids::of(&store);
     match parsed.words[0].as_str() {
         "whoami" => return whoami(parsed, &store, &identity, &runtime),
         "wait" => return waiting(parsed, &store, &identity, &runtime),
@@ -1551,7 +1582,7 @@ fn session(parsed: &Parsed) -> Result<Option<Value>, Failure> {
                 &identity,
                 &runtime,
                 (Access::Write, wait_ms, poll_ms),
-                async |board| run(parsed, board).await,
+                async |board| run(parsed, board, ids).await,
             );
         }
         _ => {}
@@ -1566,7 +1597,7 @@ fn session(parsed: &Parsed) -> Result<Option<Value>, Failure> {
         if reader && board.fold().access().owner().is_some() && !board.may("*", Can::Read) {
             return Err(format!("{actor} may not read this board").into());
         }
-        run(parsed, board).await
+        run(parsed, board, ids).await
     })
 }
 
