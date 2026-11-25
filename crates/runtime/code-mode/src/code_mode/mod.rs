@@ -87,7 +87,7 @@ use serde_json::{Value, value::RawValue};
 
 use nanocode_platform::Instant;
 use nanocode_process_contracts::MIN_POLL_YIELD_MS;
-use nanocode_sync::{Atom, InOrder, Sequencer, Signal, Slot, Turn};
+use nanocode_sync::{Atom, InOrder, Signal, Slot};
 use nanocode_sync::{Notify, mpsc, oneshot, watch};
 use nanocode_trace::{Instrument, info_span};
 
@@ -171,8 +171,7 @@ impl Default for Yields {
 }
 
 pub struct CodeModeRuntime {
-    admission: Sequencer,
-    admission_epoch: Arc<AtomicU64>,
+    reopened: watch::Sender<()>,
 
     cells: Arc<Atom<CellRegistry>>,
     stored: Arc<Atom<HashMap<String, Arc<RawValue>>>>,
@@ -203,15 +202,26 @@ pub struct CodeModeControl {
     current_turn: Arc<AtomicU64>,
     preempt: watch::Sender<(u64, u64)>,
     preempt_consumed: Arc<AtomicU64>,
-    admission: Sequencer,
-    admission_epoch: Arc<AtomicU64>,
+    reopened: watch::Sender<()>,
 
     cells: Arc<Atom<CellRegistry>>,
     host: Arc<Slot<EmbeddedHost>>,
 }
 
 pub struct CodeModeQuiescence {
-    _admission: Turn,
+    _closed: Closed,
+}
+
+struct Closed {
+    cells: Arc<Atom<CellRegistry>>,
+    reopened: watch::Sender<()>,
+}
+
+impl Drop for Closed {
+    fn drop(&mut self) {
+        self.cells.update(CellRegistry::reopen);
+        self.reopened.send_replace(());
+    }
 }
 
 struct EmbeddedHost {
@@ -256,6 +266,13 @@ struct CellRegistry {
     next_cell_id: u64,
     live_cells: BTreeMap<u64, Arc<LiveCell>>,
     finished: BTreeMap<String, CellJournals>,
+    admission: Admission,
+}
+
+#[derive(Clone, Copy)]
+struct Admission {
+    epoch: u64,
+    closed: u64,
 }
 
 struct LiveCell {
@@ -611,13 +628,16 @@ struct HostFailure {
 impl CodeModeRuntime {
     pub fn new_with_turn(current_turn: Arc<AtomicU64>) -> Self {
         Self {
-            admission: Sequencer::new(),
-            admission_epoch: Arc::new(AtomicU64::new(0)),
+            reopened: watch::channel(()).0,
 
             cells: Arc::new(Atom::new(CellRegistry {
                 next_cell_id: 1,
                 live_cells: BTreeMap::new(),
                 finished: BTreeMap::new(),
+                admission: Admission {
+                    epoch: 0,
+                    closed: 0,
+                },
             })),
             stored: Arc::default(),
             host: Arc::default(),
@@ -721,11 +741,12 @@ impl CodeModeRuntime {
         if !journals.has_restored(&context.session_id) {
             return;
         }
-        let _admission = self.admission.enter().await;
+        let epoch = admission_open(&self.cells, &self.reopened).await;
         let Some(restored) = journals.take_restored(&context.session_id).map(Arc::new) else {
             return;
         };
         let turn = self.current_turn.load(Ordering::Acquire);
+        let mut refused = Vec::new();
         for journal in restored.cells.iter().cloned() {
             if journal.version != CELL_JOURNAL_VERSION || journal.session_id != context.session_id {
                 nanocode_trace::warn!(
@@ -744,7 +765,14 @@ impl CodeModeRuntime {
                 journals.keep_dormant(journal, &restored);
                 continue;
             }
-            self.revive(&tools, context, journals, journal, &restored, turn);
+            if let Some(Err(cell)) =
+                self.revive(&tools, context, journals, journal, &restored, turn, epoch)
+            {
+                refused.push(cell);
+            }
+        }
+        for cell in refused {
+            cell.join().await;
         }
     }
 
@@ -761,6 +789,7 @@ impl CodeModeRuntime {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn revive(
         &self,
         tools: &Arc<dyn CodeModeToolset>,
@@ -769,7 +798,8 @@ impl CodeModeRuntime {
         journal: CellJournal,
         restored: &Restored,
         turn: u64,
-    ) -> Option<Arc<LiveCell>> {
+        epoch: u64,
+    ) -> Option<Result<Arc<LiveCell>, Arc<LiveCell>>> {
         let cell_id = journal.cell_id;
         let cell_context = OwnedToolContext {
             instruction_revision: context.instruction_revision,
@@ -842,12 +872,21 @@ impl CodeModeRuntime {
             self.limits,
             Some((record, Some(plan))),
         ));
-        self.cells.update(|registry| {
+        let admitted = self.cells.update(|registry| {
             registry.next_cell_id = registry.next_cell_id.max(cell_id.saturating_add(1));
-            registry.live_cells.insert(cell_id, Arc::clone(&cell));
+            let admitted = registry.admits(epoch);
+            if admitted {
+                registry.live_cells.insert(cell_id, Arc::clone(&cell));
+            }
+            admitted
         });
+        if !admitted {
+            cell.retire();
+            cell.request_terminate();
+            return Some(Err(cell));
+        }
         cell.yielded();
-        Some(cell)
+        Some(Ok(cell))
     }
 
     pub async fn recover_with_updates(
@@ -878,16 +917,23 @@ impl CodeModeRuntime {
             None => {
                 let journals = self.journals.as_ref()?;
                 let (journal, restored) = journals.take_dormant(&context.session_id, call_id)?;
-                let _admission = self.admission.enter().await;
+                let epoch = admission_open(&self.cells, &self.reopened).await;
                 let turn = self.current_turn.load(Ordering::Acquire);
-                self.revive(
+                match self.revive(
                     &tools,
                     &context,
                     journals,
                     Arc::unwrap_or_clone(journal),
                     &restored,
                     turn,
-                )?
+                    epoch,
+                )? {
+                    Ok(cell) => cell,
+                    Err(cell) => {
+                        cell.join().await;
+                        return None;
+                    }
+                }
             }
         };
         let record = cell.record.clone()?;
@@ -967,12 +1013,18 @@ impl CodeModeRuntime {
             current_turn: Arc::clone(&self.current_turn),
             preempt: self.preempt.clone(),
             preempt_consumed: Arc::clone(&self.preempt_consumed),
-            admission: self.admission.clone(),
-            admission_epoch: Arc::clone(&self.admission_epoch),
+            reopened: self.reopened.clone(),
 
             cells: Arc::clone(&self.cells),
             host: Arc::clone(&self.host),
         }
+    }
+
+    async fn admission_held(&self) -> Option<Closed> {
+        if !crate::sim::mutated(crate::sim::Mutation::AdmissionHeld) {
+            return None;
+        }
+        Some(close_exclusive(&self.cells, &self.reopened, false).await.0)
     }
 
     pub async fn execute(
@@ -1034,7 +1086,7 @@ impl CodeModeRuntime {
             seen: self.preempt_consumed.load(Ordering::Acquire),
             consumed: Arc::clone(&self.preempt_consumed),
         };
-        let admission_epoch = self.admission_epoch.load(Ordering::Acquire);
+        let admission_epoch = self.cells.read(|registry| registry.admission.epoch);
         let source = match parse_exec_source(source) {
             Ok(source) => source,
             Err(message) => return failed_execution(started_at, &message, Vec::new()),
@@ -1045,22 +1097,19 @@ impl CodeModeRuntime {
         nanocode_trace::Span::current().record("output.max_tokens", output_token_budget);
         let context = context.with_output_token_budget(output_token_budget);
 
-        let admission = self.admission.enter().await;
-        if self.admission_epoch.load(Ordering::Acquire) != admission_epoch {
-            return observed_execution(
-                tools.as_ref(),
-                "Script terminated",
-                true,
-                started_at,
-                Vec::new(),
-                Some(output_token_budget),
-                Vec::new(),
-                Vec::new(),
-            );
+        let open = admission_open(&self.cells, &self.reopened).await;
+        let held = self.admission_held().await;
+        if open != admission_epoch {
+            return terminated_execution(tools.as_ref(), started_at, output_token_budget);
         }
         if let Some(journals) = &self.journals {
             journals.load(&context.session_id).await;
             journals.await_restore(&context.session_id).await;
+        }
+        if !self.cells.read(|registry| registry.admits(admission_epoch)) {
+            return terminated_execution(tools.as_ref(), started_at, output_token_budget);
+        }
+        if let Some(journals) = &self.journals {
             self.restore_stored(journals, &context.session_id);
             journals.discard_restored(&context.session_id).await;
             journals.release_finished(&context.session_id).await;
@@ -1100,6 +1149,12 @@ impl CodeModeRuntime {
             if let Some(record) = &record {
                 record.persist(Vec::new()).await;
             }
+            if !self.cells.read(|registry| registry.admits(admission_epoch)) {
+                if let Some(record) = &record {
+                    record.forget();
+                }
+                return terminated_execution(tools.as_ref(), started_at, output_token_budget);
+            }
             let cell = Arc::new(LiveCell::spawn(
                 cell_id,
                 self.current_turn.load(Ordering::Acquire),
@@ -1114,12 +1169,25 @@ impl CodeModeRuntime {
                 self.limits,
                 record.map(|record| (record, None)),
             ));
-            self.cells.update(|registry| {
-                registry.live_cells.insert(cell_id, Arc::clone(&cell));
+            let admitted = self.cells.update(|registry| {
+                let admitted = registry.admits(admission_epoch);
+                if admitted {
+                    registry.live_cells.insert(cell_id, Arc::clone(&cell));
+                }
+                admitted
             });
+            if !admitted {
+                cell.retire();
+                cell.request_terminate();
+                cell.join().await;
+                if let Some(record) = &cell.record {
+                    record.forget();
+                }
+                return terminated_execution(cell.tools.as_ref(), started_at, output_token_budget);
+            }
             cell
         };
-        drop(admission);
+        drop(held);
         let claim = cell.claim();
         let choice = match source.yield_time_ms {
             Some(_) => YieldChoice::Named,
@@ -1450,9 +1518,11 @@ impl CodeModeControl {
         turn_id: u64,
         mut observer: Option<&mut dyn CodeModeObserver>,
     ) {
-        let _admission = self.admission.enter().await;
-        self.admission_epoch.fetch_add(1, Ordering::AcqRel);
+        if crate::sim::mutated(crate::sim::Mutation::AdmissionHeld) {
+            admission_open(&self.cells, &self.reopened).await;
+        }
         let cells = self.cells.update(|registry| {
+            registry.close(true);
             let ids = registry
                 .live_cells
                 .iter()
@@ -1464,6 +1534,10 @@ impl CodeModeControl {
                 .filter_map(|id| registry.live_cells.remove(&id))
                 .collect::<Vec<_>>()
         });
+        let _closed = Closed {
+            cells: Arc::clone(&self.cells),
+            reopened: self.reopened.clone(),
+        };
         for cell in &cells {
             cell.retire();
             cell.request_terminate();
@@ -1481,13 +1555,8 @@ impl CodeModeControl {
         &self,
         mut observer: Option<&mut dyn CodeModeObserver>,
     ) -> CodeModeQuiescence {
-        let admission = self.admission.enter().await;
-        self.admission_epoch.fetch_add(1, Ordering::AcqRel);
-        let cells = self
-            .cells
-            .update(|registry| std::mem::take(&mut registry.live_cells))
-            .into_values()
-            .collect::<Vec<_>>();
+        let (closed, cells) = close_exclusive(&self.cells, &self.reopened, true).await;
+        let cells = cells.into_values().collect::<Vec<_>>();
         for cell in &cells {
             cell.retire();
             cell.request_terminate();
@@ -1503,9 +1572,7 @@ impl CodeModeControl {
         if let Some(mut host) = self.host.take() {
             host.worker.terminate().await;
         }
-        CodeModeQuiescence {
-            _admission: admission,
-        }
+        CodeModeQuiescence { _closed: closed }
     }
 }
 
@@ -1589,6 +1656,33 @@ fn millis(duration: Duration) -> u64 {
 }
 
 impl CellRegistry {
+    fn admits(&self, epoch: u64) -> bool {
+        self.admission.epoch == epoch || crate::sim::mutated(crate::sim::Mutation::AdmitsStale)
+    }
+
+    fn close(&mut self, fence: bool) {
+        if fence {
+            self.admission.epoch = self
+                .admission
+                .epoch
+                .checked_add(1)
+                .expect("admission epochs fit in u64");
+        }
+        self.admission.closed = self
+            .admission
+            .closed
+            .checked_add(1)
+            .expect("admission closures fit in u64");
+    }
+
+    fn reopen(&mut self) {
+        assert!(
+            self.admission.closed > 0,
+            "only a closure reopens admission"
+        );
+        self.admission.closed -= 1;
+    }
+
     const fn allocate_cell_id(&mut self) -> u64 {
         let cell_id = self.next_cell_id;
         self.next_cell_id = self.next_cell_id.saturating_add(1);
@@ -2839,6 +2933,68 @@ fn running_observation(
             notifications,
         ),
         true,
+    )
+}
+
+async fn admission_open(cells: &Atom<CellRegistry>, reopened: &watch::Sender<()>) -> u64 {
+    loop {
+        let mut reopening = reopened.subscribe();
+        let admission = cells.read(|registry| registry.admission);
+        if admission.closed == 0 {
+            return admission.epoch;
+        }
+        reopening
+            .changed()
+            .await
+            .expect("the runtime keeps its admission sender");
+    }
+}
+
+async fn close_exclusive(
+    cells: &Arc<Atom<CellRegistry>>,
+    reopened: &watch::Sender<()>,
+    fence: bool,
+) -> (Closed, BTreeMap<u64, Arc<LiveCell>>) {
+    loop {
+        let mut reopening = reopened.subscribe();
+        let taken = cells.try_update(|registry| {
+            (registry.admission.closed == 0).then(|| {
+                registry.close(fence);
+                if fence {
+                    std::mem::take(&mut registry.live_cells)
+                } else {
+                    BTreeMap::new()
+                }
+            })
+        });
+        if let Some(taken) = taken {
+            let closed = Closed {
+                cells: Arc::clone(cells),
+                reopened: reopened.clone(),
+            };
+            return (closed, taken);
+        }
+        reopening
+            .changed()
+            .await
+            .expect("the runtime keeps its admission sender");
+    }
+}
+
+fn terminated_execution(
+    tools: &dyn CodeModeToolset,
+    started_at: Instant,
+    output_token_budget: usize,
+) -> CodeModeExecution {
+    observed_execution(
+        tools,
+        "Script terminated",
+        true,
+        started_at,
+        Vec::new(),
+        Some(output_token_budget),
+        Vec::new(),
+        Vec::new(),
     )
 }
 

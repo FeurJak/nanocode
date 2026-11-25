@@ -2,12 +2,21 @@ use std::{
     collections::HashMap,
     ops::Range,
     process::ExitCode,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll, Waker},
 };
 
-use nanocode_code_mode::code_mode::CellJournals;
+use nanocode_code_mode::{
+    CodeModeToolset, ToolContext, ToolOutput,
+    code_mode::{CellJournalSink, CellJournalUpdate, CellJournals, CodeModeRuntime},
+    embedded::{HostFuture, OwnedToolContext},
+    sim::{Mutation as CodeModeMutation, mutate as mutate_code_mode},
+};
 use nanocode_code_mode_engine::{CellTools, EmbeddedHost, Interrupt, RuntimeEvent};
+use nanocode_sync::watch;
 use nanocode_tool_runtime::{SessionEnvironment, Tools, runtime::ToolRuntime};
 use serde_json::{Value, json};
 
@@ -26,10 +35,18 @@ pub enum CellCallsMutation {
     None,
     CrossResults,
     RootRecoveryUnbound,
+    AdmissionHeld,
+    AdmitsStale,
 }
 
 impl CellCallsMutation {
-    const ALL: [Self; 3] = [Self::None, Self::CrossResults, Self::RootRecoveryUnbound];
+    const ALL: [Self; 5] = [
+        Self::None,
+        Self::CrossResults,
+        Self::RootRecoveryUnbound,
+        Self::AdmissionHeld,
+        Self::AdmitsStale,
+    ];
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -42,6 +59,8 @@ impl CellCallsMutation {
             Self::None => "none",
             Self::CrossResults => "cross_results",
             Self::RootRecoveryUnbound => "root_recovery_unbound",
+            Self::AdmissionHeld => "admission_held",
+            Self::AdmitsStale => "admits_stale",
         }
     }
 
@@ -187,6 +206,117 @@ fn root_recovery(seed: u64, mutation: CellCallsMutation) -> Result<(), String> {
     Ok(())
 }
 
+struct StalledJournals {
+    gate: watch::Sender<bool>,
+    saves: Arc<AtomicU64>,
+}
+
+impl CellJournalSink for StalledJournals {
+    fn save(&self, _update: CellJournalUpdate) -> HostFuture<'static, Result<(), String>> {
+        self.saves.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn forget(&self, _session_id: &str, _cell_id: u64) -> HostFuture<'static, ()> {
+        Box::pin(async {})
+    }
+
+    fn load(
+        &self,
+        _session_id: &str,
+    ) -> HostFuture<'static, Result<Vec<nanocode_code_mode::code_mode::CellJournal>, String>> {
+        let mut gate = self.gate.subscribe();
+        Box::pin(async move {
+            gate.wait_for(|open| *open)
+                .await
+                .map_err(|_| "the journal gate closed".to_owned())?;
+            Ok(Vec::new())
+        })
+    }
+}
+
+struct NoTools;
+
+impl CodeModeToolset for NoTools {
+    fn nested_tool_metadata(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
+    fn execute_nested<'a>(
+        &'a self,
+        name: &'a str,
+        _input: Value,
+        _context: ToolContext<'a>,
+    ) -> HostFuture<'a, ToolOutput> {
+        panic!("the admission check's cell has no tool {name}")
+    }
+}
+
+fn admission(seed: u64, mutation: CellCallsMutation) -> Result<(), String> {
+    mutate_code_mode(match mutation {
+        CellCallsMutation::AdmissionHeld => CodeModeMutation::AdmissionHeld,
+        CellCallsMutation::AdmitsStale => CodeModeMutation::AdmitsStale,
+        _ => CodeModeMutation::None,
+    });
+    let session = format!("cell-admission-{seed}");
+    let gate = watch::channel(false).0;
+    let saves = Arc::new(AtomicU64::new(0));
+    let mut runtime = CodeModeRuntime::new_with_turn(Arc::new(AtomicU64::new(1)));
+    runtime.set_journals(CellJournals::with_sink(Arc::new(StalledJournals {
+        gate: gate.clone(),
+        saves: Arc::clone(&saves),
+    })));
+    let control = runtime.control();
+    let context = OwnedToolContext {
+        instruction_revision: None,
+        model: String::new(),
+        session_id: session.clone(),
+        call_id: format!("{session}-exec"),
+        turn_id: None,
+        history: Arc::default(),
+        output_token_budget: nanocode_code_mode::contract::DEFAULT_TOOL_OUTPUT_TOKENS,
+        host_context: None,
+        tool_settings: Default::default(),
+    };
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut exec = std::pin::pin!(runtime.execute("store('x', 1)", Arc::new(NoTools), context));
+    if exec.as_mut().poll(&mut cx).is_ready() {
+        return Err("admission: the exec finished while its journal load was stalled".to_owned());
+    }
+    let mut terminate = std::pin::pin!(control.terminate_turn(1, None));
+    if terminate.as_mut().poll(&mut cx).is_pending() {
+        return Err(
+            "admission_unblocked: a terminate waited on another exec's stalled journal load"
+                .to_owned(),
+        );
+    }
+    gate.send_replace(true);
+    let mut spawned = Vec::new();
+    let execution = loop {
+        if let Poll::Ready(execution) = exec.as_mut().poll(&mut cx) {
+            break execution;
+        }
+        spawned.extend(crate::host::spawned().into_iter().map(|(future, _)| future));
+        spawned.retain_mut(|future| future.as_mut().poll(&mut cx).is_pending());
+        if saves.load(Ordering::SeqCst) != 0 || !control.quiet() {
+            return Err(
+                "admission_fenced: an exec admitted before a terminate moved the epoch started a cell"
+                    .to_owned(),
+            );
+        }
+        std::thread::yield_now();
+    };
+    let saved = saves.load(Ordering::SeqCst);
+    if execution.cell.is_some() || saved != 0 || !control.quiet() {
+        return Err(format!(
+            "admission_fenced: an exec admitted before a terminate moved the epoch left a cell (cell {:?}, {saved} journal saves, quiet {})",
+            execution.cell.map(|cell| cell.running),
+            control.quiet()
+        ));
+    }
+    Ok(())
+}
+
 fn simulate(seed: u64, mutation: CellCallsMutation) -> CellCallsOutcome {
     let mut rng = Rng::derive(seed, "cell_calls");
     let calls = rng.range(CALLS_MIN, CALLS_MAX);
@@ -199,11 +329,13 @@ fn simulate(seed: u64, mutation: CellCallsMutation) -> CellCallsOutcome {
     );
     let tools = CellTools::encode(&[json!({ "kind": "function", "name": "t", "tool_name": "t" })])
         .expect("the cell tool encodes");
+    let admitted = crate::host::entered(seed, &Clock::new(), || admission(seed, mutation));
     crate::host::enter(seed, &Clock::new());
     let mut host = EmbeddedHost::spawn().expect("the embedded host starts");
     let mut digest = fnv(FNV_OFFSET, shape.as_bytes());
 
-    let wrong = root_recovery(seed, mutation)
+    let wrong = admitted
+        .and_then(|()| root_recovery(seed, mutation))
         .and_then(|()| {
             host.start_cell(
                 1,

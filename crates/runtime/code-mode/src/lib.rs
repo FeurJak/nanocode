@@ -14,6 +14,7 @@ pub mod code_mode_spec;
 
 pub mod embedded;
 pub mod remote;
+pub mod sim;
 mod toolset;
 
 pub use nanocode_image as image;
