@@ -67,6 +67,14 @@ fn spawn_owner(future: impl std::future::Future<Output = ()> + 'static) -> std::
     Ok(())
 }
 
+async fn persist_observer(record: &Arc<CellRecord>) {
+    if crate::sim::mutated(crate::sim::Mutation::ObserverSaveHeld) {
+        record.persist(Vec::new()).await;
+    } else {
+        record.queue_persist();
+    }
+}
+
 async fn answer<R>(mut reply: oneshot::Sender<R>, work: impl std::future::Future<Output = R>) {
     if reply.is_closed() {
         return;
@@ -956,7 +964,7 @@ impl CodeModeRuntime {
                 .unwrap_or(record.yield_time_ms)
                 .saturating_sub(replay::wall_ms().saturating_sub(since))
         });
-        record.persist(Vec::new()).await;
+        persist_observer(&record).await;
         cell.turn_id
             .store(self.current_turn.load(Ordering::Acquire), Ordering::Release);
         cell.tools.cell_observed(&cell.origin_call_id, true);
@@ -1320,7 +1328,7 @@ impl CodeModeRuntime {
                 status.observer_yield_ms = Some(yield_time_ms);
                 status.observer_since_ms = Some(replay::wall_ms());
             });
-            record.persist(Vec::new()).await;
+            persist_observer(record).await;
         }
         let output_token_budget = arguments.max_tokens;
         if arguments.terminate {

@@ -58,6 +58,14 @@ impl Clock {
         result
     }
 
+    pub fn advance_to_next(&self) -> bool {
+        let Some(deadline_ns) = self.next_deadline_ns() else {
+            return false;
+        };
+        self.advance(deadline_ns.max(self.now_ns()));
+        true
+    }
+
     fn next_deadline_ns(&self) -> Option<u64> {
         self.timers(|timers| timers.keys().next().map(|(deadline_ns, _)| *deadline_ns))
     }

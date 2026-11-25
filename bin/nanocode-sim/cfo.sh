@@ -343,6 +343,7 @@ default_table='
 1 canary_cell_calls_root_recovery_unbound canary:8 --scenario cell_calls --mutation root_recovery_unbound
 1 canary_cell_calls_admission_held canary:8 --scenario cell_calls --mutation admission_held
 1 canary_cell_calls_admits_stale canary:8 --scenario cell_calls --mutation admits_stale
+1 canary_cell_calls_observer_save_held canary:8 --scenario cell_calls --mutation observer_save_held
 4 nested_meta pass --scenario nested_meta
 1 nested_meta_twice pass --scenario nested_meta --twice
 1 canary_nested_meta_forgets_written canary:8 --scenario nested_meta --mutation forgets_written

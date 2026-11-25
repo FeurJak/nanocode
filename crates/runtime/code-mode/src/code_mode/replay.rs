@@ -314,7 +314,7 @@ enum SavingJob {
     Stop,
 }
 
-type SavingJobs = mpsc::UnboundedSender<(SavingJob, oneshot::Sender<()>)>;
+type SavingJobs = mpsc::UnboundedSender<(SavingJob, Option<oneshot::Sender<()>>)>;
 
 type StoredJob = (
     Arc<CellRecord>,
@@ -325,13 +325,27 @@ type StoredJob = (
 type StoredJobs = mpsc::UnboundedSender<StoredJob>;
 
 impl Persistence {
-    async fn save(&self, job: SavingJob) -> std::io::Result<()> {
-        let jobs = self
+    fn jobs(&self) -> std::io::Result<&SavingJobs> {
+        if let Some(jobs) = self.saving.get() {
+            return Ok(jobs);
+        }
+        let _ = self.saving.set(start_saving()?);
+        Ok(self
             .saving
-            .get_or_try_init(|| std::future::ready(start_saving()))
-            .await?;
+            .get()
+            .expect("the saving task is set before it is read"))
+    }
+
+    fn queue(&self, job: SavingJob) -> std::io::Result<()> {
+        self.jobs()?
+            .send((job, None))
+            .map_err(|_| std::io::Error::other(SAVING_STOPPED))
+    }
+
+    async fn save(&self, job: SavingJob) -> std::io::Result<()> {
         let (reply, saved) = oneshot::channel();
-        jobs.send((job, reply))
+        self.jobs()?
+            .send((job, Some(reply)))
             .map_err(|_| std::io::Error::other(SAVING_STOPPED))?;
         saved
             .await
@@ -360,19 +374,23 @@ impl Persistence {
 }
 
 fn start_saving() -> std::io::Result<SavingJobs> {
-    let (jobs, mut received) = mpsc::unbounded_channel::<(SavingJob, oneshot::Sender<()>)>();
+    let (jobs, mut received) =
+        mpsc::unbounded_channel::<(SavingJob, Option<oneshot::Sender<()>>)>();
     super::spawn_owner(async move {
         let mut saving = Saving::Unsaved;
         while let Some((job, reply)) = received.recv().await {
             let saving = &mut saving;
-            super::answer(reply, async move {
+            let work = async move {
                 match job {
                     SavingJob::Persist { record, started } => record.save(saving, &started).await,
                     SavingJob::Finish(record) => record.save_finished(saving).await,
                     SavingJob::Stop => *saving = Saving::Stopped,
                 }
-            })
-            .await;
+            };
+            match reply {
+                Some(reply) => super::answer(reply, work).await,
+                None => work.await,
+            }
         }
     })?;
     Ok(jobs)
@@ -1089,6 +1107,19 @@ impl CellRecord {
             })
             .await;
         if let Err(error) = saved {
+            self.unsaved(&error);
+        }
+    }
+
+    pub(super) fn queue_persist(self: &Arc<Self>) {
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        let queued = persistence.queue(SavingJob::Persist {
+            record: Arc::clone(self),
+            started: Vec::new(),
+        });
+        if let Err(error) = queued {
             self.unsaved(&error);
         }
     }

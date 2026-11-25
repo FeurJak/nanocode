@@ -29,6 +29,8 @@ const CALLS_MIN: u64 = 1_000;
 const CALLS_MAX: u64 = 30_000;
 const BATCH_MAX: u64 = 500;
 const PAD_MAX: u64 = 64;
+const OBSERVER_YIELD_MS: u64 = 10;
+const OBSERVER_SPINS_MAX: u64 = 100_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CellCallsMutation {
@@ -37,15 +39,17 @@ pub enum CellCallsMutation {
     RootRecoveryUnbound,
     AdmissionHeld,
     AdmitsStale,
+    ObserverSaveHeld,
 }
 
 impl CellCallsMutation {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::None,
         Self::CrossResults,
         Self::RootRecoveryUnbound,
         Self::AdmissionHeld,
         Self::AdmitsStale,
+        Self::ObserverSaveHeld,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -61,6 +65,7 @@ impl CellCallsMutation {
             Self::RootRecoveryUnbound => "root_recovery_unbound",
             Self::AdmissionHeld => "admission_held",
             Self::AdmitsStale => "admits_stale",
+            Self::ObserverSaveHeld => "observer_save_held",
         }
     }
 
@@ -252,12 +257,136 @@ impl CodeModeToolset for NoTools {
     }
 }
 
-fn admission(seed: u64, mutation: CellCallsMutation) -> Result<(), String> {
-    mutate_code_mode(match mutation {
+const fn code_mode_mutation(mutation: CellCallsMutation) -> CodeModeMutation {
+    match mutation {
         CellCallsMutation::AdmissionHeld => CodeModeMutation::AdmissionHeld,
         CellCallsMutation::AdmitsStale => CodeModeMutation::AdmitsStale,
+        CellCallsMutation::ObserverSaveHeld => CodeModeMutation::ObserverSaveHeld,
         _ => CodeModeMutation::None,
-    });
+    }
+}
+
+struct GatedSaves {
+    gate: watch::Sender<bool>,
+}
+
+impl CellJournalSink for GatedSaves {
+    fn save(&self, _update: CellJournalUpdate) -> HostFuture<'static, Result<(), String>> {
+        let mut gate = self.gate.subscribe();
+        Box::pin(async move {
+            gate.wait_for(|open| *open)
+                .await
+                .map_err(|_| "the journal gate closed".to_owned())?;
+            Ok(())
+        })
+    }
+
+    fn forget(&self, _session_id: &str, _cell_id: u64) -> HostFuture<'static, ()> {
+        Box::pin(async {})
+    }
+}
+
+struct PendingTool;
+
+impl CodeModeToolset for PendingTool {
+    fn nested_tool_metadata(&self) -> Vec<Value> {
+        vec![json!({ "kind": "function", "name": "t", "tool_name": "t" })]
+    }
+
+    fn execute_nested<'a>(
+        &'a self,
+        _name: &'a str,
+        _input: Value,
+        _context: ToolContext<'a>,
+    ) -> HostFuture<'a, ToolOutput> {
+        Box::pin(std::future::pending())
+    }
+}
+
+fn cell_context(session: &str, call_id: &str) -> OwnedToolContext {
+    OwnedToolContext {
+        instruction_revision: None,
+        model: String::new(),
+        session_id: session.to_owned(),
+        call_id: call_id.to_owned(),
+        turn_id: None,
+        history: Arc::default(),
+        output_token_budget: nanocode_code_mode::contract::DEFAULT_TOOL_OUTPUT_TOKENS,
+        host_context: None,
+        tool_settings: Default::default(),
+    }
+}
+
+fn spin<T>(
+    future: &mut std::pin::Pin<&mut impl Future<Output = T>>,
+    spawned: &mut Vec<nanocode_platform::HostFuture>,
+    clock: &Clock,
+) -> Option<T> {
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..OBSERVER_SPINS_MAX {
+        if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+            return Some(value);
+        }
+        spawned.extend(crate::host::spawned().into_iter().map(|(future, _)| future));
+        spawned.retain_mut(|future| future.as_mut().poll(&mut cx).is_pending());
+        if !clock.advance_to_next() {
+            std::thread::yield_now();
+        }
+    }
+    None
+}
+
+fn observer_save(seed: u64, mutation: CellCallsMutation, clock: &Clock) -> Result<(), String> {
+    mutate_code_mode(code_mode_mutation(mutation));
+    let session = format!("cell-observer-{seed}");
+    let gate = watch::channel(true).0;
+    let mut runtime = CodeModeRuntime::new_with_turn(Arc::new(AtomicU64::new(1)));
+    runtime.set_journals(CellJournals::with_sink(Arc::new(GatedSaves {
+        gate: gate.clone(),
+    })));
+    let mut spawned = Vec::new();
+    let source =
+        format!("// @exec: {{\"yield_time_ms\": {OBSERVER_YIELD_MS}}}\nawait tools.t({{}});");
+    let exec = runtime.execute(
+        &source,
+        Arc::new(PendingTool),
+        cell_context(&session, &format!("{session}-exec")),
+    );
+    let mut exec = std::pin::pin!(exec);
+    let execution = spin(&mut exec, &mut spawned, clock)
+        .ok_or_else(|| "observer_save: the exec never yielded".to_owned())?;
+    if !execution.cell.is_some_and(|cell| cell.running) {
+        return Err(
+            "observer_save: a cell waiting on a tool that never answers stopped".to_owned(),
+        );
+    }
+    gate.send_replace(false);
+    let wait = format!("{{\"cell_id\": \"1\", \"yield_time_ms\": {OBSERVER_YIELD_MS}}}");
+    let first_context = cell_context(&session, &format!("{session}-wait-1"));
+    let mut first = std::pin::pin!(runtime.wait(&wait, first_context.as_context()));
+    let first_done = spin(&mut first, &mut spawned, clock);
+    if let Some(execution) = first_done {
+        return Err(format!(
+            "observer_save: a wait answered while its journal saves were stalled (running {:?})",
+            execution.cell.map(|cell| cell.running)
+        ));
+    }
+    let second_context = cell_context(&session, &format!("{session}-wait-2"));
+    let mut second = std::pin::pin!(runtime.wait(&wait, second_context.as_context()));
+    let refused = spin(&mut second, &mut spawned, clock)
+        .is_some_and(|execution| !execution.success && execution.cell.is_none());
+    gate.send_replace(true);
+    if refused {
+        return Err(
+            "observer_unheld: a wait was refused as busy because a wait that had passed its yield kept the cell's observer claim while its journal save was stalled"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn admission(seed: u64, mutation: CellCallsMutation) -> Result<(), String> {
+    mutate_code_mode(code_mode_mutation(mutation));
     let session = format!("cell-admission-{seed}");
     let gate = watch::channel(false).0;
     let saves = Arc::new(AtomicU64::new(0));
@@ -330,11 +459,16 @@ fn simulate(seed: u64, mutation: CellCallsMutation) -> CellCallsOutcome {
     let tools = CellTools::encode(&[json!({ "kind": "function", "name": "t", "tool_name": "t" })])
         .expect("the cell tool encodes");
     let admitted = crate::host::entered(seed, &Clock::new(), || admission(seed, mutation));
+    let observed = {
+        let clock = Clock::new();
+        crate::host::entered(seed, &clock, || observer_save(seed, mutation, &clock))
+    };
     crate::host::enter(seed, &Clock::new());
     let mut host = EmbeddedHost::spawn().expect("the embedded host starts");
     let mut digest = fnv(FNV_OFFSET, shape.as_bytes());
 
     let wrong = admitted
+        .and_then(|()| observed)
         .and_then(|()| root_recovery(seed, mutation))
         .and_then(|()| {
             host.start_cell(
