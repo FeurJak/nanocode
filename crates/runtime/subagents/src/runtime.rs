@@ -1392,11 +1392,25 @@ enum JournalRequest {
     },
 }
 
-pub(super) type ScopeJob = Box<dyn FnOnce(Arc<Registry>) -> RegistryFuture<'static, ()> + Send>;
+pub(super) type ScopeJob = Box<
+    dyn FnOnce(Arc<Registry>) -> RegistryFuture<'static, Option<RegistryFuture<'static, ()>>>
+        + Send,
+>;
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Footprint {
+    Agent(AgentId),
+    Scope,
+}
+
+pub(super) enum Staged<T> {
+    Done(T),
+    Stopping(RegistryFuture<'static, T>),
+}
 
 #[derive(Default)]
 pub(super) struct ScopeLocks {
-    closer: std::sync::OnceLock<mpsc::UnboundedSender<ScopeJob>>,
+    closer: std::sync::OnceLock<mpsc::UnboundedSender<(Footprint, ScopeJob)>>,
     thawed: watch::Sender<u64>,
     pub(super) pending_checkpoints: AtomicUsize,
     evicting: Rerun,
@@ -3402,8 +3416,12 @@ impl Registry {
         };
         let root = root_session_id.to_owned();
         let ordered = self
-            .in_scope_order(root_session_id, move |registry| {
-                Box::pin(async move { registry.deliver_steers(&root, id, priority, steers).await })
+            .in_scope_order(root_session_id, Footprint::Agent(id), move |registry| {
+                Box::pin(async move {
+                    Staged::Stopping(Box::pin(async move {
+                        registry.deliver_steers(&root, id, priority, steers).await;
+                    }))
+                })
             })
             .await;
         if let Err(error) = ordered {
@@ -3825,6 +3843,39 @@ impl Registry {
             .map_err(|_| std::io::Error::other("subagent journal write was interrupted"))?
     }
 
+    fn kept_scope_locks(&self, root_session_id: &str) -> Option<Arc<ScopeLocks>> {
+        self.scope_locks
+            .read(|locks| locks.get(root_session_id).cloned())
+    }
+
+    async fn prune_scope_locks(&self) {
+        if crate::sim::mutated(crate::sim::Mutation::ScopeLocksKept) {
+            return;
+        }
+        let ended = self
+            .state
+            .call(|state| {
+                state
+                    .scopes
+                    .iter()
+                    .filter(|(_, scope)| scope.life.frozen())
+                    .map(|(root, _)| root.clone())
+                    .collect::<HashSet<_>>()
+            })
+            .await;
+        if ended.is_empty() {
+            return;
+        }
+        self.scope_locks.update(|locks| {
+            locks.retain(|root, _| !ended.contains(root));
+        });
+    }
+
+    #[doc(hidden)]
+    pub fn scope_locks_kept(&self) -> usize {
+        self.scope_locks.read(HashMap::len)
+    }
+
     pub(super) fn scope_locks(&self, root_session_id: &str) -> Arc<ScopeLocks> {
         if let Some(locks) = self
             .scope_locks
@@ -3842,28 +3893,70 @@ impl Registry {
         })
     }
 
-    pub(super) async fn in_scope_order<T, F>(&self, session_id: &str, job: F) -> std::io::Result<T>
+    pub(super) async fn in_scope_order<T, F>(
+        &self,
+        session_id: &str,
+        footprint: Footprint,
+        job: F,
+    ) -> std::io::Result<T>
     where
         T: Send + 'static,
-        F: FnOnce(Arc<Self>) -> RegistryFuture<'static, T> + Send + 'static,
+        F: FnOnce(Arc<Self>) -> RegistryFuture<'static, Staged<T>> + Send + 'static,
     {
         let closed = || std::io::Error::other("subagent runtime is closed");
         let this = self.this.get().cloned().ok_or_else(closed)?;
         this.upgrade().ok_or_else(closed)?;
-        let locks = self.scope_locks(&self.root_of(session_id));
+        let root = self.root_of(session_id);
+        let locks = self.scope_locks(&root);
         let jobs = locks.closer.get_or_init(|| {
             let (jobs, queued) = mpsc::unbounded_channel();
-            drop(platform::spawn(run_scope_jobs(this, queued)));
+            drop(platform::spawn(run_scope_jobs(this, root, queued)));
             jobs
         });
         let (done, result) = oneshot::channel();
         let job: ScopeJob = Box::new(move |registry| {
             Box::pin(async move {
-                let _ = done.send(job(registry).await);
+                match job(registry).await {
+                    Staged::Done(output) => {
+                        let _ = done.send(output);
+                        None
+                    }
+                    Staged::Stopping(rest) => {
+                        let rest: RegistryFuture<'static, ()> = Box::pin(async move {
+                            let _ = done.send(rest.await);
+                        });
+                        Some(rest)
+                    }
+                }
             })
         });
-        jobs.send(job).map_err(|_| closed())?;
+        jobs.send((footprint, job)).map_err(|_| closed())?;
         result.await.map_err(|_| closed())
+    }
+
+    async fn footprint_ids(
+        &self,
+        root_session_id: &str,
+        footprint: Footprint,
+    ) -> Option<BTreeSet<AgentId>> {
+        let Footprint::Agent(id) = footprint else {
+            return None;
+        };
+        let root = root_session_id.to_owned();
+        Some(
+            self.state
+                .call(move |state| {
+                    state
+                        .scopes
+                        .get(&root)
+                        .and_then(|scope| scope.topology.subtree_postorder(id).ok())
+                        .into_iter()
+                        .flatten()
+                        .chain([id])
+                        .collect::<BTreeSet<_>>()
+                })
+                .await,
+        )
     }
 
     pub(super) async fn pause_messages(&self, session_id: &str) -> MessagePause {
@@ -4190,12 +4283,13 @@ impl Registry {
     }
 
     fn finish_pending_checkpoint(&self, root_session_id: &str) {
-        let _ = self
-            .scope_locks(root_session_id)
-            .pending_checkpoints
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-                pending.checked_sub(1)
-            });
+        if let Some(locks) = self.kept_scope_locks(root_session_id) {
+            let _ = locks.pending_checkpoints.try_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |pending| pending.checked_sub(1),
+            );
+        }
         self.changed();
     }
 
@@ -7991,34 +8085,39 @@ impl Registry {
         self.await_restored(session_id).await?;
         let warm = self.warm_subtree(session_id, id).await?;
         let session = session_id.to_owned();
-        self.in_scope_order(session_id, move |registry| {
-            Box::pin(async move {
-                let _warm = warm;
-                registry.interrupt_in_order(&session, id).await
-            })
+        self.in_scope_order(session_id, Footprint::Agent(id), move |registry| {
+            Box::pin(async move { registry.interrupt_in_order(session, id, warm).await })
         })
         .await?
     }
 
     async fn interrupt_in_order(
-        &self,
-        session_id: &str,
+        self: Arc<Self>,
+        session_id: String,
         id: AgentId,
-    ) -> std::io::Result<Vec<AgentSummary>> {
-        let _paused = self.pause_messages(session_id).await;
-        let session = session_id.to_owned();
-        let (root_session_id, ids, held) = self
+        warm: Option<Warm>,
+    ) -> Staged<std::io::Result<Vec<AgentSummary>>> {
+        let paused = self.pause_messages(&session_id).await;
+        let requested = self
             .state
-            .call(move |state| state.request_interrupt(&session, id))
-            .await?;
+            .call(move |state| state.request_interrupt(&session_id, id))
+            .await;
+        let (root_session_id, ids, held) = match requested {
+            Ok(requested) => requested,
+            Err(error) => return Staged::Done(Err(error)),
+        };
         self.settle_held(&root_session_id, held);
         self.changed();
-        let deadline = nanocode_platform::now() + AGENT_STOP_TIMEOUT;
-        self.interrupt_harnesses(&root_session_id, &ids, deadline)
-            .await?;
-        self.state
-            .call(move |state| state.summaries_in_scope(&root_session_id, &ids))
-            .await
+        Staged::Stopping(Box::pin(async move {
+            let _paused = paused;
+            let _warm = warm;
+            let deadline = nanocode_platform::now() + AGENT_STOP_TIMEOUT;
+            self.interrupt_harnesses(&root_session_id, &ids, deadline)
+                .await?;
+            self.state
+                .call(move |state| state.summaries_in_scope(&root_session_id, &ids))
+                .await
+        }))
     }
 
     pub async fn close(&self, session_id: &str, id: AgentId) -> std::io::Result<Vec<AgentSummary>> {
@@ -8033,13 +8132,16 @@ impl Registry {
         self.await_restored(session_id).await?;
         let warm = self.warm_pending(session_id).await?;
         let session = session_id.to_owned();
-        self.in_scope_order(session_id, move |registry| {
-            Box::pin(async move {
-                let _warm = warm;
-                registry.close_all_in_order(&session).await
+        let closed = self
+            .in_scope_order(session_id, Footprint::Scope, move |registry| {
+                Box::pin(async move {
+                    let _warm = warm;
+                    Staged::Done(registry.close_all_in_order(&session).await)
+                })
             })
-        })
-        .await?
+            .await?;
+        self.prune_scope_locks().await;
+        closed
     }
 
     async fn close_all_in_order(&self, session_id: &str) -> std::io::Result<Vec<AgentSummary>> {
@@ -8165,6 +8267,7 @@ impl Registry {
                 nanocode_trace::warn!(%root, %error, "could not stop subagents at shutdown");
             }
         }
+        self.prune_scope_locks().await;
         self.session_handles.update(|handles| handles.clear());
     }
 
@@ -8177,8 +8280,8 @@ impl Registry {
             .await,
         );
         let root = root_session_id.to_owned();
-        self.in_scope_order(root_session_id, move |registry| {
-            Box::pin(async move { registry.release_scope_in_order(&root).await })
+        self.in_scope_order(root_session_id, Footprint::Scope, move |registry| {
+            Box::pin(async move { Staged::Done(registry.release_scope_in_order(&root).await) })
         })
         .await?
     }
@@ -8236,10 +8339,11 @@ impl Registry {
         };
         let session = session_id.to_owned();
         let ordered = self
-            .in_scope_order(session_id, move |registry| {
+            .in_scope_order(session_id, Footprint::Scope, move |registry| {
                 Box::pin(async move {
                     let _warm = warm;
                     registry.cancel_all_in_order(&session).await;
+                    Staged::Done(())
                 })
             })
             .await;
@@ -8730,21 +8834,76 @@ impl SubagentControl {
     }
 }
 
+fn overlaps(
+    stopping: &BTreeMap<u64, Option<BTreeSet<AgentId>>>,
+    ids: Option<&BTreeSet<AgentId>>,
+) -> bool {
+    stopping.values().any(|stopped| match (stopped, ids) {
+        (Some(stopped), Some(ids)) => !stopped.is_disjoint(ids),
+        _ => true,
+    })
+}
+
 #[inline(never)]
 fn run_scope_jobs(
     registry: Weak<Registry>,
-    mut jobs: mpsc::UnboundedReceiver<ScopeJob>,
+    root_session_id: String,
+    mut jobs: mpsc::UnboundedReceiver<(Footprint, ScopeJob)>,
 ) -> RegistryFuture<'static, ()> {
     Box::pin(async move {
-        while let Some(job) = jobs.recv().await {
-            let Some(registry) = registry.upgrade() else {
-                return;
-            };
-            if crate::sim::mutated(crate::sim::Mutation::ScopeJobsOverlap) {
-                drop(platform::spawn(job(registry)));
-                continue;
+        let (stopped, mut stops) = mpsc::unbounded_channel::<u64>();
+        let mut pending = VecDeque::<(Footprint, ScopeJob)>::new();
+        let mut stopping = BTreeMap::<u64, Option<BTreeSet<AgentId>>>::new();
+        let mut next_stop = 0_u64;
+        let mut open = true;
+        loop {
+            while let Some(&(footprint, _)) = pending.front() {
+                let Some(registry) = registry.upgrade() else {
+                    return;
+                };
+                let ids = registry.footprint_ids(&root_session_id, footprint).await;
+                if overlaps(&stopping, ids.as_ref()) {
+                    break;
+                }
+                let (_, job) = pending.pop_front().expect("a front job was just read");
+                if crate::sim::mutated(crate::sim::Mutation::ScopeJobsOverlap) {
+                    drop(platform::spawn(async move {
+                        if let Some(rest) = job(registry).await {
+                            rest.await;
+                        }
+                    }));
+                    continue;
+                }
+                let Some(rest) = job(registry).await else {
+                    continue;
+                };
+                if crate::sim::mutated(crate::sim::Mutation::ScopeJobsStopInline) {
+                    rest.await;
+                    continue;
+                }
+                let stop = next_stop;
+                next_stop += 1;
+                stopping.insert(stop, ids);
+                let stopped = stopped.clone();
+                drop(platform::spawn(async move {
+                    rest.await;
+                    let _ = stopped.send(stop);
+                }));
             }
-            job(registry).await;
+            if !open && pending.is_empty() {
+                return;
+            }
+            nanocode_sync::select! {
+                job = jobs.recv(), if open => match job {
+                    Some(job) => pending.push_back(job),
+                    None => open = false,
+                },
+                stop = stops.recv() => {
+                    if let Some(stop) = stop {
+                        stopping.remove(&stop);
+                    }
+                }
+            }
         }
     })
 }

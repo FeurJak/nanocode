@@ -427,39 +427,56 @@ pub(super) fn close<'a>(
         reg.await_restored(session_id).await?;
         let warm = reg.warm_subtree(session_id, id).await?;
         let session = session_id.to_owned();
-        reg.in_scope_order(session_id, move |registry| {
-            Box::pin(async move {
-                let _warm = warm;
-                close_in_order(&registry, &session, id).await
-            })
+        reg.in_scope_order(session_id, Footprint::Agent(id), move |registry| {
+            close_in_order(registry, session, id, warm)
         })
         .await?
     })
 }
 
 #[inline(never)]
-fn close_in_order<'a>(
-    reg: &'a Registry,
-    session_id: &'a str,
+fn close_in_order(
+    reg: Arc<Registry>,
+    session_id: String,
     id: AgentId,
-) -> RegistryFuture<'a, std::io::Result<Vec<AgentSummary>>> {
+    warm: Option<Warm>,
+) -> RegistryFuture<'static, Staged<std::io::Result<Vec<AgentSummary>>>> {
     Box::pin(async move {
-        let _paused = reg.pause_messages(session_id).await;
+        let paused = reg.pause_messages(&session_id).await;
+        let requested = reg
+            .state
+            .call(move |state| state.request_close(&session_id, id))
+            .await;
         let CloseRequest {
             root_session_id,
             ids,
             harnesses,
             status_updates,
-        } = {
-            let session = session_id.to_owned();
-            reg.state
-                .call(move |state| state.request_close(&session, id))
-                .await?
+        } = match requested {
+            Ok(requested) => requested,
+            Err(error) => return Staged::Done(Err(error)),
         };
         for (id, status, lane) in status_updates {
             reg.enqueue_status(&root_session_id, id, lane, OrderedJob::Status(status));
         }
         reg.changed();
+        Staged::Stopping(Box::pin(async move {
+            let _paused = paused;
+            let _warm = warm;
+            stop_closed(&reg, root_session_id, id, ids, harnesses).await
+        }))
+    })
+}
+
+#[inline(never)]
+fn stop_closed(
+    reg: &Registry,
+    root_session_id: String,
+    id: AgentId,
+    ids: Vec<AgentId>,
+    harnesses: Vec<HarnessHandle>,
+) -> RegistryFuture<'_, std::io::Result<Vec<AgentSummary>>> {
+    Box::pin(async move {
         let summaries = reg
             .stop_and_close(root_session_id.clone(), ids, harnesses, false)
             .await?;

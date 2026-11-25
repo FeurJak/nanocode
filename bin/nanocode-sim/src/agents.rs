@@ -61,10 +61,12 @@ pub enum AgentsMutation {
     RouteSkipsClaim,
     ScopeJobsOverlap,
     RestoreSharesClaim,
+    ScopeJobsStopInline,
+    ScopeLocksKept,
 }
 
 impl AgentsMutation {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 15] = [
         Self::None,
         Self::CancelIgnored,
         Self::ShutdownHangs,
@@ -78,6 +80,8 @@ impl AgentsMutation {
         Self::RouteSkipsClaim,
         Self::ScopeJobsOverlap,
         Self::RestoreSharesClaim,
+        Self::ScopeJobsStopInline,
+        Self::ScopeLocksKept,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -101,6 +105,8 @@ impl AgentsMutation {
             Self::RouteSkipsClaim => "route_skips_claim",
             Self::ScopeJobsOverlap => "scope_jobs_overlap",
             Self::RestoreSharesClaim => "restore_shares_claim",
+            Self::ScopeJobsStopInline => "scope_jobs_stop_inline",
+            Self::ScopeLocksKept => "scope_locks_kept",
         }
     }
 
@@ -1091,6 +1097,68 @@ async fn restored_once(ledger: &Arc<Ledger>) -> Result<(), String> {
     Ok(())
 }
 
+const ASIDE_SESSION: &str = "scope-stops";
+const ASIDE_QUEUED: Duration = Duration::from_millis(1);
+
+async fn stopped_aside(ledger: &Arc<Ledger>) -> Result<(), String> {
+    let (registry, control, updates) = nanocode_subagents::channel(DEFAULT_MAX_SUBAGENTS);
+    let root = AgentHandle::new(
+        ASIDE_SESSION,
+        simulated_model(),
+        Arc::new(ScriptedFactory::new(Arc::clone(ledger))),
+    );
+    let ids = nanocode_subagents::start_agents(&root, &registry, ASIDE_SESSION, tasks(2))
+        .await
+        .map_err(|error| format!("start_agents for the scope stop check failed: {error}"))?
+        .into_iter()
+        .map(|report| report.agent_id)
+        .collect::<Vec<_>>();
+    let [closing, closed] = ids[..] else {
+        return Err(format!(
+            "start_agents started {} agents for two tasks",
+            ids.len()
+        ));
+    };
+    registry
+        .close(ASIDE_SESSION, closed)
+        .await
+        .map_err(|error| format!("closing agent {closed} failed: {error}"))?;
+    let ((close, close_at), (interrupt_from, interrupt_at)) = nanocode_sync::join!(
+        async {
+            let close = registry.close(ASIDE_SESSION, closing).await;
+            (close, nanocode_platform::now())
+        },
+        async {
+            nanocode_platform::sleep(ASIDE_QUEUED).await;
+            let from = nanocode_platform::now();
+            drop(registry.interrupt(ASIDE_SESSION, closed).await);
+            (from, nanocode_platform::now())
+        },
+    );
+    close.map_err(|error| format!("closing agent {closing} failed: {error}"))?;
+    if close_at > interrupt_from && interrupt_at >= close_at {
+        return Err(format!(
+            "an interrupt of closed agent {closed} waited {}ms for the harness stop of agent {closing}",
+            interrupt_at
+                .saturating_duration_since(interrupt_from)
+                .as_millis()
+        ));
+    }
+    control
+        .close_all(ASIDE_SESSION)
+        .await
+        .map_err(|error| format!("close_all after the scope stop check failed: {error}"))?;
+    control.shutdown().await;
+    let kept = registry.scope_locks_kept();
+    if kept > 0 {
+        return Err(format!(
+            "the registry keeps the job state of {kept} scopes after it released them"
+        ));
+    }
+    drop((registry, updates, root));
+    Ok(())
+}
+
 async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Result<u64, String> {
     let run = build(ledger, shape);
     nanocode_subagents::start_agents(
@@ -1131,6 +1199,8 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Resul
     ledger.trace("scoped in order");
     restored_once(ledger).await?;
     ledger.trace("restored once");
+    stopped_aside(ledger).await?;
+    ledger.trace("stopped aside");
     Ok(took_ms)
 }
 
@@ -1158,6 +1228,12 @@ pub fn simulate(seed: u64, mutation: AgentsMutation) -> AgentOutcome {
     }
     if mutation == AgentsMutation::RestoreSharesClaim {
         nanocode_subagents::sim::mutate(nanocode_subagents::sim::Mutation::RestoreSharesClaim);
+    }
+    if mutation == AgentsMutation::ScopeJobsStopInline {
+        nanocode_subagents::sim::mutate(nanocode_subagents::sim::Mutation::ScopeJobsStopInline);
+    }
+    if mutation == AgentsMutation::ScopeLocksKept {
+        nanocode_subagents::sim::mutate(nanocode_subagents::sim::Mutation::ScopeLocksKept);
     }
     let shape = Shape::of(seed, mutation);
     let clock = Clock::new();

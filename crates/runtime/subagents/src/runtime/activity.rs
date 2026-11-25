@@ -76,9 +76,12 @@ impl Registry {
             })
             .unwrap_or_default();
         let checkpoint_captures = self
-            .scope_locks(root_session_id)
-            .pending_checkpoints
-            .load(std::sync::atomic::Ordering::Acquire);
+            .kept_scope_locks(root_session_id)
+            .map_or(0, |locks| {
+                locks
+                    .pending_checkpoints
+                    .load(std::sync::atomic::Ordering::Acquire)
+            });
         let mut activity = SubagentActivity {
             revision,
             durable,
