@@ -1,10 +1,7 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
 };
 
 pub(crate) use nanocode_platform::unix_millis as now;
@@ -19,8 +16,9 @@ use serde_json::{Map, Value, value::RawValue};
 
 use crate::{
     durability::{
-        BlobKey, BlobUrl, EncodedPayload, Migration, MissingColumn, SharedBlobStore, Sql, SqlRow,
-        SqlStatement, StoreError, get_blob, migrate_format, migrate_format_then,
+        BlobKey, BlobUrl, ConcurrentIndex, EncodedPayload, Migrated, Migration, MissingColumn,
+        SharedBlobStore, Sql, SqlAccess, SqlDialect, SqlRow, SqlStatement, StoreError,
+        build_index_concurrently, get_blob, migrate_format,
     },
     input::{Prompt, PromptInput, UserInput},
     stored_event::Stored,
@@ -60,7 +58,15 @@ const CONVERT: [&[&str]; 2] = [
         "DROP TABLE IF EXISTS turns",
     ],
 ];
-const MIGRATIONS: [Migration; 2] = [
+const HEADS: [&[&str]; 2] = [
+    &[
+        "CREATE TABLE IF NOT EXISTS log_heads (scope TEXT PRIMARY KEY, epoch INTEGER NOT NULL, version INTEGER NOT NULL)",
+    ],
+    &[
+        "CREATE TABLE IF NOT EXISTS log_heads (scope TEXT PRIMARY KEY, epoch BIGINT NOT NULL, version BIGINT NOT NULL)",
+    ],
+];
+const MIGRATIONS: [Migration; 3] = [
     Migration {
         statements: [&SCHEMA[0], &SCHEMA[1]],
         adopt: Some(MissingColumn {
@@ -70,6 +76,10 @@ const MIGRATIONS: [Migration; 2] = [
     },
     Migration {
         statements: CONVERT,
+        adopt: None,
+    },
+    Migration {
+        statements: HEADS,
         adopt: None,
     },
 ];
@@ -82,13 +92,33 @@ const TURN_ORDER: &[&str] = &[
     "DROP INDEX IF EXISTS log_turns_status",
     "CREATE INDEX IF NOT EXISTS log_turns_order ON log_turns (scope, tail_first)",
 ];
+const TURN_ORDER_DROPS: [&str; 2] = [
+    "DROP INDEX CONCURRENTLY IF EXISTS log_turns_tail",
+    "DROP INDEX CONCURRENTLY IF EXISTS log_turns_status",
+];
 const ORDER: [Migration; 1] = [Migration {
-    statements: [TURN_ORDER, TURN_ORDER],
+    statements: [TURN_ORDER, &[]],
     adopt: None,
 }];
+const ORDER_INDEX: ConcurrentIndex = ConcurrentIndex {
+    name: "log_turns_order",
+    create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS log_turns_order ON log_turns (scope, tail_first)",
+    drop: "DROP INDEX CONCURRENTLY IF EXISTS log_turns_order",
+};
+const COMPONENT: &str = "session_log";
+const INDEXES_COMPONENT: &str = "session_log_indexes";
+const ORDER_COMPONENT: &str = "session_log_order";
+const HEAD_CLAIM: Dialects = [
+    "INSERT INTO log_heads (scope, epoch, version) VALUES (?1, 1, 0) ON CONFLICT (scope) DO UPDATE SET epoch = epoch + 1 RETURNING CAST(epoch AS TEXT)",
+    "INSERT INTO log_heads (scope, epoch, version) VALUES ($1::text, 1, 0) ON CONFLICT (scope) DO UPDATE SET epoch = log_heads.epoch + 1 RETURNING CAST(epoch AS TEXT)",
+];
+const HEAD_CAS: Dialects = [
+    "UPDATE log_heads SET version = version + 1 WHERE scope = ?1 AND epoch = CAST(?2 AS INTEGER) RETURNING CAST(version AS TEXT)",
+    "UPDATE log_heads SET version = version + 1 WHERE scope = $1::text AND epoch = CAST($2::text AS BIGINT) RETURNING CAST(version AS TEXT)",
+];
 const PART: Dialects = [
-    "INSERT INTO log_parts (key, data) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
-    "INSERT INTO log_parts (key, data) VALUES ($1::text, $2::text) ON CONFLICT DO NOTHING",
+    "INSERT INTO log_parts (key, data) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM log_heads WHERE log_heads.scope = ?3 AND log_heads.epoch = CAST(?4 AS INTEGER)) ON CONFLICT DO NOTHING",
+    "INSERT INTO log_parts (key, data) SELECT $1::text, $2::text WHERE EXISTS (SELECT 1 FROM log_heads WHERE log_heads.scope = $3::text AND log_heads.epoch = CAST($4::text AS BIGINT)) ON CONFLICT DO NOTHING",
 ];
 const READ_PART: Dialects = [
     "SELECT data FROM log_parts WHERE key = ?1",
@@ -137,28 +167,20 @@ const HOLDER: Dialects = [
     "SELECT request_id, CAST(tail_last AS TEXT), CAST(octet_length(tail) AS TEXT), CAST(octet_length(digest) + COALESCE(octet_length(prompt), 0) + COALESCE(octet_length(hand), 0) + octet_length(metadata) + COALESCE(octet_length(note), 0) + COALESCE(octet_length(retry), 0) + COALESCE(octet_length(edits), 0) + COALESCE(octet_length(result), 0) AS TEXT) FROM log_turns WHERE scope = $1::text AND tail_first IS NOT NULL ORDER BY log_turns.tail_first DESC LIMIT 1",
 ];
 const NEW_TURN: Dialects = [
-    "INSERT INTO log_turns (scope, request_id, digest, status, prompt, hand, metadata, cancel_requested, first_seq, tail_first, tail_last, tail) SELECT ?1, ?2, ?3, 'queued', ?4, json_extract(?5, '$'), ?6, 0, CAST(?7 AS INTEGER), CAST(?8 AS INTEGER), CAST(?9 AS INTEGER), ?10 RETURNING request_id",
-    "INSERT INTO log_turns (scope, request_id, digest, status, prompt, hand, metadata, cancel_requested, first_seq, tail_first, tail_last, tail) SELECT $1::text, $2::text, $3::text, 'queued', $4::text, CAST($5::text AS json) #>> '{}', $6::text, 0, CAST($7::text AS BIGINT), CAST($8::text AS BIGINT), CAST($9::text AS BIGINT), $10::text RETURNING request_id",
-];
-const CHECK_TAIL: Dialects = [
-    "SELECT json(CASE WHEN EXISTS (SELECT 1 FROM log_turns WHERE scope = ?1 AND request_id = ?2 AND tail_last = CAST(?3 AS INTEGER)) THEN 'true' ELSE 'the session log changed outside its writer' END)",
-    "SELECT CAST(1 / (SELECT COUNT(*) FROM log_turns WHERE scope = $1::text AND request_id = $2::text AND tail_last = CAST($3::text AS BIGINT)) AS TEXT)",
-];
-const CHECK_TURN: Dialects = [
-    "SELECT json(CASE WHEN EXISTS (SELECT 1 FROM log_turns WHERE scope = ?1 AND request_id = ?2 AND status = ?3 AND digest = ?4 AND COALESCE(tail_last, -1) = CAST(?5 AS INTEGER)) THEN 'true' ELSE 'the session log changed outside its writer' END)",
-    "SELECT CAST(1 / (SELECT COUNT(*) FROM log_turns WHERE scope = $1::text AND request_id = $2::text AND status = $3::text AND digest = $4::text AND COALESCE(tail_last, -1) = CAST($5::text AS BIGINT)) AS TEXT)",
+    "INSERT INTO log_turns (scope, request_id, digest, status, prompt, hand, metadata, cancel_requested, first_seq, tail_first, tail_last, tail) SELECT ?1, ?2, ?3, 'queued', ?4, json_extract(?5, '$'), ?6, 0, CAST(?7 AS INTEGER), CAST(?8 AS INTEGER), CAST(?9 AS INTEGER), ?10 WHERE EXISTS (SELECT 1 FROM log_heads WHERE log_heads.scope = ?1 AND log_heads.epoch = CAST(?11 AS INTEGER)) RETURNING request_id",
+    "INSERT INTO log_turns (scope, request_id, digest, status, prompt, hand, metadata, cancel_requested, first_seq, tail_first, tail_last, tail) SELECT $1::text, $2::text, $3::text, 'queued', $4::text, CAST($5::text AS json) #>> '{}', $6::text, 0, CAST($7::text AS BIGINT), CAST($8::text AS BIGINT), CAST($9::text AS BIGINT), $10::text WHERE EXISTS (SELECT 1 FROM log_heads WHERE log_heads.scope = $1::text AND log_heads.epoch = CAST($11::text AS BIGINT)) RETURNING request_id",
 ];
 const UPDATE_TURN: Dialects = [
-    "UPDATE log_turns SET status = ?3, digest = ?4, prompt = CASE ?5 WHEN 's' THEN ?6 WHEN 'n' THEN NULL ELSE prompt END, cancel_requested = CAST(?7 AS INTEGER), note = CASE ?8 WHEN 's' THEN ?9 WHEN 'n' THEN NULL ELSE note END, retry = CASE ?10 WHEN 's' THEN ?11 WHEN 'n' THEN NULL ELSE retry END, edits = CASE ?12 WHEN 's' THEN ?13 WHEN 'n' THEN NULL ELSE edits END, last_seq = COALESCE(CAST(NULLIF(?14, '') AS INTEGER), last_seq), result = CASE ?15 WHEN 's' THEN ?16 WHEN 'n' THEN NULL ELSE result END, tail_last = COALESCE(CAST(NULLIF(?18, '') AS INTEGER), tail_last), tail = CASE WHEN ?17 = '' THEN tail ELSE COALESCE(tail, '') || ?19 END WHERE scope = ?1 AND request_id = ?2 AND status = ?20 AND digest = ?21 AND COALESCE(tail_last, -1) = CAST(?22 AS INTEGER) RETURNING request_id",
-    "UPDATE log_turns SET status = $3::text, digest = $4::text, prompt = CASE $5::text WHEN 's' THEN $6::text WHEN 'n' THEN NULL ELSE prompt END, cancel_requested = CAST($7::text AS INTEGER), note = CASE $8::text WHEN 's' THEN $9::text WHEN 'n' THEN NULL ELSE note END, retry = CASE $10::text WHEN 's' THEN $11::text WHEN 'n' THEN NULL ELSE retry END, edits = CASE $12::text WHEN 's' THEN $13::text WHEN 'n' THEN NULL ELSE edits END, last_seq = COALESCE(CAST(NULLIF($14::text, '') AS BIGINT), last_seq), result = CASE $15::text WHEN 's' THEN $16::text WHEN 'n' THEN NULL ELSE result END, tail_last = COALESCE(CAST(NULLIF($18::text, '') AS BIGINT), tail_last), tail = CASE WHEN $17::text = '' THEN tail ELSE COALESCE(tail, '') || $19::text END WHERE scope = $1::text AND request_id = $2::text AND status = $20::text AND digest = $21::text AND COALESCE(tail_last, -1) = CAST($22::text AS BIGINT) RETURNING request_id",
+    "UPDATE log_turns SET status = ?3, digest = ?4, prompt = CASE ?5 WHEN 's' THEN ?6 WHEN 'n' THEN NULL ELSE prompt END, cancel_requested = CAST(?7 AS INTEGER), note = CASE ?8 WHEN 's' THEN ?9 WHEN 'n' THEN NULL ELSE note END, retry = CASE ?10 WHEN 's' THEN ?11 WHEN 'n' THEN NULL ELSE retry END, edits = CASE ?12 WHEN 's' THEN ?13 WHEN 'n' THEN NULL ELSE edits END, last_seq = COALESCE(CAST(NULLIF(?14, '') AS INTEGER), last_seq), result = CASE ?15 WHEN 's' THEN ?16 WHEN 'n' THEN NULL ELSE result END, tail_last = COALESCE(CAST(NULLIF(?18, '') AS INTEGER), tail_last), tail = CASE WHEN ?17 = '' THEN tail ELSE COALESCE(tail, '') || ?19 END WHERE scope = ?1 AND request_id = ?2 AND status = ?20 AND digest = ?21 AND COALESCE(tail_last, -1) = CAST(?22 AS INTEGER) AND EXISTS (SELECT 1 FROM log_heads WHERE log_heads.scope = ?1 AND log_heads.epoch = CAST(?23 AS INTEGER)) RETURNING request_id",
+    "UPDATE log_turns SET status = $3::text, digest = $4::text, prompt = CASE $5::text WHEN 's' THEN $6::text WHEN 'n' THEN NULL ELSE prompt END, cancel_requested = CAST($7::text AS INTEGER), note = CASE $8::text WHEN 's' THEN $9::text WHEN 'n' THEN NULL ELSE note END, retry = CASE $10::text WHEN 's' THEN $11::text WHEN 'n' THEN NULL ELSE retry END, edits = CASE $12::text WHEN 's' THEN $13::text WHEN 'n' THEN NULL ELSE edits END, last_seq = COALESCE(CAST(NULLIF($14::text, '') AS BIGINT), last_seq), result = CASE $15::text WHEN 's' THEN $16::text WHEN 'n' THEN NULL ELSE result END, tail_last = COALESCE(CAST(NULLIF($18::text, '') AS BIGINT), tail_last), tail = CASE WHEN $17::text = '' THEN tail ELSE COALESCE(tail, '') || $19::text END WHERE scope = $1::text AND request_id = $2::text AND status = $20::text AND digest = $21::text AND COALESCE(tail_last, -1) = CAST($22::text AS BIGINT) AND EXISTS (SELECT 1 FROM log_heads WHERE log_heads.scope = $1::text AND log_heads.epoch = CAST($23::text AS BIGINT)) RETURNING request_id",
 ];
 const APPEND_TAIL: Dialects = [
-    "UPDATE log_turns SET status = CASE WHEN ?6 = '1' THEN 'running' ELSE status END, note = CASE WHEN ?6 = '1' THEN NULL ELSE note END, retry = CASE WHEN ?6 = '1' THEN NULL ELSE retry END, tail_last = CAST(?3 AS INTEGER), tail = tail || ?4 WHERE scope = ?1 AND request_id = ?2 AND tail_last = CAST(?5 AS INTEGER) RETURNING request_id",
-    "UPDATE log_turns SET status = CASE WHEN $6::text = '1' THEN 'running' ELSE status END, note = CASE WHEN $6::text = '1' THEN NULL ELSE note END, retry = CASE WHEN $6::text = '1' THEN NULL ELSE retry END, tail_last = CAST($3::text AS BIGINT), tail = tail || $4::text WHERE scope = $1::text AND request_id = $2::text AND tail_last = CAST($5::text AS BIGINT) RETURNING request_id",
+    "UPDATE log_turns SET status = CASE WHEN ?6 = '1' THEN 'running' ELSE status END, note = CASE WHEN ?6 = '1' THEN NULL ELSE note END, retry = CASE WHEN ?6 = '1' THEN NULL ELSE retry END, tail_last = CAST(?3 AS INTEGER), tail = tail || ?4 WHERE scope = ?1 AND request_id = ?2 AND tail_last = CAST(?5 AS INTEGER) AND EXISTS (SELECT 1 FROM log_heads WHERE log_heads.scope = ?1 AND log_heads.epoch = CAST(?7 AS INTEGER)) RETURNING request_id",
+    "UPDATE log_turns SET status = CASE WHEN $6::text = '1' THEN 'running' ELSE status END, note = CASE WHEN $6::text = '1' THEN NULL ELSE note END, retry = CASE WHEN $6::text = '1' THEN NULL ELSE retry END, tail_last = CAST($3::text AS BIGINT), tail = tail || $4::text WHERE scope = $1::text AND request_id = $2::text AND tail_last = CAST($5::text AS BIGINT) AND EXISTS (SELECT 1 FROM log_heads WHERE log_heads.scope = $1::text AND log_heads.epoch = CAST($7::text AS BIGINT)) RETURNING request_id",
 ];
 const NEW_CHUNK: Dialects = [
-    "INSERT INTO log_chunks (scope, seq, last, body) VALUES (?1, CAST(?2 AS INTEGER), CAST(?3 AS INTEGER), ?4) RETURNING scope",
-    "INSERT INTO log_chunks (scope, seq, last, body) VALUES ($1::text, CAST($2::text AS BIGINT), CAST($3::text AS BIGINT), $4::text) RETURNING scope",
+    "INSERT INTO log_chunks (scope, seq, last, body) SELECT ?1, CAST(?2 AS INTEGER), CAST(?3 AS INTEGER), ?4 WHERE EXISTS (SELECT 1 FROM log_heads WHERE log_heads.scope = ?1 AND log_heads.epoch = CAST(?5 AS INTEGER)) RETURNING scope",
+    "INSERT INTO log_chunks (scope, seq, last, body) SELECT $1::text, CAST($2::text AS BIGINT), CAST($3::text AS BIGINT), $4::text WHERE EXISTS (SELECT 1 FROM log_heads WHERE log_heads.scope = $1::text AND log_heads.epoch = CAST($5::text AS BIGINT)) RETURNING scope",
 ];
 const CHUNK_AT: Dialects = [
     "SELECT CAST(seq AS TEXT), CAST(last AS TEXT), body FROM log_chunks WHERE scope = ?1 AND seq <= CAST(?2 AS INTEGER) ORDER BY seq DESC LIMIT 1",
@@ -173,8 +195,8 @@ const TAILS: Dialects = [
     "SELECT CAST(tail_first AS TEXT), CAST(tail_last AS TEXT), tail FROM log_turns WHERE scope = $1::text AND tail_first >= GREATEST(CAST($3::text AS BIGINT) + 1, COALESCE((SELECT MAX(inner_turns.tail_first) FROM log_turns AS inner_turns WHERE inner_turns.scope = $1::text AND inner_turns.tail_first <= CAST($2::text AS BIGINT)), -1)) AND tail_last > CAST($2::text AS BIGINT) ORDER BY log_turns.tail_first LIMIT CAST($4::text AS BIGINT)",
 ];
 const IMPORT: Dialects = [
-    "INSERT INTO log_turns (scope, request_id, digest, status, prompt, hand, metadata, cancel_requested, note, first_seq, last_seq, result) SELECT ?1, json_extract(value, '$.request_id'), json_extract(value, '$.digest'), json_extract(value, '$.status'), json_extract(value, '$.prompt'), json_extract(value, '$.hand'), json_extract(value, '$.metadata'), json_extract(value, '$.cancel_requested'), json_extract(value, '$.note'), json_extract(value, '$.first_seq'), json_extract(value, '$.last_seq'), json_extract(value, '$.result') FROM json_each(?2) WHERE true ON CONFLICT DO NOTHING",
-    "INSERT INTO log_turns (scope, request_id, digest, status, prompt, hand, metadata, cancel_requested, note, first_seq, last_seq, result) SELECT $1::text, value ->> 'request_id', value ->> 'digest', value ->> 'status', value ->> 'prompt', value ->> 'hand', value ->> 'metadata', CAST(value ->> 'cancel_requested' AS INTEGER), value ->> 'note', CAST(value ->> 'first_seq' AS BIGINT), CAST(value ->> 'last_seq' AS BIGINT), value ->> 'result' FROM json_array_elements($2::text::json) AS imported (value) ON CONFLICT DO NOTHING",
+    "INSERT INTO log_turns (scope, request_id, digest, status, prompt, hand, metadata, cancel_requested, note, first_seq, last_seq, result) SELECT ?1, json_extract(value, '$.request_id'), json_extract(value, '$.digest'), json_extract(value, '$.status'), json_extract(value, '$.prompt'), json_extract(value, '$.hand'), json_extract(value, '$.metadata'), json_extract(value, '$.cancel_requested'), json_extract(value, '$.note'), json_extract(value, '$.first_seq'), json_extract(value, '$.last_seq'), json_extract(value, '$.result') FROM json_each(?2) WHERE EXISTS (SELECT 1 FROM log_heads WHERE log_heads.scope = ?1 AND log_heads.epoch = CAST(?3 AS INTEGER)) ON CONFLICT DO NOTHING",
+    "INSERT INTO log_turns (scope, request_id, digest, status, prompt, hand, metadata, cancel_requested, note, first_seq, last_seq, result) SELECT $1::text, value ->> 'request_id', value ->> 'digest', value ->> 'status', value ->> 'prompt', value ->> 'hand', value ->> 'metadata', CAST(value ->> 'cancel_requested' AS INTEGER), value ->> 'note', CAST(value ->> 'first_seq' AS BIGINT), CAST(value ->> 'last_seq' AS BIGINT), value ->> 'result' FROM json_array_elements($2::text::json) AS imported (value) WHERE EXISTS (SELECT 1 FROM log_heads WHERE log_heads.scope = $1::text AND log_heads.epoch = CAST($3::text AS BIGINT)) ON CONFLICT DO NOTHING",
 ];
 const SEAL_BYTES: usize = 16 * 1024;
 const GAP: u64 = 1 << 14;
@@ -467,6 +489,7 @@ struct Writer {
     started: HashSet<String>,
     rows: HashMap<String, Row>,
     stale: bool,
+    epoch: Option<u64>,
 }
 
 impl Writer {
@@ -743,7 +766,6 @@ struct Log<H: ?Sized> {
     host: Arc<H>,
     scope: Arc<str>,
     pub(crate) compact: bool,
-    ready: AtomicBool,
     limit: Option<usize>,
     physical_limit: Option<usize>,
     blobs: Option<Blobs>,
@@ -755,7 +777,6 @@ impl<H: Sql + ?Sized> Log<H> {
             host,
             scope,
             compact: false,
-            ready: AtomicBool::new(false),
             limit: None,
             physical_limit: None,
             blobs: None,
@@ -783,23 +804,14 @@ impl<H: Sql + ?Sized> Log<H> {
         Ok(results)
     }
 
-    async fn migrate(&self) -> Result<(), StoreError> {
-        migrate_format(&*self.host, "session_log", &MIGRATIONS).await?;
-        migrate_format(&*self.host, "session_log_indexes", &INDEXES).await?;
-        migrate_format(&*self.host, "session_log_order", &ORDER).await?;
-        self.ready.store(true, Ordering::Release);
-        Ok(())
-    }
-
     async fn execute(
         &self,
         operation: &'static str,
         statements: &[Stmt],
         spill: &Spill,
+        epoch: Option<u64>,
     ) -> Result<Vec<Vec<SqlRow>>, StoreError> {
-        if !self.ready.load(Ordering::Acquire) {
-            self.migrate().await?;
-        }
+        assert!(epoch.is_some() || spill.parts.is_empty());
         if let Some(limit) = self.physical_limit
             && statements
                 .iter()
@@ -811,20 +823,39 @@ impl<H: Sql + ?Sized> Log<H> {
         }
         self.put_blobs(&spill.blobs).await?;
         let dialect = self.host.dialect();
-        let mut prepared: Vec<SqlStatement<'_>> = spill
-            .parts
-            .iter()
-            .map(|(key, data)| SqlStatement {
-                sql: dialect.pick(&PART),
-                params: vec![key, data],
+        let scope: &str = &self.scope;
+        let epoch = epoch.map(|epoch| epoch.to_string());
+        let fence = epoch.as_deref();
+        let mut prepared: Vec<SqlStatement<'_>> = fence
+            .map(|epoch| SqlStatement {
+                sql: dialect.pick(&HEAD_CAS),
+                params: vec![scope, epoch],
             })
+            .into_iter()
             .collect();
+        let head = prepared.len();
+        prepared.extend(fence.into_iter().flat_map(|epoch| {
+            spill.parts.iter().map(move |(key, data)| SqlStatement {
+                sql: dialect.pick(&PART),
+                params: vec![key, data, scope, epoch],
+            })
+        }));
         let prefix = prepared.len();
-        prepared.extend(statements.iter().map(|statement| SqlStatement {
-            sql: dialect.pick(statement.sql),
-            params: statement.params.iter().map(String::as_str).collect(),
+        prepared.extend(statements.iter().map(|statement| {
+            SqlStatement {
+                sql: dialect.pick(statement.sql),
+                params: statement
+                    .params
+                    .iter()
+                    .map(String::as_str)
+                    .chain(fence)
+                    .collect(),
+            }
         }));
         let mut results = self.run(operation, &prepared).await?;
+        if head == 1 && results[0].is_empty() {
+            return Err(StoreError::Fenced);
+        }
         results.drain(..prefix);
         Ok(results)
     }
@@ -835,7 +866,7 @@ impl<H: Sql + ?Sized> Log<H> {
         sql: &'static Dialects,
         params: Vec<String>,
     ) -> Result<Vec<SqlRow>, StoreError> {
-        self.execute(operation, &[Stmt { sql, params }], &Spill::default())
+        self.execute(operation, &[Stmt { sql, params }], &Spill::default(), None)
             .await?
             .pop()
             .ok_or_else(|| invalid("missing query rows"))
@@ -1013,12 +1044,20 @@ impl<H: Sql + ?Sized> Log<H> {
         Ok(())
     }
 
-    async fn open(&self, writer: &mut Writer) -> Result<(), StoreError> {
-        if writer.ready && !writer.stale {
+    async fn open(&self, writer: &mut Writer, claim: bool) -> Result<(), StoreError> {
+        let claim = claim && writer.epoch.is_none();
+        if writer.ready && !writer.stale && !claim {
             return Ok(());
         }
         let scope = self.scope.to_string();
-        let open = [
+        let mut open = Vec::with_capacity(4);
+        if claim {
+            open.push(Stmt {
+                sql: &HEAD_CLAIM,
+                params: vec![scope.clone()],
+            });
+        }
+        open.extend([
             Stmt {
                 sql: &SEQ_HIGH,
                 params: vec![scope.clone()],
@@ -1031,24 +1070,16 @@ impl<H: Sql + ?Sized> Log<H> {
                 sql: &HOLDER,
                 params: vec![scope],
             },
-        ];
-        let results = if self.ready.load(Ordering::Acquire) {
-            self.execute("log_open", &open, &Spill::default()).await?
+        ]);
+        let mut results = self
+            .execute("log_open", &open, &Spill::default(), None)
+            .await?;
+        let epoch = if claim {
+            let claimed = results.remove(0);
+            let row = single(&claimed)?.ok_or_else(|| invalid("missing session log head"))?;
+            Some(counter(text(row, 0)?)?)
         } else {
-            let dialect = self.host.dialect();
-            let prepared: Vec<_> = open
-                .iter()
-                .map(|statement| SqlStatement {
-                    sql: dialect.pick(statement.sql),
-                    params: statement.params.iter().map(String::as_str).collect(),
-                })
-                .collect();
-            let results =
-                migrate_format_then(&*self.host, "session_log", &MIGRATIONS, &prepared).await?;
-            migrate_format(&*self.host, "session_log_indexes", &INDEXES).await?;
-            migrate_format(&*self.host, "session_log_order", &ORDER).await?;
-            self.ready.store(true, Ordering::Release);
-            results
+            writer.epoch
         };
         let turns = single(&results[0])?;
         let referenced = turns
@@ -1084,12 +1115,14 @@ impl<H: Sql + ?Sized> Log<H> {
             writer.holder = holder;
             writer.rows.clear();
             writer.stale = false;
+            writer.epoch = epoch;
         } else {
             *writer = Writer {
                 ready: true,
                 next: seen.saturating_add(GAP),
                 durable: high,
                 holder,
+                epoch,
                 ..Writer::default()
             };
         }
@@ -1174,27 +1207,17 @@ impl<H: Sql + ?Sized> Log<H> {
             let start = writer.started.contains(&holder.request_id);
             return Placed {
                 own: None,
-                statements: vec![
-                    Stmt {
-                        sql: &CHECK_TAIL,
-                        params: vec![
-                            self.scope.to_string(),
-                            holder.request_id.clone(),
-                            holder.last.to_string(),
-                        ],
-                    },
-                    Stmt {
-                        sql: &APPEND_TAIL,
-                        params: vec![
-                            self.scope.to_string(),
-                            holder.request_id.clone(),
-                            last.to_string(),
-                            texts.iter().map(|(_, text)| text.as_str()).collect(),
-                            holder.last.to_string(),
-                            if start { "1" } else { "0" }.to_owned(),
-                        ],
-                    },
-                ],
+                statements: vec![Stmt {
+                    sql: &APPEND_TAIL,
+                    params: vec![
+                        self.scope.to_string(),
+                        holder.request_id.clone(),
+                        last.to_string(),
+                        texts.iter().map(|(_, text)| text.as_str()).collect(),
+                        holder.last.to_string(),
+                        if start { "1" } else { "0" }.to_owned(),
+                    ],
+                }],
                 holder: Some(Holder {
                     request_id: holder.request_id.clone(),
                     last,
@@ -1348,8 +1371,20 @@ impl<H: Sql + ?Sized> Log<H> {
         let mut statements = placed.statements;
         let extra = statements.len();
         statements.extend(build(placed.own.as_ref()));
-        let mut results = match self.execute(operation, &statements, &spill).await {
+        let epoch = writer
+            .epoch
+            .expect("a session log writes only at an epoch it claimed");
+        let mut results = match self
+            .execute(operation, &statements, &spill, Some(epoch))
+            .await
+        {
             Ok(results) => results,
+            Err(StoreError::Fenced) => {
+                restore(writer, all);
+                writer.stale = true;
+                writer.epoch = None;
+                return Err(StoreError::Fenced);
+            }
             Err(error) => {
                 restore(writer, all);
                 writer.stale = true;
@@ -1372,6 +1407,14 @@ impl<H: Sql + ?Sized> Log<H> {
                 );
             }
         };
+        if placed.guard.is_some() && results.first().is_none_or(Vec::is_empty) {
+            restore(writer, all);
+            writer.stale = true;
+            return Err(StoreError::Backend(format!(
+                "session log {} tail changed outside its writer",
+                self.scope
+            )));
+        }
         results.drain(..extra);
         writer.holder = placed.holder;
         writer.durable = writer.durable.max(placed.last);
@@ -1442,7 +1485,7 @@ impl<H: Sql + ?Sized> Log<H> {
         entries: &[LogEntry],
     ) -> Result<Vec<LoggedEvent>, StoreError> {
         let created_at = now();
-        self.open(writer).await?;
+        self.open(writer, true).await?;
         let mut logged = Vec::with_capacity(entries.len());
         for entry in entries {
             let request_id = entry.request_id.as_deref();
@@ -1516,12 +1559,12 @@ impl<H: Sql + ?Sized> Log<H> {
         writer: &mut Writer,
         request_id: &str,
     ) -> Result<Option<TurnRecord>, StoreError> {
-        self.open(writer).await?;
+        self.open(writer, false).await?;
         Ok(self.read(writer, request_id).await?.map(|row| row.record))
     }
 
     async fn pending(&self, writer: &mut Writer) -> Result<Vec<TurnRecord>, StoreError> {
-        self.open(writer).await?;
+        self.open(writer, false).await?;
         let mut rows = self
             .query("pending", &PENDING, vec![self.scope.to_string()])
             .await?;
@@ -1565,7 +1608,7 @@ impl<H: Sql + ?Sized> Log<H> {
         } = submit;
         let id = request_id.as_str();
         let metadata = raw.get();
-        self.open(writer).await?;
+        self.open(writer, true).await?;
         let existing = |found: Row| {
             if found.record.digest == digest {
                 Submitted::Existing(found.record)
@@ -1670,7 +1713,7 @@ impl<H: Sql + ?Sized> Log<H> {
             kind: "running",
             request_id,
         })?;
-        self.open(writer).await?;
+        self.open(writer, true).await?;
         let Some(found) = self.read(writer, request_id).await? else {
             return Ok(None);
         };
@@ -1757,15 +1800,6 @@ impl<H: Sql + ?Sized> Log<H> {
             .digest
             .clone()
             .unwrap_or_else(|| found.record.digest.clone());
-        let check = vec![
-            scope.clone(),
-            request_id.to_owned(),
-            found.status.as_str().to_owned(),
-            found.record.digest.clone(),
-            found
-                .tail_last
-                .map_or_else(|| "-1".to_owned(), |seq| seq.to_string()),
-        ];
         let forget = change.state.is_terminal() || matches!(change.prompt, Some(Some(_)));
         let known = (
             change.state,
@@ -1833,16 +1867,10 @@ impl<H: Sql + ?Sized> Log<H> {
                 }),
                 spill,
                 |own| {
-                    vec![
-                        Stmt {
-                            sql: &CHECK_TURN,
-                            params: check,
-                        },
-                        Stmt {
-                            sql: &UPDATE_TURN,
-                            params: params(own),
-                        },
-                    ]
+                    vec![Stmt {
+                        sql: &UPDATE_TURN,
+                        params: params(own),
+                    }]
                 },
             )
             .await?
@@ -1989,7 +2017,7 @@ impl<H: Sql + ?Sized> Log<H> {
                 fields: &failure,
             })?;
         }
-        self.open(writer).await?;
+        self.open(writer, true).await?;
         let Some(found) = self.read(writer, request_id).await? else {
             return Ok(None);
         };
@@ -2013,7 +2041,7 @@ impl<H: Sql + ?Sized> Log<H> {
             status: TurnState::Cancelled.as_str(),
             fields,
         })?;
-        self.open(writer).await?;
+        self.open(writer, true).await?;
         let Some(found) = self.read(writer, request_id).await? else {
             return Ok(None);
         };
@@ -2063,7 +2091,7 @@ impl<H: Sql + ?Sized> Log<H> {
             edit_id,
             digest: &edit,
         })?;
-        self.open(writer).await?;
+        self.open(writer, true).await?;
         let Some(found) = self.read(writer, request_id).await? else {
             return Ok(Replaced::NotQueued);
         };
@@ -2151,7 +2179,7 @@ impl<H: Sql + ?Sized> Log<H> {
             status: TurnState::Cancelled.as_str(),
             fields: &fields,
         })?;
-        self.open(writer).await?;
+        self.open(writer, true).await?;
         let Some(found) = self.read(writer, request_id).await? else {
             return Ok(None);
         };
@@ -2177,7 +2205,7 @@ impl<H: Sql + ?Sized> Log<H> {
         kind: &str,
         retry_at: u64,
     ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
-        self.open(writer).await?;
+        self.open(writer, true).await?;
         let Some(found) = self.read(writer, request_id).await? else {
             return Ok(None);
         };
@@ -2236,7 +2264,7 @@ impl<H: Sql + ?Sized> Log<H> {
         request_id: &str,
         note: &str,
     ) -> Result<(), StoreError> {
-        self.open(writer).await?;
+        self.open(writer, true).await?;
         let Some(found) = self.read(writer, request_id).await? else {
             return Ok(());
         };
@@ -2310,7 +2338,9 @@ impl<H: Sql + ?Sized> Log<H> {
                     ],
                 });
             }
-            let results = self.execute("page", &statements, &Spill::default()).await?;
+            let results = self
+                .execute("page", &statements, &Spill::default(), None)
+                .await?;
             let mut results = results.into_iter();
             let mut take = |rows: Vec<SqlRow>| -> Result<(usize, Option<u64>), StoreError> {
                 let mut first = None;
@@ -2408,7 +2438,7 @@ impl<H: Sql + ?Sized> Log<H> {
         after: u64,
         limit: usize,
     ) -> Result<LogPage, StoreError> {
-        self.open(writer).await?;
+        self.open(writer, false).await?;
         let (events, has_more) = self.select(writer, after, None, None, limit, None).await?;
         Ok(page_of(events, after, has_more))
     }
@@ -2420,7 +2450,7 @@ impl<H: Sql + ?Sized> Log<H> {
         limit: usize,
         max_bytes: usize,
     ) -> Result<LogPage, StoreError> {
-        self.open(writer).await?;
+        self.open(writer, false).await?;
         let (events, has_more) = self
             .select(writer, after, None, None, limit, Some(max_bytes))
             .await?;
@@ -2435,7 +2465,7 @@ impl<H: Sql + ?Sized> Log<H> {
         limit: usize,
         max_bytes: Option<usize>,
     ) -> Result<LogPage, StoreError> {
-        self.open(writer).await?;
+        self.open(writer, false).await?;
         let Some(found) = self.read(writer, request_id).await? else {
             return Ok(page_of(Vec::new(), after, false));
         };
@@ -2461,7 +2491,7 @@ impl<H: Sql + ?Sized> Log<H> {
         writer: &mut Writer,
         turns: &[ImportedTurn],
     ) -> Result<usize, StoreError> {
-        self.open(writer).await?;
+        self.open(writer, true).await?;
         let ids = serde_json::to_string(
             &turns
                 .iter()
@@ -2588,7 +2618,7 @@ impl<H: Sql + ?Sized> Log<H> {
             }
             previous = event.seq;
         }
-        self.open(writer).await?;
+        self.open(writer, true).await?;
         self.flush_locked(writer).await?;
         let ends = writer.durable;
         if ends < after {
@@ -2651,7 +2681,17 @@ impl<H: Sql + ?Sized> Log<H> {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
         let statements = self.chunks(&texts);
-        let results = self.execute("import_events", &statements, &spill).await?;
+        let results = match self
+            .execute("import_events", &statements, &spill, writer.epoch)
+            .await
+        {
+            Err(StoreError::Fenced) => {
+                writer.epoch = None;
+                writer.stale = true;
+                return Err(StoreError::Fenced);
+            }
+            results => results?,
+        };
         if results.iter().any(Vec::is_empty) {
             writer.ready = false;
             return Err(StoreError::NotCommitted(format!(
@@ -2762,7 +2802,8 @@ pub struct SessionLog<H: ?Sized> {
 impl<H: Sql + ?Sized> SessionLog<H> {
     pub const FORMAT: u32 = MIGRATIONS.len() as u32;
 
-    pub fn new(host: Arc<H>, scope: impl Into<Arc<str>>) -> Self {
+    pub fn new(host: Arc<H>, scope: impl Into<Arc<str>>, migrated: &Migrated) -> Self {
+        migrated.assert_opens(COMPONENT, &MIGRATIONS);
         Self {
             log: Arc::new(Log::new(host, scope.into())),
             writer: OnceCell::new(),
@@ -2809,8 +2850,27 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         &self.log.host
     }
 
-    pub async fn migrate(&self) -> Result<(), StoreError> {
-        self.log.migrate().await
+    pub async fn migrate(host: &H) -> Result<Migrated, StoreError> {
+        migrate_format(host, COMPONENT, &MIGRATIONS).await?;
+        migrate_format(host, INDEXES_COMPONENT, &INDEXES).await?;
+        if host.dialect() == SqlDialect::Postgres {
+            build_index_concurrently(host, &ORDER_INDEX).await?;
+            for sql in TURN_ORDER_DROPS {
+                let drop = [SqlStatement {
+                    sql,
+                    params: Vec::new(),
+                }];
+                host.run(SqlAccess::Autocommit, "log_index", &drop).await?;
+            }
+        }
+        migrate_format(host, ORDER_COMPONENT, &ORDER).await?;
+        Self::check(host).await
+    }
+
+    pub async fn check(host: &H) -> Result<Migrated, StoreError> {
+        Migrated::check(host, INDEXES_COMPONENT, &INDEXES).await?;
+        Migrated::check(host, ORDER_COMPONENT, &ORDER).await?;
+        Migrated::check(host, COMPONENT, &MIGRATIONS).await
     }
 }
 
@@ -2846,7 +2906,7 @@ impl<H: Sql + Send + Sync + ?Sized + 'static> SessionLog<H> {
     pub async fn flush(&self) -> Result<(), StoreError> {
         self.write(|log, writer| {
             Box::pin(async move {
-                log.open(writer).await?;
+                log.open(writer, true).await?;
                 log.flush_locked(writer).await
             })
         })

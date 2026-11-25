@@ -368,6 +368,9 @@ default_table='
 4 pg_pool pass --scenario pg_pool
 1 pg_pool_twice pass --scenario pg_pool --twice
 1 canary_pg_pool_waits_unbounded canary:8 --scenario pg_pool --mutation waits_unbounded
+8 slog pass --scenario slog
+2 slog_twice pass --scenario slog --twice
+1 canary_slog_append_skips_epoch canary:8 --scenario slog --mutation append_skips_epoch
 8 one_log_facts pass --scenario one_log_facts
 2 one_log_facts_twice pass --scenario one_log_facts --twice
 1 canary_one_log_facts_fold_reads_unlogged canary:8 --scenario one_log_facts --mutation fold_reads_unlogged
