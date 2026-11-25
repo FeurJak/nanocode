@@ -16,6 +16,7 @@ nanocode-durability-core.workspace = true
 nanocode-partitions.workspace = true
 nanocode-platform.workspace = true
 nanocode-sync.workspace = true
+nanocode-trace.workspace = true
 nanocode-sys.workspace = true
 serde.workspace = true
 serde_json.workspace = true

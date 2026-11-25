@@ -1447,6 +1447,7 @@ dependencies = [
  "nanocode-platform",
  "nanocode-sync",
  "nanocode-sys",
+ "nanocode-trace",
  "serde",
  "serde_json",
 ]

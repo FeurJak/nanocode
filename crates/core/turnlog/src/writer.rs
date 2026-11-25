@@ -13,6 +13,7 @@ use nanocode_durability_core::{
 };
 #[cfg(not(target_family = "wasm"))]
 use nanocode_sync::future::Shared;
+use nanocode_trace::Instrument as _;
 use nanocode_sync::{
     FutureExt,
     future::{Either, select},
@@ -1450,20 +1451,47 @@ impl TurnLog {
     {
         let (started, start) = oneshot::channel();
         let (mut reply, replied) = oneshot::channel();
+        let caller = nanocode_trace::Span::current();
+        let queued = nanocode_platform::now();
         let letter: Job = Box::new(move |writing| {
             Box::pin(async move {
                 if reply.is_closed() {
                     return;
                 }
+                let taken = nanocode_platform::now();
+                let waited = taken.saturating_duration_since(queued);
+                nanocode_trace::event!(
+                    target: "nc_metrics",
+                    nanocode_trace::Level::INFO,
+                    {
+                        histogram.nc.turnlog.writer_queue_micros =
+                            u64::try_from(waited.as_micros()).unwrap_or(u64::MAX)
+                    }
+                );
+                let span = nanocode_trace::info_span!(
+                    target: "nanocode",
+                    parent: caller.id(),
+                    "turnlog.writer.job",
+                    queue.ms = waited.as_secs_f64() * 1_000.0,
+                );
                 let _ = started.send(());
                 let work = std::panic::AssertUnwindSafe(async move { job(writing).await });
                 let answer = {
                     let abandoned = Box::pin(reply.closed());
-                    match select(abandoned, Box::pin(work.catch_unwind())).await {
+                    match select(abandoned, Box::pin(work.catch_unwind().instrument(span))).await {
                         Either::Left(_) => None,
                         Either::Right((answer, _)) => Some(answer),
                     }
                 };
+                let ran = nanocode_platform::now().saturating_duration_since(taken);
+                nanocode_trace::event!(
+                    target: "nc_metrics",
+                    nanocode_trace::Level::INFO,
+                    {
+                        histogram.nc.turnlog.writer_job_micros =
+                            u64::try_from(ran.as_micros()).unwrap_or(u64::MAX)
+                    }
+                );
                 if let Some(answer) = answer {
                     drop(reply.send(answer));
                 }
