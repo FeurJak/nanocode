@@ -12,38 +12,45 @@ pub struct Exported {
 
 impl OneLog {
     pub async fn export_state(&self, state_id: &str) -> Result<Option<Exported>, StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        if sim::mutated(sim::Mutation::ExportSkipsKeys) {
-            lease.load_owners(&[state_id.to_owned()]).await?;
-        } else {
-            lease.load_owner(state_id).await?;
-        }
-        if lease.buffered() > 0 && !sim::mutated(sim::Mutation::ExportSkipsCommit) {
-            lease.commit(Point::Progress).await?;
-        }
-        let values = records_of(lease.fold(), state_id)
-            .map(|(_, value)| Some(value.to_owned()))
-            .collect::<Vec<_>>();
-        lease
-            .load_owners(&shared::spliced_keys(state_id, &values)?)
-            .await?;
-        let fold = lease.fold();
-        let Some(checkpoint) = fold.checkpoint(state_id) else {
-            return Ok(None);
-        };
-        let records = records_of(fold, state_id)
-            .map(|(key, value)| {
-                Ok(StoreRecord {
-                    key: key.to_owned(),
-                    value: shared::whole(fold, state_id, value.to_owned())?.into(),
+        let state_id = state_id.to_owned();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let state_id = state_id.as_str();
+                    if sim::mutated(sim::Mutation::ExportSkipsKeys) {
+                        writing.load_owners(&[state_id.to_owned()]).await?;
+                    } else {
+                        writing.load_owner(state_id).await?;
+                    }
+                    if writing.buffered() > 0 && !sim::mutated(sim::Mutation::ExportSkipsCommit) {
+                        writing.commit(Point::Progress).await?;
+                    }
+                    let values = records_of(writing.fold(), state_id)
+                        .map(|(_, value)| Some(value.to_owned()))
+                        .collect::<Vec<_>>();
+                    writing
+                        .load_owners(&shared::spliced_keys(state_id, &values)?)
+                        .await?;
+                    let fold = writing.fold();
+                    let Some(checkpoint) = fold.checkpoint(state_id) else {
+                        return Ok(None);
+                    };
+                    let records = records_of(fold, state_id)
+                        .map(|(key, value)| {
+                            Ok(StoreRecord {
+                                key: key.to_owned(),
+                                value: shared::whole(fold, state_id, value.to_owned())?.into(),
+                            })
+                        })
+                        .collect::<Result<_, StoreError>>()?;
+                    Ok(Some(Exported {
+                        revision: checkpoint.revision,
+                        payload: checkpoint.payload.clone(),
+                        records,
+                    }))
                 })
             })
-            .collect::<Result<_, StoreError>>()?;
-        Ok(Some(Exported {
-            revision: checkpoint.revision,
-            payload: checkpoint.payload.clone(),
-            records,
-        }))
+            .await
     }
 }
 

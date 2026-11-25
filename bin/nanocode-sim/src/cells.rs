@@ -722,7 +722,7 @@ impl Cells {
             return None;
         }
         let live = self.live();
-        let saved = ready(live.log.read(|fold| {
+        let saved = ready(live.log.read(move |fold| {
             fold.cells()
                 .find(|(session, id, _)| *session == SESSION && *id == cell)
                 .map(|(_, _, updates)| updates.len())
@@ -960,9 +960,10 @@ impl Cells {
                 let before = open_calls(&live.log);
                 ready(live.sink.forget(SESSION, forgotten));
                 let after = open_calls(&live.log);
-                let journaled = ready(live.log.read(|fold| {
+                let wanted = *cell;
+                let journaled = ready(live.log.read(move |fold| {
                     fold.cells()
-                        .any(|(session, id, _)| session == SESSION && id == *cell)
+                        .any(|(session, id, _)| session == SESSION && id == wanted)
                 }));
                 let kept = before
                     .iter()

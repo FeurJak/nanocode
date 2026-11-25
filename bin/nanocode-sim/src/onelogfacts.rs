@@ -480,7 +480,10 @@ impl World {
     fn check_hosts(&self) -> Result<(), String> {
         let log = self.log.as_ref().expect("the facts log is open");
         for (key, value) in &self.hosts {
-            let held = block_on(log.read(|fold| fold.host(key).map(|held| held.get().to_owned())));
+            let wanted = key.clone();
+            let held = block_on(
+                log.read(move |fold| fold.host(&wanted).map(|held| held.get().to_owned())),
+            );
             if held.as_deref() != Some(value.as_str()) {
                 return Err(format!(
                     "host field {key} reads back as {held:?} after a restart"
@@ -519,7 +522,7 @@ impl World {
     fn check_scoped_inputs(&self) -> Result<(), String> {
         let log = self.log.as_ref().expect("the facts log is open");
         let turns = self.turns;
-        let phantom = block_on(log.read(|fold| {
+        let phantom = block_on(log.read(move |fold| {
             (1..=turns)
                 .map(|turn| format!("admitted-{turn}"))
                 .find(|turn| fold.turn(turn).is_some())
@@ -658,9 +661,10 @@ impl World {
             turn_id: None,
         }))
         .map_err(|error| format!("the gate refused intended call {call_id}: {error}"))?;
-        let copied = block_on(log.read(|fold| {
+        let wanted = call_id.to_owned();
+        let copied = block_on(log.read(move |fold| {
             fold.open_calls()
-                .any(|(id, call)| id == call_id && !call.input.get().starts_with(INTENDED_INPUT))
+                .any(|(id, call)| id == wanted && !call.input.get().starts_with(INTENDED_INPUT))
         }));
         if copied {
             return Err(format!(
@@ -772,7 +776,8 @@ impl World {
                 "abandoning intended call {call_id} returned no unknown outcome"
             ));
         }
-        let open = block_on(log.read(|fold| fold.intent(&call_id).is_some()));
+        let wanted = call_id.clone();
+        let open = block_on(log.read(move |fold| fold.intent(&wanted).is_some()));
         if open {
             return Err(format!("abandoned call {call_id} has no durable result"));
         }
@@ -852,7 +857,8 @@ impl World {
         self.expected += 1;
         block_on(log.cancel(&id, &serde_json::Map::new()))
             .map_err(|error| format!("cancel {id}: {error}"))?;
-        let open = block_on(log.read(|fold| fold.intent(&call_id).is_some()));
+        let wanted = call_id.clone();
+        let open = block_on(log.read(move |fold| fold.intent(&wanted).is_some()));
         if open {
             return Err(format!(
                 "cancelling {id} left its dispatched call {call_id} without a result"

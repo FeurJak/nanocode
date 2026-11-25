@@ -257,14 +257,14 @@ async fn read(log: &TurnLog, scope: &str, read: usize) -> Result<(), StoreError>
         0 => log.load_owner(scope).await,
         1 => log.read_owner(scope, |_| ()).await,
         2 => log.read_owners(&owners, |_| ()).await,
-        3 => log.history(0, |_| true).await,
+        3 => log.history(0, (), |(), _| true).await,
         _ => log.load_index().await,
     }
 }
 
 fn held(scope: &str, stored: &[(u64, String)], seq: u64, clock: &Arc<Clock>) {
     let (_host, log) = opened(scope, stored);
-    let lease = ready(log.lease());
+    let stalled = log.write(|_| Box::pin(nanocode_platform::sleep(STALL_BOUND * 2)));
     let ended: Rc<Vec<Cell<Option<(u64, bool)>>>> =
         Rc::new((0..READS).map(|_| Cell::new(None)).collect());
     let mut tasks = (0..READS)
@@ -276,10 +276,7 @@ fn held(scope: &str, stored: &[(u64, String)], seq: u64, clock: &Arc<Clock>) {
             }) as Task<'_>
         })
         .collect::<Vec<_>>();
-    tasks.push(Box::pin(async move {
-        nanocode_platform::sleep(STALL_BOUND * 2).await;
-        drop(lease);
-    }));
+    tasks.push(Box::pin(stalled));
     let run = Executor::new(Arc::clone(clock), Rng::derive(seq, "stall reads")).run(tasks, None);
     assert!(
         run == Ended::Finished,
@@ -310,12 +307,14 @@ fn probe(scope: &str, stored: &[(u64, String)], seq: u64, stall: Stall, clock: &
         .map(|writer| {
             let (log, clock, ended) = (&log, Arc::clone(clock), Rc::clone(&ended));
             Box::pin(async move {
-                let committed = async {
-                    let mut lease = log.lease_within().await?;
-                    lease.push(marker(writer))?;
-                    lease.commit(LogPoint::Progress).await
-                };
-                let committed = committed.await;
+                let committed = log
+                    .write_within(move |writing| {
+                        Box::pin(async move {
+                            writing.push(marker(writer))?;
+                            writing.commit(LogPoint::Progress).await
+                        })
+                    })
+                    .await;
                 let slot = usize::try_from(writer).expect("a writer index fits in usize");
                 ended[slot].set(Some((clock.now_ns(), committed.is_ok())));
             }) as Task<'_>
@@ -340,7 +339,7 @@ fn probe(scope: &str, stored: &[(u64, String)], seq: u64, stall: Stall, clock: &
             at_ns <= WRITERS * bound_ns,
             "{scope} {stall:?} stall writer {writer} ended at {at_ns} ns, past {WRITERS} bounds of {bound_ns} ns"
         );
-        let landed = ready(log.read(|fold| fold.host(&marker_key(writer)).is_some()));
+        let landed = ready(log.read(move |fold| fold.host(&marker_key(writer)).is_some()));
         assert!(
             !committed || landed,
             "{scope} {stall:?} stall writer {writer} reports a commit its reopened log does not hold"
@@ -350,10 +349,12 @@ fn probe(scope: &str, stored: &[(u64, String)], seq: u64, stall: Stall, clock: &
             "{scope} stall writer {writer} reports a commit the unanswered host never wrote"
         );
     }
-    let mut lease = ready(log.lease());
-    lease
-        .push(marker(WRITERS))
-        .unwrap_or_else(|error| panic!("{scope} refuses a record after a {stall:?} stall: {error}"));
-    ready(lease.commit(LogPoint::Progress))
-        .unwrap_or_else(|error| panic!("{scope} does not commit after a {stall:?} stall: {error}"));
+    let scope = scope.to_owned();
+    crate::facts::writing(&log, move |writing| {
+        writing.push(marker(WRITERS)).unwrap_or_else(|error| {
+            panic!("{scope} refuses a record after a {stall:?} stall: {error}")
+        });
+        ready(writing.commit(LogPoint::Progress))
+            .unwrap_or_else(|error| panic!("{scope} does not commit after a {stall:?} stall: {error}"));
+    });
 }

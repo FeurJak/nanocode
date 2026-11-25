@@ -15,7 +15,7 @@ use nanocode_durability_core::{
     StoredFact, TurnStatus, VALUE_INLINE_BYTES, referenced,
 };
 use nanocode_sync::FutureExt;
-use nanocode_turnlog::{Lease, LogHost, MemoryLog, Phase, Point, Record, TurnLog};
+use nanocode_turnlog::{LogHost, MemoryLog, Phase, Point, Record, TurnLog, Writing};
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
@@ -280,9 +280,19 @@ fn failed(what: &str) -> impl Fn(FoldError) -> String + '_ {
     move |error| format!("{what}: {error}")
 }
 
-pub fn logged(lease: &mut Lease<'_>) -> Result<Vec<(u64, StoredFact)>, String> {
+pub fn writing<R: Send + 'static>(
+    log: &TurnLog,
+    job: impl FnOnce(&mut Writing) -> R + Send + 'static,
+) -> R {
+    ready(log.write(move |writing| {
+        let output = job(writing);
+        Box::pin(std::future::ready(output))
+    }))
+}
+
+pub fn logged(writing: &mut Writing) -> Result<Vec<(u64, StoredFact)>, String> {
     let mut facts = Vec::new();
-    ready(lease.facts_from(0, |seq, _, fact| facts.push((seq, fact.clone()))))
+    ready(writing.facts_from(0, |seq, _, fact| facts.push((seq, fact.clone()))))
         .map_err(|error| format!("read the log's facts: {error}"))?;
     if let Some(gap) = facts
         .iter()
@@ -299,11 +309,11 @@ pub fn logged(lease: &mut Lease<'_>) -> Result<Vec<(u64, StoredFact)>, String> {
 }
 
 pub fn logged_blobs(
-    lease: &mut Lease<'_>,
+    writing: &mut Writing,
     facts: &[(u64, StoredFact)],
 ) -> Result<BTreeMap<Digest, Box<RawValue>>, String> {
     let digests = referenced(facts.iter().map(|(_, fact)| fact));
-    ready(lease.blobs(&digests)).map_err(|error| format!("read the log's blobs: {error}"))
+    ready(writing.blobs(&digests)).map_err(|error| format!("read the log's blobs: {error}"))
 }
 
 pub fn blob<'a>(
@@ -332,16 +342,17 @@ fn legacy_log(rng: &mut Rng, host: &Arc<MemoryLog>, shape: Shape) -> Result<Vec<
     for revision in 1..=rng.range(1, LEGACY_CHECKPOINTS_MAX) {
         messages.push(format!("\"legacy {revision} {}\"", rng.draw()));
         let payload = format!("{{\"messages\":[{}]}}", messages.join(","));
-        let mut lease = ready(log.lease());
-        lease
-            .push(Record::Checkpoint {
-                payload,
-                revision,
-                state: LEGACY_STATE.to_owned(),
-            })
-            .map_err(|error| format!("write a legacy checkpoint: {error}"))?;
-        ready(lease.commit(Point::Progress))
-            .map_err(|error| format!("commit a legacy checkpoint: {error}"))?;
+        writing(&log, move |writing| {
+            writing
+                .push(Record::Checkpoint {
+                    payload,
+                    revision,
+                    state: LEGACY_STATE.to_owned(),
+                })
+                .map_err(|error| format!("write a legacy checkpoint: {error}"))?;
+            ready(writing.commit(Point::Progress))
+                .map_err(|error| format!("commit a legacy checkpoint: {error}"))
+        })?;
     }
     Ok(messages)
 }
@@ -394,36 +405,39 @@ impl World {
         fact: OwnedFact<ChatDecision>,
         point: Point,
     ) -> Result<Option<u64>, String> {
-        let mut lease = ready(self.log.lease());
         let folded = self
             .folded
             .take()
             .expect("the world holds a fold between steps");
         let blobs = folded.values().len();
-        let unsealed = lease.fold().next_fact();
-        let (folded, seq) = folded
-            .commit(&mut lease, fact)
-            .map_err(failed("commit a fact"))?;
+        let committed = writing(&self.log, move |writing| {
+            let unsealed = writing.fold().next_fact();
+            let (folded, seq) = folded
+                .commit(writing, fact)
+                .map_err(failed("commit a fact"))?;
+            let facts = logged(writing)?;
+            let logged = crate::facts::logged_blobs(writing, &facts)?;
+            Ok::<_, String>((unsealed, folded, seq, facts, logged))
+        });
+        let (unsealed, folded, seq, facts, logged) = committed?;
         self.stats.facts += 1;
         self.stats.blobs += (folded.values().len() - blobs) as u64;
-        let facts = logged(&mut lease)?;
-        let blobs = crate::facts::logged_blobs(&mut lease, &facts)?;
         if let Some(divergence) = folded
-            .diverges(facts, |digest| crate::facts::blob(&blobs, digest))
+            .diverges(facts, |digest| crate::facts::blob(&logged, digest))
             .map_err(failed("refold the log"))?
         {
             return Err(format!("{divergence} after a commit"));
         }
         if self.rng.chance(UNCOMMITTED_PPM) && self.rng.chance(CRASH_PPM) {
-            drop(lease);
             self.stats.lost += 1;
             self.folded = Some(folded);
             self.reopen()?;
             return Ok(None);
         }
-        lease.retire_finished();
-        ready(lease.commit(point)).map_err(|error| format!("commit the log: {error}"))?;
-        drop(lease);
+        writing(&self.log, move |writing| {
+            writing.retire_finished();
+            ready(writing.commit(point)).map_err(|error| format!("commit the log: {error}"))
+        })?;
         self.check_sealed(unsealed)?;
         self.durable = Durable::of(&folded)?;
         self.digest = fnv(self.digest, self.durable.request.as_slice());
@@ -468,17 +482,35 @@ impl World {
         self.snapshots = 0;
         self.folded = None;
         self.log = open(&self.host, self.shape)?;
-        let mut lease = ready(self.log.lease());
-        if self.legacy.is_some() {
-            ready(lease.load_owner(LEGACY_STATE))
-                .map_err(|error| format!("load the legacy owner: {error}"))?;
-        }
-        let facts = logged(&mut lease)?;
-        let blobs = crate::facts::logged_blobs(&mut lease, &facts)?;
-        let fold = lease.fold();
-        let cached = fold
-            .cached()
-            .map_err(|error| format!("read the cached fold: {error}"))?;
+        let legacy = self.legacy.is_some();
+        let turns = self.finished.keys().cloned().collect::<Vec<_>>();
+        let reopened = writing(&self.log, move |writing| {
+            if legacy {
+                ready(writing.load_owner(LEGACY_STATE))
+                    .map_err(|error| format!("load the legacy owner: {error}"))?;
+            }
+            let facts = logged(writing)?;
+            let blobs = crate::facts::logged_blobs(writing, &facts)?;
+            let fold = writing.fold();
+            let cached = fold
+                .cached()
+                .map_err(|error| format!("read the cached fold: {error}"))?;
+            let open = fold
+                .open_calls()
+                .map(|(call, _)| call.to_owned())
+                .collect::<Vec<_>>();
+            let phases = turns
+                .into_iter()
+                .map(|turn| {
+                    let phase = fold.turn(&turn).map(|held| held.phase.clone());
+                    let retired = fold.retired(&turn).is_some();
+                    (turn, phase, retired)
+                })
+                .collect::<Vec<_>>();
+            let checkpoint = fold.checkpoint(LEGACY_STATE).cloned();
+            Ok::<_, String>((facts, blobs, cached, open, phases, checkpoint))
+        });
+        let (facts, blobs, cached, open, phases, checkpoint) = reopened?;
         let (folded, _) = Folded::<Chat>::open(cached, facts.clone(), |digest| {
             crate::facts::blob(&blobs, digest)
         })
@@ -509,13 +541,11 @@ impl World {
                 return Err(format!("call {call} was dispatched {times} times"));
             }
         }
-        self.check_views(fold, &folded)?;
-        let checkpoint = fold.checkpoint(LEGACY_STATE).cloned();
+        self.check_views(&open, &phases, &folded)?;
         let based = facts
             .iter()
             .filter(|(_, fact)| matches!(fact, Fact::Base(_)))
             .count();
-        drop(lease);
         self.folded = Some(folded);
         self.stats.crashes += 1;
         self.import(checkpoint, based)?;
@@ -578,21 +608,22 @@ impl World {
 
     fn check_views(
         &self,
-        fold: &nanocode_turnlog::Fold,
+        open: &[String],
+        phases: &[(String, Option<Phase>, bool)],
         folded: &Folded<Chat>,
     ) -> Result<(), String> {
-        let open: Vec<&str> = fold.open_calls().map(|(call, _)| call).collect();
-        let held: Vec<&str> = folded.state().open.keys().map(String::as_str).collect();
-        if open != held {
+        let held: Vec<&String> = folded.state().open.keys().collect();
+        if !open.iter().eq(held.iter().copied()) {
             return Err(format!(
                 "the log's open calls {open:?} differ from the fold's {held:?}"
             ));
         }
-        for (turn, finished) in &self.finished {
-            match fold.turn(turn).map(|turn| &turn.phase) {
+        for (turn, phase, retired) in phases {
+            let finished = &self.finished[turn];
+            match phase {
                 Some(Phase::Finished { .. }) if *finished => {}
                 Some(Phase::Running { .. }) if !*finished => {}
-                None if fold.retired(turn).is_some() && *finished => {}
+                None if *retired && *finished => {}
                 phase => {
                     return Err(format!(
                         "turn {turn} reads back as {phase:?} after a restart, finished={finished}"
@@ -768,11 +799,13 @@ impl World {
                 ..snapshot
             };
         }
-        let mut lease = ready(self.log.lease());
-        lease
-            .cache(&snapshot)
-            .map_err(|error| format!("cache the fold: {error}"))?;
-        ready(lease.commit(Point::Progress)).map_err(|error| format!("commit a cache: {error}"))?;
+        writing(&self.log, move |writing| {
+            writing
+                .cache(&snapshot)
+                .map_err(|error| format!("cache the fold: {error}"))?;
+            ready(writing.commit(Point::Progress))
+                .map_err(|error| format!("commit a cache: {error}"))
+        })?;
         self.stats.cached += 1;
         Ok(())
     }

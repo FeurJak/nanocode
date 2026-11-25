@@ -106,7 +106,7 @@ fn open(host: &Arc<MemoryLog>) -> Result<TurnLog, String> {
     ready(TurnLog::open(host, SCOPE)).map_err(|error| format!("open the log: {error}"))
 }
 
-trait Family: DurableFold + Clone {
+trait Family: DurableFold<Decision: Send> + Clone + Send + 'static {
     const NAME: &'static str;
     fn template() -> Result<Self::Decision, String>;
     fn legacy(texts: &[String]) -> Value;
@@ -329,16 +329,18 @@ impl<F: Family> World<F> {
         let mut texts = Vec::new();
         for revision in 1..=rng.range(1, 4) {
             texts.push(format!("legacy-{revision}-{:x}", rng.draw()));
-            let mut lease = ready(log.lease());
-            lease
-                .push(Record::Checkpoint {
-                    payload: F::legacy(&texts).to_string(),
-                    revision,
-                    state: LEGACY_STATE.to_owned(),
-                })
-                .map_err(|error| format!("write a legacy checkpoint: {error}"))?;
-            ready(lease.commit(Point::Progress))
-                .map_err(|error| format!("commit a legacy checkpoint: {error}"))?;
+            let payload = F::legacy(&texts).to_string();
+            crate::facts::writing(&log, move |writing| {
+                writing
+                    .push(Record::Checkpoint {
+                        payload,
+                        revision,
+                        state: LEGACY_STATE.to_owned(),
+                    })
+                    .map_err(|error| format!("write a legacy checkpoint: {error}"))?;
+                ready(writing.commit(Point::Progress))
+                    .map_err(|error| format!("commit a legacy checkpoint: {error}"))
+            })?;
         }
         Ok(texts)
     }
@@ -394,16 +396,19 @@ impl<F: Family> World<F> {
         fact: OwnedFact<F::Decision>,
         point: Point,
     ) -> Result<Option<u64>, String> {
-        let mut lease = ready(self.log.lease());
         let folded = self
             .folded
             .take()
             .expect("the world holds a fold between steps");
-        let (folded, seq) = folded
-            .commit(&mut lease, fact)
-            .map_err(failed("commit a fact"))?;
-        let facts = crate::facts::logged(&mut lease)?;
-        let blobs = crate::facts::logged_blobs(&mut lease, &facts)?;
+        let committed = crate::facts::writing(&self.log, move |writing| {
+            let (folded, seq) = folded
+                .commit(writing, fact)
+                .map_err(failed("commit a fact"))?;
+            let facts = crate::facts::logged(writing)?;
+            let blobs = crate::facts::logged_blobs(writing, &facts)?;
+            Ok::<_, String>((folded, seq, facts, blobs))
+        });
+        let (folded, seq, facts, blobs) = committed?;
         if let Some(divergence) = folded
             .diverges(facts, |digest| crate::facts::blob(&blobs, digest))
             .map_err(failed("refold the log"))?
@@ -411,13 +416,13 @@ impl<F: Family> World<F> {
             return Err(format!("{divergence} after a commit"));
         }
         if self.rng.chance(UNCOMMITTED_PPM) && self.rng.chance(CRASH_PPM) {
-            drop(lease);
             self.folded = Some(folded);
             self.reopen()?;
             return Ok(None);
         }
-        ready(lease.commit(point)).map_err(|error| format!("commit the log: {error}"))?;
-        drop(lease);
+        crate::facts::writing(&self.log, move |writing| {
+            ready(writing.commit(point)).map_err(|error| format!("commit the log: {error}"))
+        })?;
         let durable = self.durable(&folded)?;
         self.check_oracle(&durable)?;
         if let Some(request) = &durable.request {
@@ -436,17 +441,22 @@ impl<F: Family> World<F> {
     fn reopen(&mut self) -> Result<(), String> {
         self.folded = None;
         self.log = open(&self.host)?;
-        let mut lease = ready(self.log.lease());
-        if self.legacy.is_some() {
-            ready(lease.load_owner(LEGACY_STATE))
-                .map_err(|error| format!("load the legacy owner: {error}"))?;
-        }
-        let facts = crate::facts::logged(&mut lease)?;
-        let blobs = crate::facts::logged_blobs(&mut lease, &facts)?;
-        let fold = lease.fold();
-        let cached = fold
-            .cached()
-            .map_err(|error| format!("read the cached fold: {error}"))?;
+        let legacy = self.legacy.is_some();
+        let reopened = crate::facts::writing(&self.log, move |writing| {
+            if legacy {
+                ready(writing.load_owner(LEGACY_STATE))
+                    .map_err(|error| format!("load the legacy owner: {error}"))?;
+            }
+            let facts = crate::facts::logged(writing)?;
+            let blobs = crate::facts::logged_blobs(writing, &facts)?;
+            let fold = writing.fold();
+            let cached = fold
+                .cached()
+                .map_err(|error| format!("read the cached fold: {error}"))?;
+            let checkpoint = fold.checkpoint(LEGACY_STATE).cloned();
+            Ok::<_, String>((facts, blobs, cached, checkpoint))
+        });
+        let (facts, blobs, cached, checkpoint) = reopened?;
         let (folded, _) = Folded::<F>::open(cached, facts.clone(), |digest| {
             crate::facts::blob(&blobs, digest)
         })
@@ -464,9 +474,7 @@ impl<F: Family> World<F> {
             ));
         }
         self.check_dispatched(&facts)?;
-        let checkpoint = fold.checkpoint(LEGACY_STATE).cloned();
         let based = facts.iter().any(|(_, fact)| matches!(fact, Fact::Base(_)));
-        drop(lease);
         self.folded = Some(folded);
         if let (Some(texts), false) = (self.legacy.clone(), based) {
             self.import(checkpoint, &texts)?;
@@ -761,13 +769,14 @@ impl<F: Family> World<F> {
             .fold()
             .snapshot()
             .map_err(failed("snapshot the fold"))?;
-        let mut lease = ready(self.log.lease());
-        lease
-            .cache(&snapshot)
-            .map_err(|error| format!("cache the fold: {error}"))?;
-        ready(lease.commit(Point::Progress))
-            .map(drop)
-            .map_err(|error| format!("commit a cache: {error}"))
+        crate::facts::writing(&self.log, move |writing| {
+            writing
+                .cache(&snapshot)
+                .map_err(|error| format!("cache the fold: {error}"))?;
+            ready(writing.commit(Point::Progress))
+                .map(drop)
+                .map_err(|error| format!("commit a cache: {error}"))
+        })
     }
 
     fn step(&mut self) -> Result<(), String> {

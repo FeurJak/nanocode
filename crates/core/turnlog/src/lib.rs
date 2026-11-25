@@ -32,4 +32,4 @@ pub use image::{FileIo, Header, Image, ImageOptions, Medium};
 pub use record::{Outcome, Record, Status, decode, encode};
 pub use wake::{ArmedWake, Trigger, Unfit, Wake, Wakes, sim as wake_sim};
 pub use wake_index::{Statements, WakeIndex, WakeRider, WakeSummary};
-pub use writer::{EVENT_GAP, Follower, Lease, Point, Row, SNAPSHOT_RATIO, Stats, TurnLog, rows};
+pub use writer::{EVENT_GAP, Follower, Point, Row, SNAPSHOT_RATIO, Stats, TurnLog, Writing, rows};

@@ -51,18 +51,22 @@ pub fn probe(scope: &str, stored: &[(u64, String)], seq: u64, limit: Option<usiz
 }
 
 fn committed(log: &TurnLog, scope: &str, seq: u64, record: Option<Record>, loads: &[String]) {
-    let mut lease = ready(log.lease());
-    refused(scope, ready(lease.load_owners(loads)));
-    let record = record.unwrap_or_else(|| Record::Host {
-        key: PROBE_STATE.to_owned(),
-        value: to_raw_value(&seq).expect("a commit number encodes as JSON"),
+    let scope = scope.to_owned();
+    let loads = loads.to_vec();
+    crate::facts::writing(log, move |writing| {
+        refused(&scope, ready(writing.load_owners(&loads)));
+        let record = record.unwrap_or_else(|| Record::Host {
+            key: PROBE_STATE.to_owned(),
+            value: to_raw_value(&seq).expect("a commit number encodes as JSON"),
+        });
+        refused(&scope, writing.push(record));
+        refused(&scope, ready(writing.commit(Point::Progress)));
     });
-    refused(scope, lease.push(record));
-    refused(scope, ready(lease.commit(Point::Progress)));
 }
 
 fn held(log: &TurnLog, key: &str) -> Option<String> {
-    ready(log.read(|fold| fold.stored(key).map(str::to_owned)))
+    let key = key.to_owned();
+    ready(log.read(move |fold| fold.stored(&key).map(str::to_owned)))
 }
 
 fn ready<T>(future: impl Future<Output = T>) -> T {

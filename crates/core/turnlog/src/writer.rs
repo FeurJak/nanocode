@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, VecDeque},
+    future::Future,
     ops::Range,
     sync::Arc,
     time::Duration,
@@ -8,9 +9,15 @@ use std::{
 
 use nanocode_durability_core::{
     Digest, Fact, FactSink, FoldError, InputKind, Marker, OwnedFact, Snapshot as FoldSnapshot,
-    SqlStatement, StoreError, StoredFact, VALUE_INLINE_BYTES, Value,
+    SqlStatement, StoreError, StoreFuture, StoredFact, VALUE_INLINE_BYTES, Value,
 };
-use nanocode_sync::{Held, Owned, mpsc, oneshot};
+#[cfg(not(target_family = "wasm"))]
+use nanocode_sync::future::Shared;
+use nanocode_sync::{
+    FutureExt,
+    future::{Either, select},
+    mpsc, oneshot,
+};
 use serde_json::value::RawValue;
 
 use crate::{
@@ -1005,18 +1012,21 @@ impl Follower {
     pub async fn claim(mut self) -> Result<TurnLog, StoreError> {
         self.advance().await?;
         let log = self.finish().await?;
-        let mut lease = log.lease().await;
-        let next = lease.writer.next;
-        lease.push(Record::Host {
-            key: CLAIM.to_owned(),
-            value: serde_json::value::to_raw_value(&next)
-                .map_err(|error| StoreError::Backend(format!("turn log claim: {error}")))?,
-        })?;
-        let check = std::mem::replace(&mut lease.writer.check, usize::MAX);
-        let claimed = lease.commit(Point::Recovery).await;
-        lease.writer.check = check;
-        claimed?;
-        drop(lease);
+        log.write(|writing| {
+            Box::pin(async move {
+                let next = writing.writer.next;
+                writing.push(Record::Host {
+                    key: CLAIM.to_owned(),
+                    value: serde_json::value::to_raw_value(&next)
+                        .map_err(|error| StoreError::Backend(format!("turn log claim: {error}")))?,
+                })?;
+                let check = std::mem::replace(&mut writing.writer.check, usize::MAX);
+                let claimed = writing.commit(Point::Recovery).await;
+                writing.writer.check = check;
+                claimed.map(drop)
+            })
+        })
+        .await?;
         Ok(log)
     }
 
@@ -1162,19 +1172,16 @@ impl Follower {
         fold.reopen(EVENT_GAP);
         let floor = Some(fold.last_event());
         let (riding, riders) = mpsc::unbounded_channel();
-        Ok(TurnLog {
-            host,
-            raw,
+        let writing = Writing {
+            host: Arc::clone(&host),
             limit: None,
             max_tail: None,
             ratio: SNAPSHOT_RATIO,
             retain: None,
-            riding,
             rows: None,
-            scope,
+            scope: Arc::clone(&scope),
             whole: false,
-            within,
-            writer: Owned::new(Writer {
+            writer: Writer {
                 bases: BTreeMap::new(),
                 buffer: Vec::new(),
                 check: snapshot,
@@ -1195,7 +1202,20 @@ impl Follower {
                 tail_rows,
                 tails: BTreeMap::new(),
                 tried: None,
-            }),
+            },
+        };
+        let (letters, received) = mpsc::unbounded_channel();
+        let serving: StoreFuture<'static, ()> = Box::pin(serve(writing, received));
+        #[cfg(target_family = "wasm")]
+        nanocode_platform::spawn_local(serving);
+        Ok(TurnLog {
+            letters,
+            raw,
+            riding,
+            scope,
+            #[cfg(not(target_family = "wasm"))]
+            serving: serving.shared(),
+            within,
         })
     }
 }
@@ -1238,31 +1258,36 @@ struct Writer {
     tried: Option<(usize, usize)>,
 }
 
+type Job = Box<dyn for<'a> FnOnce(&'a mut Writing) -> StoreFuture<'a, ()> + Send>;
+
+type Replied<R> = std::thread::Result<R>;
+
+async fn serve(mut writing: Writing, mut letters: mpsc::UnboundedReceiver<Job>) {
+    while let Some(job) = letters.recv().await {
+        job(&mut writing).await;
+    }
+}
+
 pub struct TurnLog {
-    host: Arc<dyn LogHost>,
+    letters: mpsc::UnboundedSender<Job>,
     raw: Arc<dyn LogHost>,
+    riding: mpsc::UnboundedSender<Riding>,
+    scope: Arc<str>,
+    #[cfg(not(target_family = "wasm"))]
+    serving: Shared<StoreFuture<'static, ()>>,
+    within: Option<Duration>,
+}
+
+pub struct Writing {
+    host: Arc<dyn LogHost>,
     limit: Option<usize>,
     max_tail: Option<usize>,
     ratio: usize,
     retain: Option<usize>,
-    riding: mpsc::UnboundedSender<Riding>,
     rows: Option<usize>,
     scope: Arc<str>,
     whole: bool,
-    within: Option<Duration>,
-    writer: Owned<Writer>,
-}
-
-pub struct Lease<'a> {
-    host: &'a dyn LogHost,
-    limit: Option<usize>,
-    max_tail: Option<usize>,
-    ratio: usize,
-    retain: Option<usize>,
-    rows: Option<usize>,
-    scope: &'a str,
-    whole: bool,
-    writer: Held<'a, Writer>,
+    writer: Writer,
 }
 
 impl TurnLog {
@@ -1305,47 +1330,59 @@ impl TurnLog {
         Ok(follower)
     }
 
+    fn configure(&self, change: impl FnOnce(&mut Writing) + Send + 'static) {
+        let job: Job = Box::new(move |writing| {
+            change(writing);
+            Box::pin(std::future::ready(()))
+        });
+        assert!(
+            self.letters.send(job).is_ok(),
+            "a turn log's writer takes letters while the log lives"
+        );
+    }
+
     #[must_use]
-    pub const fn snapshot_ratio(mut self, ratio: usize) -> Self {
-        self.ratio = ratio;
+    pub fn snapshot_ratio(self, ratio: usize) -> Self {
+        self.configure(move |writing| writing.ratio = ratio);
         self
     }
 
     #[must_use]
-    pub const fn retain_finished(mut self, keep: Option<usize>) -> Self {
-        self.retain = keep;
+    pub fn retain_finished(self, keep: Option<usize>) -> Self {
+        self.configure(move |writing| writing.retain = keep);
         self
     }
 
     #[must_use]
-    pub const fn snapshot_rows(mut self, rows: Option<usize>) -> Self {
-        self.rows = rows;
+    pub fn snapshot_rows(self, rows: Option<usize>) -> Self {
+        self.configure(move |writing| writing.rows = rows);
         self
     }
 
     #[must_use]
-    pub const fn max_tail_bytes(mut self, max: Option<usize>) -> Self {
-        self.max_tail = max;
+    pub fn max_tail_bytes(self, max: Option<usize>) -> Self {
+        self.configure(move |writing| writing.max_tail = max);
         self
     }
 
     #[must_use]
-    pub const fn row_limit(mut self, limit: Option<usize>) -> Self {
-        self.limit = limit;
+    pub fn row_limit(self, limit: Option<usize>) -> Self {
+        self.configure(move |writing| writing.limit = limit);
         self
     }
 
     #[must_use]
     pub fn host_calls_within(mut self, within: Option<Duration>) -> Self {
         let within = within.or_else(|| crate::bound::own(&*self.raw));
-        self.host = crate::bound::bounded(&self.raw, within);
+        let host = crate::bound::bounded(&self.raw, within);
+        self.configure(move |writing| writing.host = host);
         self.within = within;
         self
     }
 
     #[must_use]
-    pub const fn whole_checkpoints(mut self, whole: bool) -> Self {
-        self.whole = whole;
+    pub fn whole_checkpoints(self, whole: bool) -> Self {
+        self.configure(move |writing| writing.whole = whole);
         self
     }
 
@@ -1370,10 +1407,6 @@ impl TurnLog {
         receiver
     }
 
-    pub async fn lease(&self) -> Lease<'_> {
-        self.leased(self.writer.acquire().await)
-    }
-
     #[must_use]
     pub const fn host_call_bound(&self) -> Option<Duration> {
         self.within
@@ -1391,68 +1424,255 @@ impl TurnLog {
         }
     }
 
-    pub async fn lease_within(&self) -> Result<Lease<'_>, StoreError> {
-        Ok(self.leased(self.acquired(false).await?))
+    pub fn write<R, J>(&self, job: J) -> impl Future<Output = R>
+    where
+        R: Send + 'static,
+        J: for<'a> FnOnce(&'a mut Writing) -> StoreFuture<'a, R> + Send + 'static,
+    {
+        let (_, replied) = self.post(job);
+        async move { answered(self.served(replied).await) }
     }
 
-    async fn acquired(&self, reading: bool) -> Result<Held<'_, Writer>, StoreError> {
-        let Some(within) = self.within else {
-            return Ok(self.writer.acquire().await);
-        };
-        if let Some(writer) = self.writer.try_acquire() {
-            return Ok(writer);
-        }
-        let unbounded = crate::sim::mutated(crate::sim::Mutation::HostUnbounded)
-            || (reading && crate::sim::mutated(crate::sim::Mutation::ReadsUnbounded));
-        if unbounded {
-            return Ok(self.writer.acquire().await);
-        }
-        nanocode_platform::timeout(within, self.writer.acquire())
-            .await
-            .map_err(|_| {
-                StoreError::Backend(format!(
-                    "turn log writer of {} stayed held past {} ms",
-                    self.scope,
-                    within.as_millis()
-                ))
+    pub fn write_within<R, E, J>(&self, job: J) -> impl Future<Output = Result<R, E>>
+    where
+        R: Send + 'static,
+        E: From<StoreError> + Send + 'static,
+        J: for<'a> FnOnce(&'a mut Writing) -> StoreFuture<'a, Result<R, E>> + Send + 'static,
+    {
+        let bounded = self.bounded(false, job);
+        async move { bounded.await? }
+    }
+
+    fn post<R, J>(&self, job: J) -> (oneshot::Receiver<()>, oneshot::Receiver<Replied<R>>)
+    where
+        R: Send + 'static,
+        J: for<'a> FnOnce(&'a mut Writing) -> StoreFuture<'a, R> + Send + 'static,
+    {
+        let (started, start) = oneshot::channel();
+        let (mut reply, replied) = oneshot::channel();
+        let letter: Job = Box::new(move |writing| {
+            Box::pin(async move {
+                if reply.is_closed() {
+                    return;
+                }
+                let _ = started.send(());
+                let work = std::panic::AssertUnwindSafe(async move { job(writing).await });
+                let answer = {
+                    let abandoned = Box::pin(reply.closed());
+                    match select(abandoned, Box::pin(work.catch_unwind())).await {
+                        Either::Left(_) => None,
+                        Either::Right((answer, _)) => Some(answer),
+                    }
+                };
+                if let Some(answer) = answer {
+                    drop(reply.send(answer));
+                }
             })
+        });
+        assert!(
+            self.letters.send(letter).is_ok(),
+            "a turn log's writer takes letters while the log lives"
+        );
+        (start, replied)
     }
 
-    fn leased<'a>(&'a self, writer: Held<'a, Writer>) -> Lease<'a> {
-        Lease {
-            host: &*self.host,
-            limit: self.limit,
-            max_tail: self.max_tail,
-            ratio: self.ratio,
-            retain: self.retain,
-            rows: self.rows,
-            scope: &self.scope,
-            whole: self.whole,
-            writer,
+    #[cfg(target_family = "wasm")]
+    async fn served<T>(&self, receiver: oneshot::Receiver<T>) -> T {
+        receiver
+            .await
+            .unwrap_or_else(|_| panic!("a turn log's writer answers every job it takes"))
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn served<T>(&self, mut receiver: oneshot::Receiver<T>) -> T {
+        let mut serving = self.serving.clone();
+        let answer = std::future::poll_fn(|context| {
+            if let std::task::Poll::Ready(answer) = std::pin::Pin::new(&mut receiver).poll(context)
+            {
+                return std::task::Poll::Ready(answer);
+            }
+            assert!(
+                std::pin::Pin::new(&mut serving).poll(context).is_pending(),
+                "a turn log's writer serves while the log lives"
+            );
+            std::pin::Pin::new(&mut receiver).poll(context)
+        })
+        .await;
+        answer.unwrap_or_else(|_| panic!("a turn log's writer answers every job it takes"))
+    }
+
+    fn bounded<R, J>(&self, reading: bool, job: J) -> impl Future<Output = Result<R, StoreError>>
+    where
+        R: Send + 'static,
+        J: for<'a> FnOnce(&'a mut Writing) -> StoreFuture<'a, R> + Send + 'static,
+    {
+        let (start, replied) = self.post(job);
+        async move {
+            if let Some(within) = self.within {
+                let unbounded = crate::sim::mutated(crate::sim::Mutation::HostUnbounded)
+                    || (reading && crate::sim::mutated(crate::sim::Mutation::ReadsUnbounded));
+                if !unbounded {
+                    nanocode_platform::timeout(within, self.served(start))
+                        .await
+                        .map_err(|_| {
+                            StoreError::Backend(format!(
+                                "turn log writer of {} stayed held past {} ms",
+                                self.scope,
+                                within.as_millis()
+                            ))
+                        })?;
+                }
+            }
+            Ok(answered(self.served(replied).await))
         }
     }
 
-    pub async fn read<R>(&self, read: impl FnOnce(&Fold) -> R) -> R {
-        read(&self.writer.acquire().await.fold)
+    pub async fn read<R>(&self, read: impl FnOnce(&Fold) -> R + Send + 'static) -> R
+    where
+        R: Send + 'static,
+    {
+        self.write(move |writing| Box::pin(std::future::ready(read(&writing.writer.fold))))
+            .await
     }
 
     pub async fn load_owner(&self, owner: &str) -> Result<(), StoreError> {
-        let mut writer = self.acquired(true).await?;
-        let writer = &mut *writer;
-        writer.live()?;
-        warm_state(
-            &*self.host,
-            &self.scope,
-            &mut writer.fold,
-            &mut writer.stats,
-            owner,
-        )
-        .await
+        let owner = owner.to_owned();
+        self.bounded(true, move |writing| {
+            Box::pin(async move { writing.load_owner(&owner).await })
+        })
+        .await?
     }
 
     pub async fn load_index(&self) -> Result<(), StoreError> {
-        let mut writer = self.acquired(true).await?;
-        let writer = &mut *writer;
+        self.bounded(true, |writing| Box::pin(writing.load_index()))
+            .await?
+    }
+
+    pub async fn read_owners<R>(
+        &self,
+        owners: &[String],
+        read: impl FnOnce(&Fold) -> R + Send + 'static,
+    ) -> Result<R, StoreError>
+    where
+        R: Send + 'static,
+    {
+        let owners = owners.to_vec();
+        self.bounded(true, move |writing| {
+            Box::pin(async move {
+                writing.warm_owners(&owners).await?;
+                Ok(read(&writing.writer.fold))
+            })
+        })
+        .await?
+    }
+
+    pub async fn read_owner<R>(
+        &self,
+        owner: &str,
+        read: impl FnOnce(&Fold) -> R + Send + 'static,
+    ) -> Result<R, StoreError>
+    where
+        R: Send + 'static,
+    {
+        let owner = owner.to_owned();
+        self.bounded(true, move |writing| {
+            Box::pin(async move {
+                writing.load_owner(&owner).await?;
+                Ok(read(&writing.writer.fold))
+            })
+        })
+        .await?
+    }
+
+    pub async fn stats(&self) -> Stats {
+        self.write(|writing| Box::pin(std::future::ready(writing.writer.stats)))
+            .await
+    }
+
+    pub async fn history<S>(
+        &self,
+        after: u64,
+        kept: S,
+        mut take: impl FnMut(&mut S, &Event) -> bool + Send + 'static,
+    ) -> Result<S, StoreError>
+    where
+        S: Send + 'static,
+    {
+        self.bounded(true, move |writing| {
+            Box::pin(async move {
+                let mut kept = kept;
+                writing
+                    .history(after, |event| take(&mut kept, event))
+                    .await?;
+                Ok(kept)
+            })
+        })
+        .await?
+    }
+
+    pub async fn blobs(
+        &self,
+        digests: &[Digest],
+    ) -> Result<BTreeMap<Digest, Box<RawValue>>, StoreError> {
+        let digests = digests.to_vec();
+        self.bounded(true, move |writing| {
+            Box::pin(async move {
+                writing.writer.live()?;
+                writing.blobs(&digests).await
+            })
+        })
+        .await?
+    }
+
+    pub async fn cached_state(&self, state: &str) -> Result<Option<FoldSnapshot>, StoreError> {
+        let wanted = state.to_owned();
+        let at = match self.read(move |fold| fold.cached_state(&wanted)).await? {
+            None => return Ok(None),
+            Some(CachedFold::Inline(snapshot)) => return Ok(Some(snapshot)),
+            Some(CachedFold::At(at)) => at,
+        };
+        let blobs = self.blobs(&[at.blob]).await?;
+        let json = blobs
+            .get(&at.blob)
+            .ok_or(FoldError::MissingBlob { digest: at.blob })?;
+        serde_json::from_str(json.get()).map(Some).map_err(|error| {
+            StoreError::Backend(format!("cached fold of {state} does not decode: {error}"))
+        })
+    }
+
+    pub async fn facts_from<S>(
+        &self,
+        after: u64,
+        kept: S,
+        mut take: impl FnMut(&mut S, u64, Option<&str>, &StoredFact) + Send + 'static,
+    ) -> Result<S, StoreError>
+    where
+        S: Send + 'static,
+    {
+        self.bounded(true, move |writing| {
+            Box::pin(async move {
+                let mut kept = kept;
+                writing.writer.live()?;
+                writing
+                    .facts_from(after, |seq, state, fact| take(&mut kept, seq, state, fact))
+                    .await?;
+                Ok(kept)
+            })
+        })
+        .await?
+    }
+}
+
+fn answered<R>(answer: Replied<R>) -> R {
+    match answer {
+        Ok(output) => output,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+impl Writing {
+    async fn load_index(&mut self) -> Result<(), StoreError> {
+        let writer = &mut self.writer;
         writer.live()?;
         root(
             &*self.host,
@@ -1470,13 +1690,8 @@ impl TurnLog {
         Ok(())
     }
 
-    pub async fn read_owners<R>(
-        &self,
-        owners: &[String],
-        read: impl FnOnce(&Fold) -> R,
-    ) -> Result<R, StoreError> {
-        let mut writer = self.acquired(true).await?;
-        let writer = &mut *writer;
+    async fn warm_owners(&mut self, owners: &[String]) -> Result<(), StoreError> {
+        let writer = &mut self.writer;
         writer.live()?;
         for owner in owners {
             warm(
@@ -1488,38 +1703,15 @@ impl TurnLog {
             )
             .await?;
         }
-        Ok(read(&writer.fold))
+        Ok(())
     }
 
-    pub async fn read_owner<R>(
-        &self,
-        owner: &str,
-        read: impl FnOnce(&Fold) -> R,
-    ) -> Result<R, StoreError> {
-        let mut writer = self.acquired(true).await?;
-        let writer = &mut *writer;
-        writer.live()?;
-        warm_state(
-            &*self.host,
-            &self.scope,
-            &mut writer.fold,
-            &mut writer.stats,
-            owner,
-        )
-        .await?;
-        Ok(read(&writer.fold))
-    }
-
-    pub async fn stats(&self) -> Stats {
-        self.writer.acquire().await.stats
-    }
-
-    pub async fn history(
-        &self,
+    async fn history(
+        &mut self,
         after: u64,
         mut take: impl FnMut(&Event) -> bool,
     ) -> Result<(), StoreError> {
-        let mut writer = self.acquired(true).await?;
+        let writer = &mut self.writer;
         writer.live()?;
         let unsealed = writer.fold.unsealed();
         let end = match unsealed {
@@ -1554,55 +1746,6 @@ impl TurnLog {
             }
         }
         Ok(())
-    }
-
-    pub async fn blobs(
-        &self,
-        digests: &[Digest],
-    ) -> Result<BTreeMap<Digest, Box<RawValue>>, StoreError> {
-        let mut writer = self.acquired(true).await?;
-        writer.live()?;
-        let writer = &mut *writer;
-        blobs(
-            &*self.host,
-            &self.scope,
-            (&writer.fold, &mut writer.stats),
-            digests,
-        )
-        .await
-    }
-
-    pub async fn cached_state(&self, state: &str) -> Result<Option<FoldSnapshot>, StoreError> {
-        let at = match self.read(|fold| fold.cached_state(state)).await? {
-            None => return Ok(None),
-            Some(CachedFold::Inline(snapshot)) => return Ok(Some(snapshot)),
-            Some(CachedFold::At(at)) => at,
-        };
-        let blobs = self.blobs(&[at.blob]).await?;
-        let json = blobs
-            .get(&at.blob)
-            .ok_or(FoldError::MissingBlob { digest: at.blob })?;
-        serde_json::from_str(json.get()).map(Some).map_err(|error| {
-            StoreError::Backend(format!("cached fold of {state} does not decode: {error}"))
-        })
-    }
-
-    pub async fn facts_from(
-        &self,
-        after: u64,
-        take: impl FnMut(u64, Option<&str>, &StoredFact),
-    ) -> Result<(), StoreError> {
-        let mut writer = self.acquired(true).await?;
-        writer.live()?;
-        let writer = &mut *writer;
-        facts_from(
-            &*self.host,
-            &self.scope,
-            (&writer.fold, &mut writer.stats),
-            after,
-            take,
-        )
-        .await
     }
 }
 
@@ -1710,15 +1853,15 @@ async fn facts_from(
     Ok(())
 }
 
-impl Lease<'_> {
+impl Writing {
     pub async fn blobs(
         &mut self,
         digests: &[Digest],
     ) -> Result<BTreeMap<Digest, Box<RawValue>>, StoreError> {
-        let writer = &mut *self.writer;
+        let writer = &mut self.writer;
         blobs(
-            self.host,
-            self.scope,
+            &*self.host,
+            &self.scope,
             (&writer.fold, &mut writer.stats),
             digests,
         )
@@ -1730,10 +1873,10 @@ impl Lease<'_> {
         after: u64,
         take: impl FnMut(u64, Option<&str>, &StoredFact),
     ) -> Result<(), StoreError> {
-        let writer = &mut *self.writer;
+        let writer = &mut self.writer;
         facts_from(
-            self.host,
-            self.scope,
+            &*self.host,
+            &self.scope,
             (&writer.fold, &mut writer.stats),
             after,
             take,
@@ -1794,7 +1937,7 @@ impl Lease<'_> {
     }
 }
 
-impl Lease<'_> {
+impl Writing {
     pub fn append_owned<D: serde::Serialize>(
         &mut self,
         state: Option<&str>,
@@ -1865,7 +2008,7 @@ impl Lease<'_> {
     }
 }
 
-impl FactSink for Lease<'_> {
+impl FactSink for Writing {
     fn next(&self) -> u64 {
         self.writer.fold.next_fact()
     }
@@ -1892,18 +2035,18 @@ impl FactSink for Lease<'_> {
     }
 }
 
-impl Lease<'_> {
+impl Writing {
     pub async fn held(
         &mut self,
         after: u64,
         mut take: impl FnMut(&Event) -> bool,
     ) -> Result<(), StoreError> {
-        let writer = &mut *self.writer;
+        let writer = &mut self.writer;
         writer.live()?;
         if let Some(segment) = writer.fold.unsealed()
             && !scan(
-                self.host,
-                self.scope,
+                &*self.host,
+                &self.scope,
                 &mut writer.stats,
                 (segment, writer.next),
                 after,
@@ -1927,12 +2070,12 @@ impl Lease<'_> {
     }
 
     pub async fn load_owners(&mut self, owners: &[String]) -> Result<(), StoreError> {
-        let writer = &mut *self.writer;
+        let writer = &mut self.writer;
         writer.live()?;
         for owner in owners {
             warm(
-                self.host,
-                self.scope,
+                &*self.host,
+                &self.scope,
                 &mut writer.fold,
                 &mut writer.stats,
                 owner,
@@ -1944,12 +2087,12 @@ impl Lease<'_> {
     }
 
     pub async fn index_owners(&mut self, owners: &[String]) -> Result<(), StoreError> {
-        let writer = &mut *self.writer;
+        let writer = &mut self.writer;
         writer.live()?;
         for owner in owners {
             locate(
-                self.host,
-                self.scope,
+                &*self.host,
+                &self.scope,
                 &mut writer.fold,
                 &mut writer.stats,
                 owner,
@@ -1960,11 +2103,11 @@ impl Lease<'_> {
     }
 
     pub async fn load_owner(&mut self, owner: &str) -> Result<(), StoreError> {
-        let writer = &mut *self.writer;
+        let writer = &mut self.writer;
         writer.live()?;
         warm_state(
-            self.host,
-            self.scope,
+            &*self.host,
+            &self.scope,
             &mut writer.fold,
             &mut writer.stats,
             owner,
@@ -2003,7 +2146,7 @@ impl Lease<'_> {
     }
 
     pub fn push(&mut self, record: Record) -> Result<(), StoreError> {
-        let writer = &mut *self.writer;
+        let writer = &mut self.writer;
         if let Record::Checkpoint { state, .. } = &record
             && !self.whole
             && !writer.bases.contains_key(state)
@@ -2026,7 +2169,7 @@ impl Lease<'_> {
     }
 
     pub fn unadmit(&mut self, turn: &str, seq: u64) {
-        let writer = &mut *self.writer;
+        let writer = &mut self.writer;
         let withdrawn = writer.buffer.iter().find_map(|record| match record {
             Record::Fact {
                 fact: Fact::Input(input),
@@ -2050,7 +2193,7 @@ impl Lease<'_> {
     }
 
     pub fn unwake(&mut self, key: &str, held: Option<crate::ArmedWake>) {
-        let writer = &mut *self.writer;
+        let writer = &mut self.writer;
         writer.buffer.retain(|record| match record {
             Record::Armed { key: buffered, .. }
             | Record::Disarmed { key: buffered, .. }
@@ -2090,7 +2233,7 @@ impl Lease<'_> {
         point: Point,
         rider: Option<Rider<'_>>,
     ) -> Result<(u64, bool), StoreError> {
-        let writer = &mut *self.writer;
+        let writer = &mut self.writer;
         writer.live()?;
         let revived = writer.fold.revive(&writer.buffer);
         writer.buffer.extend(revived);
@@ -2115,8 +2258,8 @@ impl Lease<'_> {
             .collect::<BTreeSet<_>>();
         for key in unpaged {
             page(
-                self.host,
-                self.scope,
+                &*self.host,
+                &self.scope,
                 &mut writer.fold,
                 &mut writer.stats,
                 &key,
@@ -2219,8 +2362,8 @@ impl Lease<'_> {
         if due || bound || writer.tail + body.len() >= writer.check {
             for owner in writer.fold.forgetting() {
                 warm(
-                    self.host,
-                    self.scope,
+                    &*self.host,
+                    &self.scope,
                     &mut writer.fold,
                     &mut writer.stats,
                     &owner,
@@ -2230,17 +2373,23 @@ impl Lease<'_> {
             writer.fold.unshelve_all();
             for owner in writer.fold.waiting() {
                 page(
-                    self.host,
-                    self.scope,
+                    &*self.host,
+                    &self.scope,
                     &mut writer.fold,
                     &mut writer.stats,
                     &owner,
                 )
                 .await?;
             }
-            root(self.host, self.scope, &mut writer.fold, &mut writer.stats).await?;
+            root(
+                &*self.host,
+                &self.scope,
+                &mut writer.fold,
+                &mut writer.stats,
+            )
+            .await?;
             for (first, section) in writer.fold.unlisted() {
-                let records = section_records(self.host, self.scope, &first, section).await?;
+                let records = section_records(&*self.host, &self.scope, &first, section).await?;
                 writer.fold.paged(&first, records)?;
                 writer.stats.index_loads += 1;
             }
@@ -2460,7 +2609,7 @@ impl Lease<'_> {
                         compaction: compaction.clone(),
                     },
                 };
-                self.host.carry(self.scope, write, rider)
+                self.host.carry(&self.scope, write, rider)
             });
             let carried = carrying.is_some();
             let (rodes, extended, done) = match carrying {
@@ -2468,16 +2617,16 @@ impl Lease<'_> {
                 None => {
                     answer(rodes, false);
                     let extending =
-                        extension.and_then(|extension| self.host.extend(self.scope, extension));
+                        extension.and_then(|extension| self.host.extend(&self.scope, extension));
                     let extended = extending.is_some().then_some(merged).flatten();
                     let done = match extending {
                         Some(extending) => extending.await,
                         None if archived.is_some() || !superseded.is_empty() => {
                             self.host
-                                .append_compacting(self.scope, &appended, compaction)
+                                .append_compacting(&self.scope, &appended, compaction)
                                 .await
                         }
-                        None => self.host.append(self.scope, &appended).await,
+                        None => self.host.append(&self.scope, &appended).await,
                     };
                     (Vec::new(), extended, done)
                 }
@@ -2489,7 +2638,7 @@ impl Lease<'_> {
                         Some((extension, merged)) => Written::Extended(extension, merged),
                         None => Written::Appended(&appended[..]),
                     };
-                    let landed = landed(self.host, self.scope, written, error).await;
+                    let landed = landed(&*self.host, &self.scope, written, error).await;
                     if matches!(landed, Err(StoreError::Fenced)) {
                         self.writer.fenced = true;
                     }
@@ -2508,7 +2657,7 @@ impl Lease<'_> {
         } else {
             bytes
         };
-        let writer = &mut *self.writer;
+        let writer = &mut self.writer;
         writer.tail_row = match (extended, &snapshot, &boundary) {
             (Some(merged), _, _) => Some(TailRow { bytes: merged, seq }),
             (None, None, None)

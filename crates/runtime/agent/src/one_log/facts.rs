@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use nanocode_tool_host::ToolOutput;
-use nanocode_turnlog::{Fold, Lease, Point};
+use nanocode_turnlog::{Fold, Point, Writing};
 use serde_json::value::RawValue;
 
 use super::OneLog;
@@ -138,6 +138,7 @@ pub(super) fn intended(fold: &Fold, call_id: &str) -> Option<String> {
     fold.intent(call_id).map(|call| call.tool.clone())
 }
 
+#[derive(Clone)]
 struct Scope {
     state: String,
     turns: bool,
@@ -148,19 +149,19 @@ struct Scoped {
     scope: Scope,
 }
 
-struct Observed<'l, 'a> {
-    lease: &'l mut Lease<'a>,
+struct Observed<'l> {
+    writing: &'l mut Writing,
     state: &'l str,
     point: Point,
 }
 
-impl FactSink for Observed<'_, '_> {
+impl FactSink for Observed<'_> {
     fn next(&self) -> u64 {
-        self.lease.next()
+        self.writing.next()
     }
 
     fn put_blob(&mut self, digest: &Digest, json: &RawValue) -> Result<(), FoldError> {
-        self.lease.put_blob(digest, json)
+        self.writing.put_blob(digest, json)
     }
 
     fn append(&mut self, fact: StoredFact) -> Result<u64, FoldError> {
@@ -169,15 +170,15 @@ impl FactSink for Observed<'_, '_> {
             Fact::Marker(Marker::Blob { .. }) => None,
             _ => Some(self.state),
         };
-        self.lease.append_in(state, fact)
+        self.writing.append_in(state, fact)
     }
 
     fn cache_due(&self) -> bool {
-        self.lease.fold().cache_due(self.state)
+        self.writing.fold().cache_due(self.state)
     }
 
     fn cache(&mut self, snapshot: &Snapshot) -> Result<Vec<(u64, StoredFact)>, FoldError> {
-        self.lease
+        self.writing
             .cache_state(self.state, snapshot)
             .map_err(FoldError::Sink)
     }
@@ -211,15 +212,22 @@ impl OneLog {
         if snapshot.is_some() && sim::mutated(sim::Mutation::CacheGap) {
             after += 1;
         }
-        let mut facts = Vec::new();
-        self.log
-            .facts_from(after, |seq, held, fact| {
-                if in_scope(scope, held, fact) {
+        let held = scope.clone();
+        let facts = self
+            .log
+            .facts_from(after, Vec::new(), move |facts, seq, state, fact| {
+                if in_scope(&held, state, fact) {
                     facts.push((seq, fact.clone()));
                 }
             })
             .await?;
-        let digests = self.log.read(|fold| wanted(fold, &facts)).await;
+        let (facts, digests) = self
+            .log
+            .read(move |fold| {
+                let digests = wanted(fold, &facts);
+                (facts, digests)
+            })
+            .await;
         let blobs = self.log.blobs(&digests).await?;
         Ok(Replay {
             snapshot,
@@ -228,42 +236,44 @@ impl OneLog {
         })
     }
 
-    async fn appended(
-        &self,
-        scope: &Scope,
-        after: u64,
-        write: Append<'_>,
-    ) -> Result<u64, StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        lease.secure().await?;
-        let mut facts = Vec::new();
-        if after == 0 || !sim::mutated(sim::Mutation::UnseenSkipped) {
-            lease
-                .facts_from(after, |seq, held, fact| {
-                    if in_scope(scope, held, fact) {
-                        facts.push((seq, fact.clone()));
+    async fn appended(&self, scope: &Scope, after: u64, write: Append) -> Result<u64, StoreError> {
+        let scope = scope.clone();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let scope = &scope;
+                    writing.secure().await?;
+                    let mut facts = Vec::new();
+                    if after == 0 || !sim::mutated(sim::Mutation::UnseenSkipped) {
+                        writing
+                            .facts_from(after, |seq, held, fact| {
+                                if in_scope(scope, held, fact) {
+                                    facts.push((seq, fact.clone()));
+                                }
+                            })
+                            .await?;
                     }
+                    let digests = wanted(writing.fold(), &facts);
+                    let blobs = writing.blobs(&digests).await?;
+                    let unseen = Replay {
+                        snapshot: None,
+                        facts,
+                        blobs,
+                    };
+                    let mut sink = Observed {
+                        writing: writing,
+                        state: &scope.state,
+                        point: Point::Progress,
+                    };
+                    let seq = write(unseen, &mut sink)?;
+                    let point = sink.point;
+                    if !sim::mutated(sim::Mutation::CommitBuffered) {
+                        writing.commit(point).await?;
+                    }
+                    Ok(seq)
                 })
-                .await?;
-        }
-        let digests = wanted(lease.fold(), &facts);
-        let blobs = lease.blobs(&digests).await?;
-        let unseen = Replay {
-            snapshot: None,
-            facts,
-            blobs,
-        };
-        let mut sink = Observed {
-            lease: &mut lease,
-            state: &scope.state,
-            point: Point::Progress,
-        };
-        let seq = write(unseen, &mut sink)?;
-        let point = sink.point;
-        if !sim::mutated(sim::Mutation::CommitBuffered) {
-            lease.commit(point).await?;
-        }
-        Ok(seq)
+            })
+            .await
     }
 }
 
@@ -280,11 +290,7 @@ impl FactLog for Scoped {
         Box::pin(self.log.replayed_cached(&self.scope, family, format))
     }
 
-    fn append<'a>(
-        &'a self,
-        after: u64,
-        write: Append<'a>,
-    ) -> StoreFuture<'a, Result<u64, StoreError>> {
+    fn append<'a>(&'a self, after: u64, write: Append) -> StoreFuture<'a, Result<u64, StoreError>> {
         Box::pin(self.log.appended(&self.scope, after, write))
     }
 }
@@ -320,11 +326,11 @@ pub(super) enum Owners {
 }
 
 pub(super) fn settle(
-    lease: &mut Lease<'_>,
+    writing: &mut Writing,
     turn: &str,
     owners: Owners,
 ) -> Result<Vec<String>, StoreError> {
-    let dangling = lease
+    let dangling = writing
         .fold()
         .intents()
         .filter(|(_, _, call)| match (owners, call.turn.as_deref()) {
@@ -343,44 +349,58 @@ pub(super) fn settle(
             call_id: call_id.clone(),
             output: output.clone(),
         });
-        lease.append_owned(state.as_deref(), &result)?;
+        writing.append_owned(state.as_deref(), &result)?;
     }
     Ok(dangling.into_iter().map(|(call_id, _)| call_id).collect())
 }
 
 impl OneLog {
     pub(super) async fn abandoned(&self, call_id: &str) -> Result<Option<ToolOutput>, StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        let Some(state) = lease
-            .fold()
-            .intents()
-            .find(|(open, _, _)| *open == call_id)
-            .map(|(_, state, _)| state.map(str::to_owned))
-        else {
-            return Ok(None);
-        };
-        if sim::mutated(sim::Mutation::AbandonUnsettled) {
-            return Ok(Some(ToolOutput::error(UNKNOWN_OUTCOME)));
-        }
-        let result: OwnedFact<Box<RawValue>> = Fact::EffectResult(EffectResult {
-            call_id: call_id.to_owned(),
-            output: unknown_outcome()?,
-        });
-        lease.append_owned(state.as_deref(), &result)?;
-        lease.commit(Point::Cancel).await?;
-        Ok(Some(ToolOutput::error(UNKNOWN_OUTCOME)))
+        let call_id = call_id.to_owned();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let call_id = call_id.as_str();
+                    let Some(state) = writing
+                        .fold()
+                        .intents()
+                        .find(|(open, _, _)| *open == call_id)
+                        .map(|(_, state, _)| state.map(str::to_owned))
+                    else {
+                        return Ok(None);
+                    };
+                    if sim::mutated(sim::Mutation::AbandonUnsettled) {
+                        return Ok(Some(ToolOutput::error(UNKNOWN_OUTCOME)));
+                    }
+                    let result: OwnedFact<Box<RawValue>> = Fact::EffectResult(EffectResult {
+                        call_id: call_id.to_owned(),
+                        output: unknown_outcome()?,
+                    });
+                    writing.append_owned(state.as_deref(), &result)?;
+                    writing.commit(Point::Cancel).await?;
+                    Ok(Some(ToolOutput::error(UNKNOWN_OUTCOME)))
+                })
+            })
+            .await
     }
 
     pub async fn settle_intents(&self, turn: &str) -> Result<Vec<String>, StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        lease.secure().await?;
-        if sim::mutated(sim::Mutation::IntentReplayed) {
-            return Ok(Vec::new());
-        }
-        let settled = settle(&mut lease, turn, Owners::TurnOrNone)?;
-        if !settled.is_empty() {
-            lease.commit(Point::Recovery).await?;
-        }
-        Ok(settled)
+        let turn = turn.to_owned();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let turn = turn.as_str();
+                    writing.secure().await?;
+                    if sim::mutated(sim::Mutation::IntentReplayed) {
+                        return Ok(Vec::new());
+                    }
+                    let settled = settle(writing, turn, Owners::TurnOrNone)?;
+                    if !settled.is_empty() {
+                        writing.commit(Point::Recovery).await?;
+                    }
+                    Ok(settled)
+                })
+            })
+            .await
     }
 }

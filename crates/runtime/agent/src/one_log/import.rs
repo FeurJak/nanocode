@@ -1,6 +1,6 @@
 use nanocode_turnlog::{Point, Record};
 
-use super::{OneLog, staging, stored_key};
+use super::{OneLog, staging, stored_key, upgraded};
 use crate::durability::{StoreError, StoreRecord};
 
 pub mod sim {
@@ -73,14 +73,20 @@ impl OneLog {
                 "state {state_id} is imported at revision 0, which holds no checkpoint"
             )));
         }
-        // Checked under the lease, which acquire also holds while it adds an owner, so no session
-        // can take the state between this check and the import's commit.
-        let mut lease = self.log.lease_within().await?;
-        if self.owners.read(|owners| owners.get(state_id).is_some()) {
+        let this = self.weak();
+        let state_id = state_id.to_owned();
+        let payload = payload.to_owned();
+        let records = records.to_vec();
+        self.log.write_within(move |writing| Box::pin(async move {
+let this = upgraded(&this);
+let state_id = state_id.as_str();
+let payload = payload.as_str();
+let records = records.as_slice();
+        if this.owners.read(|owners| owners.get(state_id).is_some()) {
             return Err(StoreError::Fenced);
         }
-        staging(&mut lease, state_id, records).await?;
-        let fold = lease.fold();
+        staging(writing, state_id, records).await?;
+        let fold = writing.fold();
         let unsaved = records
             .iter()
             .map(|record| (record, super::shared::staged(fold, state_id, record)))
@@ -100,13 +106,13 @@ impl OneLog {
             Some(held) if held.payload != payload => {
                 return Err(StoreError::NotCommitted(format!(
                     "turn log {} holds state {state_id} at revision {revision} with a different payload",
-                    self.scope()
+                    this.scope()
                 )));
             }
             Some(_) if !unsaved.is_empty() => {
                 return Err(StoreError::NotCommitted(format!(
                     "turn log {} holds state {state_id} at revision {revision} with a different record {}",
-                    self.scope(),
+                    this.scope(),
                     unsaved[0].0.key
                 )));
             }
@@ -125,22 +131,24 @@ impl OneLog {
                 })
                 .collect::<Vec<_>>();
             for record in unsaved {
-                lease.push(record)?;
+                writing.push(record)?;
             }
-            lease.push(Record::Checkpoint {
+            writing.push(Record::Checkpoint {
                 payload: payload.to_owned(),
                 revision: written,
                 state: state_id.to_owned(),
             })?;
         }
-        let owed = lease.buffered() > 0;
+        let owed = writing.buffered() > 0;
         assert!(
             !pushed || owed,
             "an import that pushed records has them buffered"
         );
         if owed && (pushed || !sim::mutated(sim::Mutation::HeldSkipsCommit)) {
-            lease.commit(Point::Progress).await?;
+            writing.commit(Point::Progress).await?;
         }
         Ok(imported)
+}))
+.await
     }
 }

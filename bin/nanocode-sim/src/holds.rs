@@ -358,15 +358,17 @@ impl World {
     }
 
     fn pruned(&mut self) -> Result<(), String> {
-        let held = block_on(self.log().read(|fold| {
-            self.model
-                .iter()
-                .map(|(key, held)| {
-                    (
-                        key.clone(),
-                        fold.hold(key).is_some(),
-                        fold.turn(&held.turn).is_some(),
-                    )
+        let wanted = self
+            .model
+            .iter()
+            .map(|(key, held)| (key.clone(), held.turn.clone()))
+            .collect::<Vec<_>>();
+        let held = block_on(self.log().read(move |fold| {
+            wanted
+                .into_iter()
+                .map(|(key, turn)| {
+                    let present = fold.hold(&key).is_some();
+                    (key, present, fold.turn(&turn).is_some())
                 })
                 .collect::<Vec<_>>()
         }));
@@ -710,8 +712,11 @@ impl World {
             .expect("an uncertain key is in the model")
             .phase = Phase::Settled;
         let turn = self.model[&key].turn.clone();
-        let (hold, retained) =
-            block_on(self.log().read(|fold| (fold.hold(&key).cloned(), fold.turn(&turn).is_some())));
+        let held = key.clone();
+        let (hold, retained) = block_on(
+            self.log()
+                .read(move |fold| (fold.hold(&held).cloned(), fold.turn(&turn).is_some())),
+        );
         match hold {
             Some(Hold::Settled { .. }) => {}
             None if !retained => {}

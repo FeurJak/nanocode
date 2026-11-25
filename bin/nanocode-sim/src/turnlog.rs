@@ -758,13 +758,14 @@ impl TurnLogPolicy {
             .expect("a takeover follows a commit of an open log");
         let acknowledged =
             ready(stale.read(|fold| (fold.last_event(), fold.events().len(), fold.recovering())));
-        let mut lease = ready(stale.lease());
-        refused(lease.push(LogRecord::Host {
-            key: format!("{scope}:stale"),
-            value: raw("true"),
-        }));
-        let fenced = ready(lease.commit(LogPoint::Recovery));
-        drop(lease);
+        let stale_key = format!("{scope}:stale");
+        let fenced = crate::facts::writing(&stale, move |writing| {
+            refused(writing.push(LogRecord::Host {
+                key: stale_key,
+                value: raw("true"),
+            }));
+            ready(writing.commit(LogPoint::Recovery))
+        });
         assert!(
             matches!(fenced, Err(StoreError::Fenced)),
             "{scope} accepts a commit from its stale writer after a takeover at commit {seq}: {fenced:?}"
@@ -775,15 +776,16 @@ impl TurnLogPolicy {
             "{scope} serves a read from its fenced writer after a takeover at commit {seq}: {served:?}"
         );
         let cold = refused(ready(TurnLog::open(Arc::clone(&self.host), scope)));
-        let read = |fold: &Fold| {
+        let stale_key = format!("{scope}:stale");
+        let read = move |fold: &Fold| {
             (
                 fold.last_event(),
                 fold.events().len(),
                 fold.recovering(),
-                fold.host(&format!("{scope}:stale")).is_some(),
+                fold.host(&stale_key).is_some(),
             )
         };
-        let taken = ready(claimed.read(read));
+        let taken = ready(claimed.read(read.clone()));
         let reopened = ready(cold.read(read));
         let claimed_view = ready(claimed.read(view));
         let cold_view = ready(cold.read(view));
@@ -832,15 +834,15 @@ impl TurnLogPolicy {
 
     fn push(&mut self, scope: &str, record: LogRecord) {
         let log = self.log(scope);
-        refused(ready(log.lease()).push(record));
+        refused(crate::facts::writing(log, move |writing| {
+            writing.push(record)
+        }));
     }
 
     fn records(&mut self, scope: &str, record: Record) -> Vec<LogRecord> {
         let restarting = self.restarting.get(scope).cloned();
         let log = self.log(scope);
-        let lease = ready(log.lease());
-        let fold = lease.fold();
-        match record {
+        ready(log.read(move |fold| match record {
             Record::Admitted { origin, request } => vec![
                 LogRecord::Admitted {
                     digest: String::new(),
@@ -940,7 +942,7 @@ impl TurnLogPolicy {
                     Outcome::Unknown => raw("unknown"),
                 },
             }],
-        }
+        }))
     }
 
     const fn commit_point(
@@ -976,10 +978,9 @@ impl TurnLogPolicy {
 impl TurnDurability for TurnLogPolicy {
     fn event_id(&mut self, scope: &str, _state: &mut ScopeState) -> Option<EventId> {
         let log = self.log(scope);
-        let mut lease = ready(log.lease());
-        let floor = lease.floor_pending();
-        let seq = lease.next_event();
-        drop(lease);
+        let (floor, seq) = crate::facts::writing(log, |writing| {
+            (writing.floor_pending(), writing.next_event())
+        });
         if floor {
             self.unsealed.insert(scope.to_owned());
         }
@@ -998,8 +999,9 @@ impl TurnDurability for TurnLogPolicy {
             })
             .snapshot_rows(self.rows)
             .whole_checkpoints(whole);
-        let (state, revision) = refused(ready(log.read_owner(scope, |fold| {
-            fold.checkpoint(scope).map_or_else(
+        let owned = scope.to_owned();
+        let (state, revision) = refused(ready(log.read_owner(scope, move |fold| {
+            fold.checkpoint(&owned).map_or_else(
                 || (ScopeState::default(), 0),
                 |checkpoint| {
                     (
@@ -1010,8 +1012,9 @@ impl TurnDurability for TurnLogPolicy {
             )
         })));
         let part = format!("{scope}:part");
-        let written = refused(ready(log.read_owner(&part, |fold| {
-            fold.checkpoint(&part)
+        let read = part.clone();
+        let written = refused(ready(log.read_owner(&part, move |fold| {
+            fold.checkpoint(&read)
                 .map(|checkpoint| checkpoint.payload.clone())
         })));
         let expected = part_revision(revision);
@@ -1022,11 +1025,12 @@ impl TurnDurability for TurnLogPolicy {
         if let Some(owners) = self.owners {
             for owner in 0..owners {
                 let name = format!("{scope}:o{owner}");
-                let read = refused(ready(log.read_owner(&name, |fold| {
+                let owned = name.clone();
+                let read = refused(ready(log.read_owner(&name, move |fold| {
                     (
-                        fold.checkpoint(&name)
+                        fold.checkpoint(&owned)
                             .map(|checkpoint| checkpoint.payload.clone()),
-                        fold.stored(&format!("{name}\nlast")).map(str::to_owned),
+                        fold.stored(&format!("{owned}\nlast")).map(str::to_owned),
                     )
                 })));
                 let expected = (1..=revision)
@@ -1039,16 +1043,16 @@ impl TurnDurability for TurnLogPolicy {
                 );
             }
         }
-        let mut events = Vec::new();
-        refused(ready(log.history(0, |event| {
+        let events = refused(ready(log.history(0, Vec::new(), |events, event| {
             events.push((Some((0, event.seq)), text(&event.event)));
             true
         })));
         let mut state = state;
         state.events = events;
         let contents = format!("{scope}:gc");
-        let kept = refused(ready(log.read_owner(&contents, |fold| {
-            contents_kept(fold, scope, "after a restart")
+        let owned = scope.to_owned();
+        let kept = refused(ready(log.read_owner(&contents, move |fold| {
+            contents_kept(fold, &owned, "after a restart")
         })));
         self.cached
             .insert(scope.to_owned(), kept.into_iter().collect());
@@ -1068,65 +1072,70 @@ impl TurnDurability for TurnLogPolicy {
             &[scope.to_owned(), format!("{scope}:gc")],
             |_| (),
         )));
-        let (recovering, floor, revision) = {
-            let lease = ready(log.lease());
-            let fold = lease.fold();
+        let owned = scope.to_owned();
+        let (recovering, floor, revision) = crate::facts::writing(log, move |writing| {
+            let fold = writing.fold();
             (
                 fold.recovering(),
-                lease.floor_pending(),
-                fold.checkpoint(scope)
+                writing.floor_pending(),
+                fold.checkpoint(&owned)
                     .map_or(0, |checkpoint| checkpoint.revision),
             )
-        };
+        });
         let (log_point, kind) = self.commit_point(point, recovering, floor)?;
         let log = &self.logs[scope];
         let before = ready(log.stats());
-        let mut lease = ready(log.lease());
+        let contents = format!("{scope}:gc");
+        let held = contents.clone();
+        let (stated, next) = ready(log.read(move |fold| {
+            (
+                fold.host("state").is_some(),
+                fold.checkpoint(&held)
+                    .map_or(0, |checkpoint| checkpoint.revision)
+                    + 1,
+            )
+        }));
+        let mut first = Vec::new();
         if let Some(bytes) = self.state
-            && lease.fold().host("state").is_none()
+            && !stated
         {
-            refused(lease.push(LogRecord::Host {
+            first.push(LogRecord::Host {
                 key: "state".to_owned(),
                 value: raw(&padding(scope, bytes)),
-            }));
+            });
         }
         let mut checkpoint = state.clone();
         checkpoint.events.clear();
-        refused(lease.push(LogRecord::Checkpoint {
+        first.push(LogRecord::Checkpoint {
             payload: checkpoint.snapshot(),
             revision: revision + 1,
             state: scope.to_owned(),
-        }));
-        if part_revision(revision + 1) == Some(revision + 1) {
+        });
+        let part = (part_revision(revision + 1) == Some(revision + 1)).then(|| {
             let part = format!("{scope}:part");
-            refused(ready(lease.load_owner(&part)));
-            refused(lease.push(LogRecord::Checkpoint {
+            let record = LogRecord::Checkpoint {
                 payload: part_value(scope, revision + 1),
                 revision: revision + 1,
-                state: part,
-            }));
-        }
+                state: part.clone(),
+            };
+            (part, record)
+        });
+        let mut then = Vec::new();
         if let Some(owners) = self.owners {
             for owner in owners_written(revision + 1, owners) {
                 let name = format!("{scope}:o{owner}");
                 let value = owner_value(scope, revision + 1);
-                refused(lease.push(LogRecord::Stored {
+                then.push(LogRecord::Stored {
                     key: format!("{name}\nlast"),
                     value: value.clone(),
-                }));
-                refused(lease.push(LogRecord::Checkpoint {
+                });
+                then.push(LogRecord::Checkpoint {
                     payload: value,
                     revision: revision + 1,
                     state: name,
-                }));
+                });
             }
         }
-        let contents = format!("{scope}:gc");
-        let next = lease
-            .fold()
-            .checkpoint(&contents)
-            .map_or(0, |checkpoint| checkpoint.revision)
-            + 1;
         let top = next * 5 % 13 + 1;
         let cached = self.cached.entry(scope.to_owned()).or_default();
         let ids = chain(top);
@@ -1141,44 +1150,90 @@ impl TurnDurability for TurnLogPolicy {
                 let key = format!("{contents}\n{}", content(id));
                 fresh.insert(key.clone());
                 pushed.insert(key.clone());
-                refused(lease.push(LogRecord::Stored {
+                then.push(LogRecord::Stored {
                     key,
                     value: content_value(scope, id),
-                }));
+                });
             }
         }
         if let Some(id) = again {
             pushed.insert(format!("{contents}\n{}", content(id)));
             let value = content_value(scope, id);
-            refused(lease.push(LogRecord::Stored {
+            then.push(LogRecord::Stored {
                 key: format!("{contents}\n{}", content(id)),
                 value: if self.rewrite_stale {
                     value.replacen("content", "stale content", 1)
                 } else {
                     value
                 },
-            }));
+            });
         }
-        if self.collect_live {
-            lease.collect_unreachable(&contents);
-        }
-        refused(
-            lease.push(LogRecord::Checkpoint {
-                payload: serde_json::to_string(&[content(top)])
-                    .unwrap_or_else(|error| panic!("a content list does not encode: {error}")),
-                revision: next,
-                state: contents,
-            }),
-        );
+        let collect = self.collect_live;
+        let last = LogRecord::Checkpoint {
+            payload: serde_json::to_string(&[content(top)])
+                .unwrap_or_else(|error| panic!("a content list does not encode: {error}")),
+            revision: next,
+            state: contents.clone(),
+        };
         let viewed = self.rows.map(|_| self.disk.with(|rows| rows.view(scope)));
         let end = self
             .disk
             .with(|rows| rows.view(scope).last().map_or(0, |(seq, _)| *seq));
-        let seq = refused(ready(lease.commit(log_point)));
+        let retention = self.retention;
+        let tracked = self.rows.is_some();
+        let owned = scope.to_owned();
+        let (seq, live) = crate::facts::writing(log, move |writing| {
+            let scope = owned.as_str();
+            for record in first {
+                refused(writing.push(record));
+            }
+            if let Some((part, record)) = part {
+                refused(ready(writing.load_owner(&part)));
+                refused(writing.push(record));
+            }
+            for record in then {
+                refused(writing.push(record));
+            }
+            if collect {
+                writing.collect_unreachable(&contents);
+            }
+            refused(writing.push(last));
+            let seq = refused(ready(writing.commit(log_point)));
+            let keys = content_keys(writing.fold(), scope);
+            refused(ready(writing.load_owners(&keys)));
+            contents_kept(writing.fold(), scope, &format!("after commit {seq}"));
+            for turn in writing.fold().turns() {
+                assert!(
+                    !matches!(turn.phase, Phase::Finished { .. }) || turn.prompt.get() == "null",
+                    "{scope} keeps the prompt of finished turn {} in the fold",
+                    turn.id
+                );
+            }
+            if let Some(keep) = retention {
+                let finished = writing
+                    .fold()
+                    .turns()
+                    .iter()
+                    .filter(|turn| matches!(turn.phase, Phase::Finished { .. }))
+                    .count();
+                assert!(
+                    finished <= keep,
+                    "{finished} finished turns stay in the fold past a retention of {keep}"
+                );
+            }
+            let attempts = |fold: &nanocode_turnlog::Fold| {
+                (
+                    fold.recovering(),
+                    fold.turns()
+                        .iter()
+                        .filter(|turn| !matches!(turn.phase, Phase::Finished { .. }))
+                        .map(|turn| (turn.id.clone(), fold.next_attempt(&turn.id)))
+                        .collect::<Vec<_>>(),
+                )
+            };
+            (seq, tracked.then(|| attempts(writing.fold())))
+        });
         written_once(&self.disk, scope, end, seq, &fresh, &pushed);
-        let keys = content_keys(lease.fold(), scope);
-        refused(ready(lease.load_owners(&keys)));
-        contents_kept(lease.fold(), scope, &format!("after commit {seq}"));
         if let Some(viewed) = viewed {
             let stored = self.disk.with(|rows| rows.view(scope));
             if let ([.., (row, previous)], [.., (_, written)]) =
@@ -1209,40 +1264,10 @@ impl TurnDurability for TurnLogPolicy {
                 );
             }
         }
-        for turn in lease.fold().turns() {
-            assert!(
-                !matches!(turn.phase, Phase::Finished { .. }) || turn.prompt.get() == "null",
-                "{scope} keeps the prompt of finished turn {} in the fold",
-                turn.id
-            );
-        }
-        if let Some(keep) = self.retention {
-            let finished = lease
-                .fold()
-                .turns()
-                .iter()
-                .filter(|turn| matches!(turn.phase, Phase::Finished { .. }))
-                .count();
-            assert!(
-                finished <= keep,
-                "{finished} finished turns stay in the fold past a retention of {keep}"
-            );
-        }
-        let attempts = |fold: &nanocode_turnlog::Fold| {
-            (
-                fold.recovering(),
-                fold.turns()
-                    .iter()
-                    .filter(|turn| !matches!(turn.phase, Phase::Finished { .. }))
-                    .map(|turn| (turn.id.clone(), fold.next_attempt(&turn.id)))
-                    .collect::<Vec<_>>(),
-            )
-        };
-        let live = self.rows.map(|_| attempts(lease.fold()));
-        drop(lease);
         let part = format!("{scope}:part");
-        let read = |fold: &Fold| {
-            fold.checkpoint(&part)
+        let held = part.clone();
+        let read = move |fold: &Fold| {
+            fold.checkpoint(&held)
                 .map(|checkpoint| checkpoint.payload.clone())
         };
         let written = if self.read_unloaded {
@@ -1260,11 +1285,11 @@ impl TurnDurability for TurnLogPolicy {
             let reads = self.disk.with(|rows| rows.reads);
             let reopened = refused(ready(TurnLog::open(Arc::clone(&self.host), scope)));
             self.disk.with(|rows| rows.reads = reads);
-            let loaded = ready(reopened.read(|fold| {
+            let ids = live.1.clone();
+            let loaded = ready(reopened.read(move |fold| {
                 (
                     fold.recovering(),
-                    live.1
-                        .iter()
+                    ids.iter()
                         .map(|(id, _)| (id.clone(), fold.next_attempt(id)))
                         .collect::<Vec<_>>(),
                 )
@@ -1303,13 +1328,13 @@ impl TurnDurability for TurnLogPolicy {
                 .row_limit(self.limit)
                 .snapshot_ratio(self.ratio)
                 .snapshot_rows(Some(0));
-            let mut lease = ready(forced.lease());
-            refused(lease.push(LogRecord::Host {
-                key: "forced".to_owned(),
-                value: raw("0"),
-            }));
-            refused(ready(lease.commit(log_point)));
-            drop(lease);
+            crate::facts::writing(&forced, move |writing| {
+                refused(writing.push(LogRecord::Host {
+                    key: "forced".to_owned(),
+                    value: raw("0"),
+                }));
+                refused(ready(writing.commit(log_point)));
+            });
             let forced = scratch.with(|rows| rows.view(scope));
             let end = stored.last().map_or(0, |(seq, _)| *seq);
             let written = forced
@@ -1398,7 +1423,8 @@ impl TurnDurability for TurnLogPolicy {
             .request
             .clone();
         let log = self.log(scope);
-        let attempt = ready(log.read(|fold| fold.next_attempt(&request)));
+        let wanted = request.clone();
+        let attempt = ready(log.read(move |fold| fold.next_attempt(&wanted)));
         if attempt > RESTART_CAP {
             return Decision::Fail;
         }

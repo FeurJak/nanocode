@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 
 use nanocode_subagents::{AgentUpdate, ScopedAgentUpdate};
@@ -17,7 +17,7 @@ use nanocode_tool_host::{
 };
 use nanocode_turnlog::{
     Answer, EffectClass, Effects, Fold, HeldCall, Hold, LogHost, Outcome, Phase, Point, Record,
-    Resumption, Retired, Rider, Stats, Status, Turn, WakeRider, input_digest, tag,
+    Resumption, Retired, Rider, Stats, Status, Turn, WakeRider, Writing, input_digest, tag,
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json, value::RawValue};
@@ -101,9 +101,15 @@ pub struct OneLog {
     recovering: Atom<BTreeSet<String>>,
     resolved: Atom<BTreeSet<String>>,
     restarts: u64,
+    this: Weak<Self>,
     unsaved: Atom<BTreeMap<(String, u64), u64>>,
     wake_index: Atom<Option<Arc<dyn WakeRider>>>,
     wakes_max: Option<usize>,
+}
+
+enum Admission {
+    Done(Submitted),
+    Retired { same: bool },
 }
 
 #[derive(Clone)]
@@ -306,30 +312,26 @@ fn logged(seq: u64, request_id: Option<&str>, at: u64, event: Box<RawValue>) -> 
 }
 
 async fn staging(
-    lease: &mut nanocode_turnlog::Lease<'_>,
+    writing: &mut Writing,
     state: &str,
     records: &[StoreRecord],
 ) -> Result<(), StoreError> {
     let owned = std::iter::once(state.to_owned())
         .chain(records.iter().map(|record| stored_key(state, &record.key)))
         .collect::<Vec<_>>();
-    lease.load_owners(&owned).await?;
-    lease
+    writing.load_owners(&owned).await?;
+    writing
         .index_owners(&shared::candidates(state, records))
         .await
 }
 
-fn put(
-    lease: &mut nanocode_turnlog::Lease<'_>,
-    state: &str,
-    records: &[StoreRecord],
-) -> Result<(), StoreError> {
+fn put(writing: &mut Writing, state: &str, records: &[StoreRecord]) -> Result<(), StoreError> {
     for record in records {
         let key = stored_key(state, &record.key);
-        let value = shared::staged(lease.fold(), state, record);
-        if lease.fold().stored(&key) != Some(&*value) {
+        let value = shared::staged(writing.fold(), state, record);
+        if writing.fold().stored(&key) != Some(&*value) {
             let value = value.into_owned();
-            lease.push(Record::Stored { key, value })?;
+            writing.push(Record::Stored { key, value })?;
         }
     }
     Ok(())
@@ -337,20 +339,13 @@ fn put(
 
 type RuntimeFact = OwnedFact<Box<RawValue>>;
 
-fn put_fact(
-    lease: &mut nanocode_turnlog::Lease<'_>,
-    fact: &RuntimeFact,
-) -> Result<u64, StoreError> {
-    lease.append_owned(None, fact).map_err(StoreError::from)
+fn put_fact(writing: &mut Writing, fact: &RuntimeFact) -> Result<u64, StoreError> {
+    writing.append_owned(None, fact).map_err(StoreError::from)
 }
 
-fn put_host(
-    lease: &mut nanocode_turnlog::Lease<'_>,
-    key: &str,
-    value: Box<RawValue>,
-) -> Result<(), StoreError> {
+fn put_host(writing: &mut Writing, key: &str, value: Box<RawValue>) -> Result<(), StoreError> {
     if facts::sim::mutated(facts::sim::Mutation::HostCopied) {
-        lease.push(Record::Host {
+        writing.push(Record::Host {
             key: key.to_owned(),
             value: value.clone(),
         })?;
@@ -359,14 +354,14 @@ fn put_host(
         key: key.to_owned(),
         value,
     });
-    put_fact(lease, &fact).map(drop)
+    put_fact(writing, &fact).map(drop)
 }
 
-fn settle_stopped(lease: &mut nanocode_turnlog::Lease<'_>, turn: &str) -> Result<(), StoreError> {
+fn settle_stopped(writing: &mut Writing, turn: &str) -> Result<(), StoreError> {
     if facts::sim::mutated(facts::sim::Mutation::CancelLeavesIntent) {
         return Ok(());
     }
-    facts::settle(lease, turn, facts::Owners::Turn).map(drop)
+    facts::settle(writing, turn, facts::Owners::Turn).map(drop)
 }
 
 fn status_fact(turn: &str, status: TurnStatus) -> RuntimeFact {
@@ -386,6 +381,67 @@ const fn fact_outcome(outcome: Outcome) -> FactOutcome {
 
 fn stored_key(state: &str, key: &str) -> String {
     format!("{state}\n{key}")
+}
+
+async fn retried(
+    writing: &mut Writing,
+    request_id: &str,
+    error: &str,
+    kind: &str,
+    retry_at: u64,
+) -> Result<Option<Option<(TurnRecord, Option<LoggedEvent>)>>, StoreError> {
+    let Some(turn) = writing.fold().turn(request_id) else {
+        return Ok(None);
+    };
+    let previous = match &turn.phase {
+        Phase::Finished { .. } => return Ok(Some(Some((record_of(turn)?, None)))),
+        Phase::Queued { retry } | Phase::Running { retry, .. } => retry.clone(),
+    };
+    let attempts = previous.as_ref().map_or(0, |retry| retry.attempts) + 1;
+    let changed = previous
+        .as_ref()
+        .is_none_or(|old| old.error != error || old.kind != kind);
+    let event = if changed {
+        writing.secure().await?;
+        let seq = writing.next_event();
+        let at = now();
+        let body = raw(&Retrying {
+            tag: "retrying",
+            request_id,
+            error,
+            kind,
+            attempts,
+            retry_at,
+        })?;
+        writing.push(Record::Event {
+            at,
+            event: body.clone(),
+            seq,
+            turn: Some(request_id.to_owned()),
+        })?;
+        Some(logged(seq, Some(request_id), at, body))
+    } else {
+        None
+    };
+    put_fact(
+        writing,
+        &status_fact(
+            request_id,
+            TurnStatus::Retrying {
+                attempts,
+                error: error.to_owned(),
+                kind: kind.to_owned(),
+                retry_at,
+            },
+        ),
+    )?;
+    let record = writing.fold().turn(request_id).map(record_of).transpose()?;
+    Ok(Some(record.map(|record| (record, event))))
+}
+
+fn upgraded(this: &Weak<OneLog>) -> Arc<OneLog> {
+    this.upgrade()
+        .expect("a turn log's writer runs a job only while a caller holds its log")
 }
 
 impl OneLog {
@@ -415,7 +471,11 @@ impl OneLog {
             .max_tail_bytes(policy.max_tail_bytes)
             .snapshot_ratio(policy.snapshot_ratio)
             .snapshot_rows(policy.snapshot_rows);
-        log.lease_within().await?.retire_finished();
+        log.write_within(|writing| {
+            writing.retire_finished();
+            Box::pin(std::future::ready(Ok::<_, StoreError>(())))
+        })
+        .await?;
         let recovering = log
             .read(|fold| {
                 fold.turns()
@@ -425,7 +485,7 @@ impl OneLog {
                     .collect()
             })
             .await;
-        Ok(Arc::new(Self {
+        Ok(Arc::new_cyclic(|this| Self {
             answered: Atom::default(),
             deferred_settles: Atom::new(false),
             dispatched: Atom::default(),
@@ -439,6 +499,7 @@ impl OneLog {
             resolved: Atom::default(),
             restarts: policy.restarts,
             retired_max: policy.retired_max,
+            this: Weak::clone(this),
             unsaved: Atom::default(),
             wake_index: Atom::new(None),
             wakes_max: policy.wakes_max,
@@ -448,6 +509,10 @@ impl OneLog {
     #[must_use]
     pub fn scope(&self) -> &str {
         self.log.scope()
+    }
+
+    fn weak(&self) -> Weak<Self> {
+        Weak::clone(&self.this)
     }
 
     pub fn settle_durably(&self) {
@@ -461,37 +526,51 @@ impl OneLog {
     }
 
     pub async fn settle_deferred(&self) -> Result<(), StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        if *self.owed.get() && lease.buffered() > 0 {
-            lease.commit(Point::Progress).await?;
-        } else {
-            lease.unride();
-        }
-        self.owed.set(false);
-        Ok(())
+        let this = self.weak();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let this = upgraded(&this);
+                    if *this.owed.get() && writing.buffered() > 0 {
+                        writing.commit(Point::Progress).await?;
+                    } else {
+                        writing.unride();
+                    }
+                    this.owed.set(false);
+                    Ok(())
+                })
+            })
+            .await
     }
 
     async fn carried(&self, carried: Carried) -> Result<bool, StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        if !*self.owed.get() || lease.buffered() == 0 {
-            self.owed.set(false);
-            return Ok(false);
-        }
-        let statements = carried
-            .statements
-            .iter()
-            .map(|(sql, params)| SqlStatement {
-                sql,
-                params: params.iter().map(String::as_str).collect(),
+        let this = self.weak();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let this = upgraded(&this);
+                    if !*this.owed.get() || writing.buffered() == 0 {
+                        this.owed.set(false);
+                        return Ok(false);
+                    }
+                    let statements = carried
+                        .statements
+                        .iter()
+                        .map(|(sql, params)| SqlStatement {
+                            sql,
+                            params: params.iter().map(String::as_str).collect(),
+                        })
+                        .collect::<Vec<_>>();
+                    let rider = Rider {
+                        host: carried.host,
+                        statements: &statements,
+                    };
+                    let (_, carried) = writing.commit_carrying(Point::Progress, rider).await?;
+                    this.owed.set(false);
+                    Ok(carried)
+                })
             })
-            .collect::<Vec<_>>();
-        let rider = Rider {
-            host: carried.host,
-            statements: &statements,
-        };
-        let (_, carried) = lease.commit_carrying(Point::Progress, rider).await?;
-        self.owed.set(false);
-        Ok(carried)
+            .await
     }
 
     pub fn declare(&self, tool: impl Into<String>, class: EffectClass) {
@@ -509,7 +588,10 @@ impl OneLog {
         self.log.stats().await
     }
 
-    pub async fn read<R>(&self, read: impl FnOnce(&Fold) -> R) -> R {
+    pub async fn read<R>(&self, read: impl FnOnce(&Fold) -> R + Send + 'static) -> R
+    where
+        R: Send + 'static,
+    {
         self.log.read(read).await
     }
 
@@ -526,7 +608,7 @@ impl OneLog {
     pub async fn uncertain_holds(&self) -> Vec<String> {
         let resolved = self.resolved.get();
         self.log
-            .read(|fold| {
+            .read(move |fold| {
                 fold.holds()
                     .filter(|(key, hold)| {
                         matches!(hold, Hold::Running { .. }) && !resolved.contains(*key)
@@ -537,24 +619,40 @@ impl OneLog {
             .await
     }
 
-    async fn journal_hold(
+    async fn written<R, E, J>(&self, failed: fn(StoreError) -> E, job: J) -> Result<R, E>
+    where
+        R: Send + 'static,
+        E: Send + 'static,
+        J: for<'a> FnOnce(&'a mut Writing) -> StoreFuture<'a, Result<R, E>> + Send + 'static,
+    {
+        self.log
+            .write_within(move |writing| {
+                let work = job(writing);
+                Box::pin(async move { Ok::<_, StoreError>(work.await) })
+            })
+            .await
+            .map_err(failed)?
+    }
+
+    async fn journal_hold<T: Send + 'static>(
         &self,
         key: &str,
-        next: impl FnOnce(Option<&Hold>) -> Result<Option<Hold>, LedgerError>,
-    ) -> Result<(), LedgerError> {
+        next: impl FnOnce(Option<&Hold>) -> Result<(Option<Hold>, T), LedgerError> + Send + 'static,
+    ) -> Result<T, LedgerError> {
         let journal = |error: StoreError| LedgerError::Journal(error.to_string());
-        let mut lease = self.log.lease_within().await.map_err(journal)?;
-        let Some(hold) = next(lease.fold().hold(key))? else {
-            return Ok(());
-        };
-        lease
-            .push(Record::Hold {
-                hold,
-                key: key.to_owned(),
+        let key = key.to_owned();
+        self.written(journal, move |writing| {
+            Box::pin(async move {
+                let (hold, decided) = next(writing.fold().hold(&key))?;
+                let Some(hold) = hold else {
+                    return Ok(decided);
+                };
+                writing.push(Record::Hold { hold, key }).map_err(journal)?;
+                writing.commit(Point::Call).await.map_err(journal)?;
+                Ok(decided)
             })
-            .map_err(journal)?;
-        lease.commit(Point::Call).await.map_err(journal)?;
-        Ok(())
+        })
+        .await
     }
 
     #[must_use]
@@ -572,52 +670,66 @@ impl OneLog {
     }
 
     async fn cells(&self, only: &str) -> Result<BTreeMap<String, Vec<CellJournal>>, StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        lease.load_owner(TOOLS_MARK).await?;
-        lease.load_owner(only).await?;
-        let mut shared = Vec::new();
-        for (session, _, updates) in lease.fold().cells_of(Some(only)) {
-            shared.extend(shared::result_keys(session, updates)?);
-        }
-        lease.load_owners(&shared).await?;
-        let fold = lease.fold();
-        let mut sessions: BTreeMap<String, Vec<CellJournal>> = BTreeMap::new();
-        let mut catalogs: HashMap<String, Arc<[Value]>> = HashMap::new();
-        for (session, _, updates) in fold.cells_of(Some(only)) {
-            let mut decoded = Vec::with_capacity(updates.len());
-            for update in updates {
-                let update = shared::with_results(fold, session, update)?;
-                let mut update = serde_json::from_str::<CellJournalUpdate>(&update)
-                    .map_err(|error| invalid(format!("cell journal update: {error}")))?;
-                if let Some(header) = update.header.as_mut()
-                    && let [Value::Object(mark)] = &*header.tools
-                    && let Some(digest) = mark.get(TOOLS_MARK).and_then(Value::as_str)
-                {
-                    let tools = match catalogs.get(digest) {
-                        Some(tools) => Arc::clone(tools),
-                        None => {
-                            let catalog = fold
-                                .stored(&stored_key(TOOLS_MARK, digest))
-                                .ok_or_else(|| invalid(format!("tool catalog {digest}")))?;
-                            let tools: Arc<[Value]> = serde_json::from_str::<Vec<Value>>(catalog)
-                                .map_err(|error| invalid(format!("tool catalog: {error}")))?
-                                .into();
-                            catalogs.insert(digest.to_owned(), Arc::clone(&tools));
-                            tools
+        let only = only.to_owned();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let only = only.as_str();
+                    writing.load_owner(TOOLS_MARK).await?;
+                    writing.load_owner(only).await?;
+                    let mut shared = Vec::new();
+                    for (session, _, updates) in writing.fold().cells_of(Some(only)) {
+                        shared.extend(shared::result_keys(session, updates)?);
+                    }
+                    writing.load_owners(&shared).await?;
+                    let fold = writing.fold();
+                    let mut sessions: BTreeMap<String, Vec<CellJournal>> = BTreeMap::new();
+                    let mut catalogs: HashMap<String, Arc<[Value]>> = HashMap::new();
+                    for (session, _, updates) in fold.cells_of(Some(only)) {
+                        let mut decoded = Vec::with_capacity(updates.len());
+                        for update in updates {
+                            let update = shared::with_results(fold, session, update)?;
+                            let mut update = serde_json::from_str::<CellJournalUpdate>(&update)
+                                .map_err(|error| {
+                                    invalid(format!("cell journal update: {error}"))
+                                })?;
+                            if let Some(header) = update.header.as_mut()
+                                && let [Value::Object(mark)] = &*header.tools
+                                && let Some(digest) = mark.get(TOOLS_MARK).and_then(Value::as_str)
+                            {
+                                let tools = match catalogs.get(digest) {
+                                    Some(tools) => Arc::clone(tools),
+                                    None => {
+                                        let catalog = fold
+                                            .stored(&stored_key(TOOLS_MARK, digest))
+                                            .ok_or_else(|| {
+                                                invalid(format!("tool catalog {digest}"))
+                                            })?;
+                                        let tools: Arc<[Value]> =
+                                            serde_json::from_str::<Vec<Value>>(catalog)
+                                                .map_err(|error| {
+                                                    invalid(format!("tool catalog: {error}"))
+                                                })?
+                                                .into();
+                                        catalogs.insert(digest.to_owned(), Arc::clone(&tools));
+                                        tools
+                                    }
+                                };
+                                header.tools = tools;
+                            }
+                            decoded.push(update);
                         }
-                    };
-                    header.tools = tools;
-                }
-                decoded.push(update);
-            }
-            if let Some(journal) = CellJournal::fold(decoded) {
-                sessions
-                    .entry(session.to_owned())
-                    .or_default()
-                    .push(journal);
-            }
-        }
-        Ok(sessions)
+                        if let Some(journal) = CellJournal::fold(decoded) {
+                            sessions
+                                .entry(session.to_owned())
+                                .or_default()
+                                .push(journal);
+                        }
+                    }
+                    Ok(sessions)
+                })
+            })
+            .await
     }
 
     async fn whole(
@@ -629,13 +741,14 @@ impl OneLog {
         if keys.is_empty() {
             return Ok(values);
         }
+        let state = state.to_owned();
         self.log
-            .read_owners(&keys, |fold| {
+            .read_owners(&keys, move |fold| {
                 values
                     .into_iter()
                     .map(|value| {
                         value
-                            .map(|value| shared::whole(fold, state, value))
+                            .map(|value| shared::whole(fold, &state, value))
                             .transpose()
                     })
                     .collect()
@@ -644,14 +757,28 @@ impl OneLog {
     }
 
     pub async fn field(&self, key: &str, value: Box<RawValue>) -> Result<(), StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        put_host(&mut lease, key, value)
+        let key = key.to_owned();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let key = key.as_str();
+                    put_host(writing, key, value)
+                })
+            })
+            .await
     }
 
     pub async fn effect(&self, key: &str, value: Box<RawValue>) -> Result<u64, StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        put_host(&mut lease, key, value)?;
-        lease.commit(Point::Call).await
+        let key = key.to_owned();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let key = key.as_str();
+                    put_host(writing, key, value)?;
+                    writing.commit(Point::Call).await
+                })
+            })
+            .await
     }
 
     pub async fn submit(&self, submission: &Submission) -> Result<Submitted, StoreError> {
@@ -663,36 +790,65 @@ impl OneLog {
     }
 
     async fn admit(&self, submission: &Submission, durable: bool) -> Result<Submitted, StoreError> {
-        let id = submission.request_id.as_str();
+        let id = submission.request_id.clone();
         let digest = submission_digest(&submission.prompt, submission.hand.as_deref())?;
         let prompt = raw(&submission.prompt)?;
         let derived = input_digest(&prompt, submission.hand.as_deref());
-        let mut lease = self.log.lease_within().await?;
-        if let Some(turn) = lease.fold().turn(id) {
+        let this = self.weak();
+        let submission = submission.clone();
+        let admitted = self
+            .log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let this = upgraded(&this);
+                    this.admitted(writing, &submission, digest, prompt, &derived, durable)
+                        .await
+                })
+            })
+            .await?;
+        let same = match admitted {
+            Admission::Done(submitted) => return Ok(submitted),
+            Admission::Retired { same } => same,
+        };
+        let record = self
+            .retired_turn(&id)
+            .await?
+            .ok_or_else(|| invalid(format!("retired turn {id} is missing")))?;
+        Ok(if same {
+            Submitted::Existing(record)
+        } else {
+            Submitted::Conflict(record)
+        })
+    }
+
+    async fn admitted(
+        &self,
+        writing: &mut Writing,
+        submission: &Submission,
+        digest: String,
+        prompt: Box<RawValue>,
+        derived: &str,
+        durable: bool,
+    ) -> Result<Admission, StoreError> {
+        let id = submission.request_id.as_str();
+        if let Some(turn) = writing.fold().turn(id) {
             let record = record_of(turn)?;
-            return Ok(if turn.digest == digest || turn.digest == derived {
-                Submitted::Existing(record)
-            } else {
-                Submitted::Conflict(record)
-            });
+            return Ok(Admission::Done(
+                if turn.digest == digest || turn.digest == derived {
+                    Submitted::Existing(record)
+                } else {
+                    Submitted::Conflict(record)
+                },
+            ));
         }
-        if let Some(same) = lease
+        if let Some(same) = writing
             .fold()
             .retired(id)
-            .map(|old| old.digest == tag(&digest) || old.digest == tag(&derived))
+            .map(|old| old.digest == tag(&digest) || old.digest == tag(derived))
         {
-            drop(lease);
-            let record = self
-                .retired_turn(id)
-                .await?
-                .ok_or_else(|| invalid(format!("retired turn {id} is missing")))?;
-            return Ok(if same {
-                Submitted::Existing(record)
-            } else {
-                Submitted::Conflict(record)
-            });
+            return Ok(Admission::Retired { same });
         }
-        let retired = lease.fold().retired_turns();
+        let retired = writing.fold().retired_turns();
         if let Some(max) = self.retired_max
             && retired >= max
         {
@@ -701,16 +857,16 @@ impl OneLog {
             )));
         }
         if !durable {
-            lease.secure().await?;
+            writing.secure().await?;
         }
-        let first = lease.next_event();
+        let first = writing.next_event();
         let at = now();
         let body = raw(&Lifecycle {
             kind: "queued",
             request_id: id,
         })?;
         if facts::sim::mutated(facts::sim::Mutation::AdmissionCopied) {
-            lease.push(Record::Admitted {
+            writing.push(Record::Admitted {
                 digest: digest.clone(),
                 first,
                 hand: submission.hand.clone(),
@@ -720,7 +876,7 @@ impl OneLog {
             })?;
         }
         put_fact(
-            &mut lease,
+            writing,
             &Fact::Input(Input {
                 turn: id.to_owned(),
                 kind: InputKind::Prompt,
@@ -730,55 +886,63 @@ impl OneLog {
                 first: Some(first),
             }),
         )?;
-        lease.push(Record::Event {
+        writing.push(Record::Event {
             at,
             event: body.clone(),
             seq: first,
             turn: Some(id.to_owned()),
         })?;
-        if durable && let Err(error) = lease.commit(Point::Admission).await {
-            lease.unadmit(id, first);
+        if durable && let Err(error) = writing.commit(Point::Admission).await {
+            writing.unadmit(id, first);
             return Err(error);
         }
         let record = record_of(
-            lease
+            writing
                 .fold()
                 .turn(id)
                 .ok_or_else(|| invalid(format!("admitted turn {id} is missing")))?,
         )?;
-        Ok(Submitted::Accepted {
+        Ok(Admission::Done(Submitted::Accepted {
             record,
             event: logged(first, Some(id), at, body),
-        })
+        }))
     }
 
     pub async fn append(&self, entries: &[LogEntry]) -> Result<Vec<LoggedEvent>, StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        lease.secure().await?;
-        let mut events = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let seq = lease.next_event();
-            let at = now();
-            lease.push(Record::Event {
-                at,
-                event: entry.event.clone(),
-                seq,
-                turn: entry.request_id.clone(),
-            })?;
-            events.push(logged(
-                seq,
-                entry.request_id.as_deref(),
-                at,
-                entry.event.clone(),
-            ));
-        }
-        Ok(events)
+        let entries = entries.to_vec();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let entries = entries.as_slice();
+                    writing.secure().await?;
+                    let mut events = Vec::with_capacity(entries.len());
+                    for entry in entries {
+                        let seq = writing.next_event();
+                        let at = now();
+                        writing.push(Record::Event {
+                            at,
+                            event: entry.event.clone(),
+                            seq,
+                            turn: entry.request_id.clone(),
+                        })?;
+                        events.push(logged(
+                            seq,
+                            entry.request_id.as_deref(),
+                            at,
+                            entry.event.clone(),
+                        ));
+                    }
+                    Ok(events)
+                })
+            })
+            .await
     }
 
     pub async fn turn(&self, request_id: &str) -> Result<Option<TurnRecord>, StoreError> {
+        let id = request_id.to_owned();
         let held = self
             .log
-            .read(|fold| fold.turn(request_id).map(record_of).transpose())
+            .read(move |fold| fold.turn(&id).map(record_of).transpose())
             .await?;
         match held {
             Some(record) => Ok(Some(record)),
@@ -787,19 +951,16 @@ impl OneLog {
     }
 
     async fn retired_turn(&self, request_id: &str) -> Result<Option<TurnRecord>, StoreError> {
-        let Some(retired) = self
-            .log
-            .read(|fold| fold.retired(request_id).cloned())
-            .await
-        else {
+        let id = request_id.to_owned();
+        let Some(retired) = self.log.read(move |fold| fold.retired(&id).cloned()).await else {
             return Ok(None);
         };
         let last = retired.last;
-        let mut result = None;
-        self.log
-            .history(last.saturating_sub(1), |event| {
+        let result = self
+            .log
+            .history(last.saturating_sub(1), None, move |result, event| {
                 if event.seq == last {
-                    result = Some(event.event.clone());
+                    *result = Some(event.event.clone());
                 }
                 event.seq < last
             })
@@ -821,7 +982,7 @@ impl OneLog {
 
     async fn close(
         &self,
-        lease: &mut nanocode_turnlog::Lease<'_>,
+        writing: &mut Writing,
         request_id: &str,
         state: TurnState,
         fields: &Map<String, Value>,
@@ -832,28 +993,28 @@ impl OneLog {
                 state.as_str()
             )));
         };
-        settle_stopped(lease, request_id)?;
+        settle_stopped(writing, request_id)?;
         let body = raw(&Finished {
             kind: "result",
             request_id,
             status: state.as_str(),
             fields,
         })?;
-        let mut finished = lease
+        let mut finished = writing
             .fold()
             .turn(request_id)
             .cloned()
             .ok_or_else(|| invalid(format!("finishing turn {request_id} is missing")))?;
-        let last = lease.next_event();
+        let last = writing.next_event();
         let at = now();
-        lease.push(Record::Event {
+        writing.push(Record::Event {
             at,
             event: body.clone(),
             seq: last,
             turn: Some(request_id.to_owned()),
         })?;
         put_fact(
-            lease,
+            writing,
             &status_fact(
                 request_id,
                 TurnStatus::Finished {
@@ -868,7 +1029,7 @@ impl OneLog {
             outcome,
             result: body.clone(),
         };
-        lease.commit(Point::Finish).await?;
+        writing.commit(Point::Finish).await?;
         self.recovering.update(|turns| turns.remove(request_id));
         Ok((
             record_of(&finished)?,
@@ -880,84 +1041,90 @@ impl OneLog {
         if self.recovering.read(|turns| turns.contains(request_id)) {
             self.settle_intents(request_id).await?;
         }
-        let mut lease = self.log.lease_within().await?;
-        let Some(turn) = lease.fold().turn(request_id) else {
-            return Ok(None);
-        };
-        let previous = match turn.phase {
-            Phase::Finished { .. } => return Ok(None),
-            Phase::Queued { .. } => TurnState::Queued,
-            Phase::Running { .. } => TurnState::Running,
-        };
-        let recovering = self.recovering.read(|turns| turns.contains(request_id));
-        if recovering {
-            let attempt = lease.fold().next_attempt(request_id);
-            if attempt > self.restarts {
-                let fields = Map::from_iter([(
-                    "error".to_owned(),
-                    Value::String(format!(
-                        "the turn restarted {} times without progress",
-                        attempt - 1
-                    )),
-                )]);
-                self.close(&mut lease, request_id, TurnState::Failed, &fields)
-                    .await?;
-                return Ok(None);
-            }
-            let fold = lease.fold();
-            let unknown = fold
-                .unknown()
-                .into_iter()
-                .filter(|call_id| fold.intent(call_id).is_none())
-                .collect::<Vec<_>>();
-            if unknown.is_empty() {
-                put_fact(
-                    &mut lease,
-                    &Fact::Marker(Marker::Recovery {
-                        turn: request_id.to_owned(),
-                        attempt,
-                        at: None,
-                    }),
-                )?;
-            } else {
-                lease.push(Record::Recovery {
-                    at: None,
-                    attempt,
-                    turn: request_id.to_owned(),
-                    unknown,
-                })?;
-            }
-        } else {
-            lease.secure().await?;
-        }
-        let seq = lease.next_event();
-        let at = now();
-        let body = raw(&Lifecycle {
-            kind: "running",
-            request_id,
-        })?;
-        put_fact(&mut lease, &status_fact(request_id, TurnStatus::Running))?;
-        lease.push(Record::Event {
-            at,
-            event: body.clone(),
-            seq,
-            turn: Some(request_id.to_owned()),
-        })?;
-        if recovering {
-            lease.commit(Point::Recovery).await?;
-            self.recovering.update(|turns| turns.remove(request_id));
-        }
-        let record = record_of(
-            lease
-                .fold()
-                .turn(request_id)
-                .ok_or_else(|| invalid(format!("started turn {request_id} is missing")))?,
-        )?;
-        Ok(Some(Started {
-            previous,
-            record,
-            event: logged(seq, Some(request_id), at, body),
-        }))
+        let this = self.weak();
+        let request_id = request_id.to_owned();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let this = upgraded(&this);
+                    let request_id = request_id.as_str();
+                    let Some(turn) = writing.fold().turn(request_id) else {
+                        return Ok(None);
+                    };
+                    let previous = match turn.phase {
+                        Phase::Finished { .. } => return Ok(None),
+                        Phase::Queued { .. } => TurnState::Queued,
+                        Phase::Running { .. } => TurnState::Running,
+                    };
+                    let recovering = this.recovering.read(|turns| turns.contains(request_id));
+                    if recovering {
+                        let attempt = writing.fold().next_attempt(request_id);
+                        if attempt > this.restarts {
+                            let fields = Map::from_iter([(
+                                "error".to_owned(),
+                                Value::String(format!(
+                                    "the turn restarted {} times without progress",
+                                    attempt - 1
+                                )),
+                            )]);
+                            this.close(writing, request_id, TurnState::Failed, &fields)
+                                .await?;
+                            return Ok(None);
+                        }
+                        let fold = writing.fold();
+                        let unknown = fold
+                            .unknown()
+                            .into_iter()
+                            .filter(|call_id| fold.intent(call_id).is_none())
+                            .collect::<Vec<_>>();
+                        if unknown.is_empty() {
+                            put_fact(
+                                writing,
+                                &Fact::Marker(Marker::Recovery {
+                                    turn: request_id.to_owned(),
+                                    attempt,
+                                    at: None,
+                                }),
+                            )?;
+                        } else {
+                            writing.push(Record::Recovery {
+                                at: None,
+                                attempt,
+                                turn: request_id.to_owned(),
+                                unknown,
+                            })?;
+                        }
+                    } else {
+                        writing.secure().await?;
+                    }
+                    let seq = writing.next_event();
+                    let at = now();
+                    let body = raw(&Lifecycle {
+                        kind: "running",
+                        request_id,
+                    })?;
+                    put_fact(writing, &status_fact(request_id, TurnStatus::Running))?;
+                    writing.push(Record::Event {
+                        at,
+                        event: body.clone(),
+                        seq,
+                        turn: Some(request_id.to_owned()),
+                    })?;
+                    if recovering {
+                        writing.commit(Point::Recovery).await?;
+                        this.recovering.update(|turns| turns.remove(request_id));
+                    }
+                    let record = record_of(writing.fold().turn(request_id).ok_or_else(|| {
+                        invalid(format!("started turn {request_id} is missing"))
+                    })?)?;
+                    Ok(Some(Started {
+                        previous,
+                        record,
+                        event: logged(seq, Some(request_id), at, body),
+                    }))
+                })
+            })
+            .await
     }
 
     pub async fn finish(
@@ -966,14 +1133,25 @@ impl OneLog {
         state: TurnState,
         fields: &Map<String, Value>,
     ) -> Result<Option<(TurnRecord, LoggedEvent)>, StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        match lease.fold().turn(request_id).map(|turn| &turn.phase) {
-            None | Some(Phase::Finished { .. }) => Ok(None),
-            Some(_) => self
-                .close(&mut lease, request_id, state, fields)
-                .await
-                .map(Some),
-        }
+        let this = self.weak();
+        let request_id = request_id.to_owned();
+        let fields = fields.clone();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let this = upgraded(&this);
+                    let request_id = request_id.as_str();
+                    let fields = &fields;
+                    match writing.fold().turn(request_id).map(|turn| &turn.phase) {
+                        None | Some(Phase::Finished { .. }) => Ok(None),
+                        Some(_) => this
+                            .close(writing, request_id, state, fields)
+                            .await
+                            .map(Some),
+                    }
+                })
+            })
+            .await
     }
 
     pub async fn cancel(
@@ -981,29 +1159,51 @@ impl OneLog {
         request_id: &str,
         fields: &Map<String, Value>,
     ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        let Some(turn) = lease.fold().turn(request_id) else {
-            drop(lease);
-            let retired = self.retired_turn(request_id).await?;
-            return Ok(retired.map(|record| (record, None)));
+        let this = self.weak();
+        let id = request_id.to_owned();
+        let fields = fields.clone();
+        let held = self
+            .log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let this = upgraded(&this);
+                    this.cancelled(writing, &id, &fields).await
+                })
+            })
+            .await?;
+        if let Some(cancelled) = held {
+            return Ok(cancelled);
+        }
+        let retired = self.retired_turn(request_id).await?;
+        Ok(retired.map(|record| (record, None)))
+    }
+
+    async fn cancelled(
+        &self,
+        writing: &mut Writing,
+        request_id: &str,
+        fields: &Map<String, Value>,
+    ) -> Result<Option<Option<(TurnRecord, Option<LoggedEvent>)>>, StoreError> {
+        let Some(turn) = writing.fold().turn(request_id) else {
+            return Ok(None);
         };
         match turn.phase {
             Phase::Running {
                 cancelling: false, ..
             } => {
-                settle_stopped(&mut lease, request_id)?;
-                put_fact(&mut lease, &status_fact(request_id, TurnStatus::Cancelling))?;
-                lease.commit(Point::Cancel).await?;
-                let record = lease.fold().turn(request_id).map(record_of).transpose()?;
-                Ok(record.map(|record| (record, None)))
+                settle_stopped(writing, request_id)?;
+                put_fact(writing, &status_fact(request_id, TurnStatus::Cancelling))?;
+                writing.commit(Point::Cancel).await?;
+                let record = writing.fold().turn(request_id).map(record_of).transpose()?;
+                Ok(Some(record.map(|record| (record, None))))
             }
             Phase::Queued { .. } => {
                 let (record, event) = self
-                    .close(&mut lease, request_id, TurnState::Cancelled, fields)
+                    .close(writing, request_id, TurnState::Cancelled, fields)
                     .await?;
-                Ok(Some((record, Some(event))))
+                Ok(Some(Some((record, Some(event)))))
             }
-            _ => Ok(Some((record_of(turn)?, None))),
+            _ => Ok(Some(Some((record_of(turn)?, None)))),
         }
     }
 
@@ -1012,42 +1212,62 @@ impl OneLog {
         request_id: &str,
         digest: &str,
     ) -> Result<Option<(TurnRecord, LoggedEvent)>, StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        let queued = lease.fold().turn(request_id).is_some_and(|turn| {
-            matches!(turn.phase, Phase::Queued { .. }) && turn.digest == digest
-        });
-        if !queued {
-            return Ok(None);
-        }
-        let fields = Map::from_iter([
-            ("cancelled".to_owned(), Value::Bool(true)),
-            ("steered".to_owned(), Value::Bool(true)),
-        ]);
-        self.close(&mut lease, request_id, TurnState::Cancelled, &fields)
+        let this = self.weak();
+        let request_id = request_id.to_owned();
+        let digest = digest.to_owned();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let this = upgraded(&this);
+                    let request_id = request_id.as_str();
+                    let digest = digest.as_str();
+                    let queued = writing.fold().turn(request_id).is_some_and(|turn| {
+                        matches!(turn.phase, Phase::Queued { .. }) && turn.digest == digest
+                    });
+                    if !queued {
+                        return Ok(None);
+                    }
+                    let fields = Map::from_iter([
+                        ("cancelled".to_owned(), Value::Bool(true)),
+                        ("steered".to_owned(), Value::Bool(true)),
+                    ]);
+                    this.close(writing, request_id, TurnState::Cancelled, &fields)
+                        .await
+                        .map(Some)
+                })
+            })
             .await
-            .map(Some)
     }
 
     pub async fn interrupted(&self, request_id: &str, note: &str) -> Result<(), StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        let running = lease
-            .fold()
-            .turn(request_id)
-            .is_some_and(|turn| matches!(turn.phase, Phase::Running { .. }));
-        if !running {
-            return Ok(());
-        }
-        settle_stopped(&mut lease, request_id)?;
-        put_fact(
-            &mut lease,
-            &status_fact(
-                request_id,
-                TurnStatus::Interrupted {
-                    note: note.to_owned(),
-                },
-            ),
-        )
-        .map(drop)
+        let request_id = request_id.to_owned();
+        let note = note.to_owned();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let request_id = request_id.as_str();
+                    let note = note.as_str();
+                    let running = writing
+                        .fold()
+                        .turn(request_id)
+                        .is_some_and(|turn| matches!(turn.phase, Phase::Running { .. }));
+                    if !running {
+                        return Ok(());
+                    }
+                    settle_stopped(writing, request_id)?;
+                    put_fact(
+                        writing,
+                        &status_fact(
+                            request_id,
+                            TurnStatus::Interrupted {
+                                note: note.to_owned(),
+                            },
+                        ),
+                    )
+                    .map(drop)
+                })
+            })
+            .await
     }
 
     pub async fn retry(
@@ -1057,133 +1277,107 @@ impl OneLog {
         kind: &str,
         retry_at: u64,
     ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
-        let mut lease = self.log.lease_within().await?;
-        let Some(turn) = lease.fold().turn(request_id) else {
-            drop(lease);
-            let retired = self.retired_turn(request_id).await?;
-            return Ok(retired.map(|record| (record, None)));
-        };
-        let previous = match &turn.phase {
-            Phase::Finished { .. } => return Ok(Some((record_of(turn)?, None))),
-            Phase::Queued { retry } | Phase::Running { retry, .. } => retry.clone(),
-        };
-        let attempts = previous.as_ref().map_or(0, |retry| retry.attempts) + 1;
-        let changed = previous
-            .as_ref()
-            .is_none_or(|old| old.error != error || old.kind != kind);
-        let event = if changed {
-            lease.secure().await?;
-            let seq = lease.next_event();
-            let at = now();
-            let body = raw(&Retrying {
-                tag: "retrying",
-                request_id,
-                error,
-                kind,
-                attempts,
-                retry_at,
-            })?;
-            lease.push(Record::Event {
-                at,
-                event: body.clone(),
-                seq,
-                turn: Some(request_id.to_owned()),
-            })?;
-            Some(logged(seq, Some(request_id), at, body))
-        } else {
-            None
-        };
-        put_fact(
-            &mut lease,
-            &status_fact(
-                request_id,
-                TurnStatus::Retrying {
-                    attempts,
-                    error: error.to_owned(),
-                    kind: kind.to_owned(),
-                    retry_at,
-                },
-            ),
-        )?;
-        let record = lease.fold().turn(request_id).map(record_of).transpose()?;
-        Ok(record.map(|record| (record, event)))
+        let id = request_id.to_owned();
+        let error = error.to_owned();
+        let kind = kind.to_owned();
+        let held = self
+            .log
+            .write_within(move |writing| {
+                Box::pin(async move { retried(writing, &id, &error, &kind, retry_at).await })
+            })
+            .await?;
+        if let Some(retried) = held {
+            return Ok(retried);
+        }
+        let retired = self.retired_turn(request_id).await?;
+        Ok(retired.map(|record| (record, None)))
     }
 
     pub async fn import(&self, turns: &[ImportedTurn]) -> Result<usize, StoreError> {
         if turns.is_empty() {
             return Ok(0);
         }
-        let mut lease = self.log.lease_within().await?;
-        let mut imported = false;
-        let mut highest = 0;
-        for turn in turns {
-            let fold = lease.fold();
-            if fold.turn(&turn.request_id).is_some() || fold.retired(&turn.request_id).is_some() {
-                continue;
-            }
-            let id = turn.request_id.as_str();
-            let first = turn.first_seq.unwrap_or(0);
-            lease.push(Record::Admitted {
-                digest: submission_digest(&turn.prompt, turn.hand.as_deref())?,
-                first,
-                hand: turn.hand.clone(),
-                metadata: turn.metadata.clone(),
-                prompt: raw(&turn.prompt)?,
-                turn: id.to_owned(),
-            })?;
-            let status = |status| Record::Status {
-                status,
-                turn: id.to_owned(),
-            };
-            match outcome(turn.state) {
-                Some(outcome) => {
-                    let result = raw(&Finished {
-                        kind: "result",
-                        request_id: id,
-                        status: turn.state.as_str(),
-                        fields: turn.result.as_ref().unwrap_or(&Map::new()),
-                    })?;
-                    let last = match turn.last_seq {
-                        Some(last) => last,
-                        None => {
-                            let last = lease.next_event();
-                            lease.push(Record::Event {
-                                at: now(),
-                                event: result.clone(),
-                                seq: last,
-                                turn: Some(id.to_owned()),
-                            })?;
-                            last
+        let turns = turns.to_vec();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let turns = turns.as_slice();
+                    let mut imported = false;
+                    let mut highest = 0;
+                    for turn in turns {
+                        let fold = writing.fold();
+                        if fold.turn(&turn.request_id).is_some()
+                            || fold.retired(&turn.request_id).is_some()
+                        {
+                            continue;
                         }
-                    };
-                    highest = highest.max(last);
-                    lease.push(status(Status::Finished {
-                        last,
-                        outcome,
-                        result,
-                    }))?;
-                }
-                None if turn.state == TurnState::Running => {
-                    lease.push(status(Status::Running))?;
-                    if turn.cancel_requested {
-                        lease.push(status(Status::Cancelling))?;
+                        let id = turn.request_id.as_str();
+                        let first = turn.first_seq.unwrap_or(0);
+                        writing.push(Record::Admitted {
+                            digest: submission_digest(&turn.prompt, turn.hand.as_deref())?,
+                            first,
+                            hand: turn.hand.clone(),
+                            metadata: turn.metadata.clone(),
+                            prompt: raw(&turn.prompt)?,
+                            turn: id.to_owned(),
+                        })?;
+                        let status = |status| Record::Status {
+                            status,
+                            turn: id.to_owned(),
+                        };
+                        match outcome(turn.state) {
+                            Some(outcome) => {
+                                let result = raw(&Finished {
+                                    kind: "result",
+                                    request_id: id,
+                                    status: turn.state.as_str(),
+                                    fields: turn.result.as_ref().unwrap_or(&Map::new()),
+                                })?;
+                                let last = match turn.last_seq {
+                                    Some(last) => last,
+                                    None => {
+                                        let last = writing.next_event();
+                                        writing.push(Record::Event {
+                                            at: now(),
+                                            event: result.clone(),
+                                            seq: last,
+                                            turn: Some(id.to_owned()),
+                                        })?;
+                                        last
+                                    }
+                                };
+                                highest = highest.max(last);
+                                writing.push(status(Status::Finished {
+                                    last,
+                                    outcome,
+                                    result,
+                                }))?;
+                            }
+                            None if turn.state == TurnState::Running => {
+                                writing.push(status(Status::Running))?;
+                                if turn.cancel_requested {
+                                    writing.push(status(Status::Cancelling))?;
+                                }
+                                if let Some(note) = &turn.note {
+                                    writing
+                                        .push(status(Status::Interrupted { note: note.clone() }))?;
+                                }
+                            }
+                            None => {}
+                        }
+                        highest = highest.max(first);
+                        imported = true;
                     }
-                    if let Some(note) = &turn.note {
-                        lease.push(status(Status::Interrupted { note: note.clone() }))?;
+                    if highest > writing.fold().last_event() {
+                        writing.push(Record::Floor { seq: highest })?;
                     }
-                }
-                None => {}
-            }
-            highest = highest.max(first);
-            imported = true;
-        }
-        if highest > lease.fold().last_event() {
-            lease.push(Record::Floor { seq: highest })?;
-        }
-        if imported {
-            lease.commit(Point::Admission).await?;
-        }
-        Ok(turns.len())
+                    if imported {
+                        writing.commit(Point::Admission).await?;
+                    }
+                    Ok(turns.len())
+                })
+            })
+            .await
     }
 
     pub async fn import_events(
@@ -1191,7 +1385,7 @@ impl OneLog {
         after: u64,
         events: &[LoggedEvent],
     ) -> Result<u64, StoreError> {
-        let Some(last) = events.last() else {
+        let Some(last) = events.last().map(|event| event.seq) else {
             return Ok(after);
         };
         let mut previous = after;
@@ -1204,16 +1398,20 @@ impl OneLog {
             }
             previous = event.seq;
         }
-        let mut lease = self.log.lease_within().await?;
-        let ends = lease.fold().ends();
+        let this = self.weak();
+        let events = events.to_vec();
+        self.log.write_within(move |writing| Box::pin(async move {
+let this = upgraded(&this);
+let events = events.as_slice();
+        let ends = writing.fold().ends();
         if ends < after {
             return Err(StoreError::NotCommitted(format!(
                 "turn log {} ends at seq {ends}, before the seq {after} the imported events follow",
-                self.scope()
+                this.scope()
             )));
         }
         let mut held = Vec::new();
-        lease
+        writing
             .held(after, |event| {
                 held.push(event.clone());
                 true
@@ -1224,7 +1422,7 @@ impl OneLog {
                 None => {
                     return Err(StoreError::NotCommitted(format!(
                         "turn log {} holds event {}, which the imported events after seq {after} do not",
-                        self.scope(),
+                        this.scope(),
                         event.seq
                     )));
                 }
@@ -1235,7 +1433,7 @@ impl OneLog {
                 {
                     return Err(StoreError::NotCommitted(format!(
                         "turn log {} already holds a different event at seq {}",
-                        self.scope(),
+                        this.scope(),
                         event.seq
                     )));
                 }
@@ -1244,18 +1442,20 @@ impl OneLog {
         }
         let fresh = &events[events.partition_point(|event| event.seq <= ends)..];
         if fresh.is_empty() {
-            return Ok(last.seq);
+            return Ok(last);
         }
         for event in fresh {
-            lease.push(Record::Event {
+            writing.push(Record::Event {
                 at: event.created_at,
                 event: event.event.clone(),
                 seq: event.seq,
                 turn: event.request_id.clone(),
             })?;
         }
-        lease.commit(Point::Admission).await?;
-        Ok(last.seq)
+        writing.commit(Point::Admission).await?;
+        Ok(last)
+}))
+.await
     }
 
     pub async fn replace_queued(
@@ -1272,57 +1472,70 @@ impl OneLog {
         let edit = submission_digest(&Prompt::new(text), None)?;
         let request = raw(&Prompt::new(text))?;
         let derived = input_digest(&request, None);
-        let mut lease = self.log.lease_within().await?;
-        let Some(turn) = lease.fold().turn(request_id) else {
-            return Ok(Replaced::NotQueued);
-        };
-        if let Some(applied) = turn.edits.get(edit_id) {
-            return Ok(if *applied == edit || *applied == derived {
-                Replaced::Applied(None)
-            } else {
-                Replaced::Conflict
-            });
-        }
-        if !matches!(turn.phase, Phase::Queued { .. }) {
-            return Ok(Replaced::NotQueued);
-        }
-        let prompt = serde_json::from_str::<Prompt>(turn.prompt.get())
-            .map_err(|error| invalid(format!("prompt of turn {request_id}: {error}")))?;
-        let prompt = edited(&prompt, text)?;
-        let body = raw(&Replacement {
-            digest: &edit,
-            edit_id,
-            kind: "replaced",
-            request_id,
-        })?;
-        let seq = lease.next_event();
-        let at = now();
-        lease.push(Record::Event {
-            at,
-            event: body.clone(),
-            seq,
-            turn: Some(request_id.to_owned()),
-        })?;
-        put_fact(
-            &mut lease,
-            &Fact::Input(Input {
-                turn: request_id.to_owned(),
-                kind: InputKind::Edit {
-                    edit_id: edit_id.to_owned(),
-                },
-                value: raw(&prompt)?,
-                metadata: request,
-                hand: None,
-                first: None,
-            }),
-        )?;
-        lease.commit(Point::Admission).await?;
-        Ok(Replaced::Applied(Some(logged(
-            seq,
-            Some(request_id),
-            at,
-            body,
-        ))))
+        let request_id = request_id.to_owned();
+        let edit_id = edit_id.to_owned();
+        let text = text.to_owned();
+        self.log
+            .write_within(move |writing| {
+                Box::pin(async move {
+                    let request_id = request_id.as_str();
+                    let edit_id = edit_id.as_str();
+                    let text = text.as_str();
+                    let Some(turn) = writing.fold().turn(request_id) else {
+                        return Ok(Replaced::NotQueued);
+                    };
+                    if let Some(applied) = turn.edits.get(edit_id) {
+                        return Ok(if *applied == edit || *applied == derived {
+                            Replaced::Applied(None)
+                        } else {
+                            Replaced::Conflict
+                        });
+                    }
+                    if !matches!(turn.phase, Phase::Queued { .. }) {
+                        return Ok(Replaced::NotQueued);
+                    }
+                    let prompt =
+                        serde_json::from_str::<Prompt>(turn.prompt.get()).map_err(|error| {
+                            invalid(format!("prompt of turn {request_id}: {error}"))
+                        })?;
+                    let prompt = edited(&prompt, text)?;
+                    let body = raw(&Replacement {
+                        digest: &edit,
+                        edit_id,
+                        kind: "replaced",
+                        request_id,
+                    })?;
+                    let seq = writing.next_event();
+                    let at = now();
+                    writing.push(Record::Event {
+                        at,
+                        event: body.clone(),
+                        seq,
+                        turn: Some(request_id.to_owned()),
+                    })?;
+                    put_fact(
+                        writing,
+                        &Fact::Input(Input {
+                            turn: request_id.to_owned(),
+                            kind: InputKind::Edit {
+                                edit_id: edit_id.to_owned(),
+                            },
+                            value: raw(&prompt)?,
+                            metadata: request,
+                            hand: None,
+                            first: None,
+                        }),
+                    )?;
+                    writing.commit(Point::Admission).await?;
+                    Ok(Replaced::Applied(Some(logged(
+                        seq,
+                        Some(request_id),
+                        at,
+                        body,
+                    ))))
+                })
+            })
+            .await
     }
 
     pub async fn page(&self, after: u64, limit: usize) -> Result<LogPage, StoreError> {
@@ -1365,43 +1578,50 @@ impl OneLog {
         limit: usize,
         max_bytes: Option<usize>,
     ) -> Result<LogPage, StoreError> {
-        let mut events = Vec::new();
-        let mut bytes = 0;
-        let mut has_more = false;
         let start = match request_id {
             Some(id) => {
+                let id = id.to_owned();
                 self.log
-                    .read(|fold| {
-                        fold.turn(id)
+                    .read(move |fold| {
+                        fold.turn(&id)
                             .map(|turn| turn.first)
-                            .or_else(|| fold.retired(id).map(|retired| retired.first))
+                            .or_else(|| fold.retired(&id).map(|retired| retired.first))
                             .map_or(after, |first| after.max(first.saturating_sub(1)))
                     })
                     .await
             }
             None => after,
         };
-        self.log
-            .history(start, |event| {
-                if request_id.is_some_and(|id| event.turn.as_deref() != Some(id)) {
-                    return true;
-                }
-                let size = event.event.get().len();
-                if events.len() == limit
-                    || max_bytes.is_some_and(|max| !events.is_empty() && bytes + size > max)
-                {
-                    has_more = true;
-                    return false;
-                }
-                bytes += size;
-                events.push(logged(
-                    event.seq,
-                    event.turn.as_deref(),
-                    event.at,
-                    event.event.clone(),
-                ));
-                true
-            })
+        let wanted = request_id.map(str::to_owned);
+        let (events, _, has_more) = self
+            .log
+            .history(
+                start,
+                (Vec::new(), 0, false),
+                move |(events, bytes, has_more): &mut (Vec<LoggedEvent>, usize, bool), event| {
+                    if wanted
+                        .as_deref()
+                        .is_some_and(|id| event.turn.as_deref() != Some(id))
+                    {
+                        return true;
+                    }
+                    let size = event.event.get().len();
+                    if events.len() == limit
+                        || max_bytes.is_some_and(|max| !events.is_empty() && *bytes + size > max)
+                    {
+                        *has_more = true;
+                        return false;
+                    }
+                    *bytes += size;
+                    events.push(logged(
+                        event.seq,
+                        event.turn.as_deref(),
+                        event.at,
+                        event.event.clone(),
+                    ));
+                    true
+                },
+            )
             .await?;
         Ok(LogPage {
             next_cursor: events.last().map_or(after, |event| event.seq),
@@ -1411,46 +1631,54 @@ impl OneLog {
     }
 
     async fn recorded(&self, recording: Recording<'_>) -> Result<Vec<LoggedEvent>, String> {
-        let mut lease = self
-            .log
-            .lease_within()
-            .await
-            .map_err(|error| error.to_string())?;
-        lease.secure().await.map_err(|error| error.to_string())?;
-        let mut logged_events = Vec::with_capacity(recording.events.len());
+        let mut encoded = Vec::with_capacity(recording.events.len());
         for (event, request_id) in recording.events.iter().zip(recording.request_ids) {
-            if telemetry(event) {
-                let live = serde_json::value::to_raw_value(&Envelope {
-                    event,
-                    annotation: recording.annotation,
-                })
-                .map_err(|error| format!("encode agent event: {error}"))?;
-                logged_events.push(logged(0, request_id.as_deref(), now(), live));
-                continue;
-            }
-            let stored = serde_json::value::to_raw_value(&Stored {
-                event,
-                compact: None,
-            })
-            .map_err(|error| format!("encode agent event: {error}"))?;
+            let stored = if telemetry(event) {
+                None
+            } else {
+                Some(
+                    serde_json::value::to_raw_value(&Stored {
+                        event,
+                        compact: None,
+                    })
+                    .map_err(|error| format!("encode agent event: {error}"))?,
+                )
+            };
             let live = serde_json::value::to_raw_value(&Envelope {
                 event,
                 annotation: recording.annotation,
             })
             .map_err(|error| format!("encode agent event: {error}"))?;
-            let seq = lease.next_event();
-            let at = now();
-            lease
-                .push(Record::Event {
-                    at,
-                    event: stored,
-                    seq,
-                    turn: request_id.clone(),
-                })
-                .map_err(|error| error.to_string())?;
-            logged_events.push(logged(seq, request_id.as_deref(), at, live));
+            encoded.push((stored, live, request_id.clone()));
         }
-        Ok(logged_events)
+        self.written(
+            |error| error.to_string(),
+            move |writing| {
+                Box::pin(async move {
+                    writing.secure().await.map_err(|error| error.to_string())?;
+                    let mut logged_events = Vec::with_capacity(encoded.len());
+                    for (stored, live, request_id) in encoded {
+                        let Some(stored) = stored else {
+                            logged_events.push(logged(0, request_id.as_deref(), now(), live));
+                            continue;
+                        };
+                        let seq = writing.next_event();
+                        let at = now();
+                        writing
+                            .push(Record::Event {
+                                at,
+                                event: stored,
+                                seq,
+                                turn: request_id.clone(),
+                            })
+                            .map_err(|error| error.to_string())?;
+                        logged_events.push(logged(seq, request_id.as_deref(), at, live));
+                    }
+                    Ok(logged_events)
+                })
+            },
+        )
+        .await
     }
 }
 
@@ -1520,54 +1748,64 @@ impl EffectGate for OneLog {
 
     fn before<'a>(&'a self, call: EffectCall<'a>) -> HostFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            let mut lease = self
-                .log
-                .lease_within()
-                .await
-                .map_err(|error| error.to_string())?;
-            match facts::intended(lease.fold(), call.call_id) {
-                Some(tool) if tool != call.tool => {
+            let input = tool_input(call.input).map_err(|error| error.to_string())?;
+            let this = self.weak();
+            let call_id = call.call_id.to_owned();
+            let tool = call.tool.to_owned();
+            let session_id = call.session_id.to_owned();
+            let effect = call.effect;
+            let turn = call.turn_id.map(str::to_owned);
+            self.written(
+                |error| error.to_string(),
+                move |writing| {
+                    Box::pin(async move {
+                        let this = upgraded(&this);
+            match facts::intended(writing.fold(), call_id.as_str()) {
+                Some(tool) if tool != tool.as_str() => {
                     return Err(format!(
                         "call {} was intended for tool {tool}, not {}",
-                        call.call_id, call.tool
+                        call_id.as_str(), tool.as_str()
                     ));
                 }
                 Some(_) => {
-                    if lease.buffered() > 0 {
-                        lease
+                    if writing.buffered() > 0 {
+                        writing
                             .commit(Point::Call)
                             .await
                             .map_err(|error| error.to_string())?;
                     }
-                    self.owed.set(false);
+                    this.owed.set(false);
                     return Ok(());
                 }
-                None if lease.fold().logs_facts(call.session_id)
+                None if writing.fold().logs_facts(session_id.as_str())
                     && !facts::sim::mutated(facts::sim::Mutation::IntentOptional) =>
                 {
                     return Err(format!(
                         "call {} to {} has no durable intent, and session {} commits one before each external call",
-                        call.call_id, call.tool, call.session_id
+                        call_id.as_str(), tool.as_str(), session_id.as_str()
                     ));
                 }
                 None => {}
             }
-            let input = tool_input(call.input).map_err(|error| error.to_string())?;
-            lease
+                        writing
                 .push(Record::Call {
-                    call_id: call.call_id.to_owned(),
-                    effect: call.effect,
+                    call_id: call_id.clone(),
+                    effect,
                     input,
-                    tool: call.tool.to_owned(),
-                    turn: call.turn_id.map(str::to_owned),
+                    tool: tool.clone(),
+                    turn,
                 })
                 .map_err(|error| error.to_string())?;
-            lease
+            writing
                 .commit(Point::Call)
                 .await
                 .map_err(|error| error.to_string())?;
-            self.owed.set(false);
+            this.owed.set(false);
             Ok(())
+                    })
+                },
+            )
+            .await
         })
     }
 
@@ -1595,20 +1833,22 @@ impl EffectGate for OneLog {
             let Ok(output) = raw(&json!({"success": output.success})) else {
                 return;
             };
-            let mut lease = match self.log.lease_within().await {
-                Ok(lease) => lease,
-                Err(error) => {
-                    nanocode_trace::warn!(%error, call_id, "turn log could not record a tool result");
-                    return;
-                }
-            };
-            if facts::intended(lease.fold(), call_id).is_some() {
-                return;
-            }
-            if let Err(error) = lease.push(Record::Result {
-                call_id: call_id.to_owned(),
-                output,
-            }) {
+            let id = call_id.to_owned();
+            let recorded = self
+                .log
+                .write_within(move |writing| {
+                    Box::pin(async move {
+                        if facts::intended(writing.fold(), &id).is_some() {
+                            return Ok(());
+                        }
+                        writing.push(Record::Result {
+                            call_id: id,
+                            output,
+                        })
+                    })
+                })
+                .await;
+            if let Err(error) = recorded {
                 nanocode_trace::warn!(%error, call_id, "turn log could not record a tool result");
             }
         })
@@ -1622,16 +1862,24 @@ impl HoldLedger for OneLog {
         call: HoldCall<'a>,
         card: &'a RawValue,
     ) -> HostFuture<'a, Result<(), LedgerError>> {
+        let owned = key.to_owned();
+        let call_id = call.call_id.to_owned();
+        let card = card.to_owned();
+        let input = call.input.to_owned();
+        let tool = call.tool.to_owned();
+        let turn = call.turn_id.map(str::to_owned);
         Box::pin(async move {
-            let held = HeldCall {
-                call_id: call.call_id,
-                card,
-                input: call.input,
-                tool: call.tool,
-                turn: call.turn_id,
-            };
-            self.journal_hold(key, |existing| {
-                Hold::hold(existing, key, &held).map_err(LedgerError::Hold)
+            self.journal_hold(key, move |existing| {
+                let held = HeldCall {
+                    call_id: &call_id,
+                    card: &card,
+                    input: &input,
+                    tool: &tool,
+                    turn: turn.as_deref(),
+                };
+                Hold::hold(existing, &owned, &held)
+                    .map(|hold| (hold, ()))
+                    .map_err(LedgerError::Hold)
             })
             .await
         })
@@ -1643,16 +1891,14 @@ impl HoldLedger for OneLog {
         answer: Answer,
     ) -> HostFuture<'a, Result<Resumption, LedgerError>> {
         Box::pin(async move {
-            let mut resumption = None;
-            self.journal_hold(key, |existing| {
-                let (hold, resumed) =
-                    Hold::resolve(existing, key, answer).map_err(LedgerError::Hold)?;
-                resumption = Some(resumed);
-                Ok(Some(hold))
-            })
-            .await?;
-            let resumption =
-                resumption.expect("a resolve that journaled its hold returns its resumption");
+            let owned = key.to_owned();
+            let resumption = self
+                .journal_hold(key, move |existing| {
+                    let (hold, resumed) =
+                        Hold::resolve(existing, &owned, answer).map_err(LedgerError::Hold)?;
+                    Ok((Some(hold), resumed))
+                })
+                .await?;
             if matches!(resumption, Resumption::Run { .. }) {
                 self.resolved.update(|resolved| {
                     resolved.insert(key.to_owned());
@@ -1665,9 +1911,10 @@ impl HoldLedger for OneLog {
     fn running<'a>(&'a self, call_id: &'a str) -> HostFuture<'a, Option<Running>> {
         Box::pin(async move {
             let resolved = self.resolved.get();
+            let call_id = call_id.to_owned();
             self.log
-                .read(|fold| {
-                    let (key, hold) = fold.running_hold(call_id)?;
+                .read(move |fold| {
+                    let (key, hold) = fold.running_hold(&call_id)?;
                     let Hold::Running { input, .. } = hold else {
                         unreachable!("running_hold returns only running holds");
                     };
@@ -1689,9 +1936,10 @@ impl HoldLedger for OneLog {
 
     fn release<'a>(&'a self, key: &'a str) -> HostFuture<'a, Result<(), LedgerError>> {
         Box::pin(async move {
-            self.journal_hold(key, |existing| {
-                Hold::release(existing, key)
-                    .map(Some)
+            let owned = key.to_owned();
+            self.journal_hold(key, move |existing| {
+                Hold::release(existing, &owned)
+                    .map(|hold| (Some(hold), ()))
                     .map_err(LedgerError::Hold)
             })
             .await
@@ -1744,136 +1992,142 @@ impl CellJournalSink for OneLogJournals {
                 })
                 .collect::<Result<Vec<_>, StoreError>>()
                 .map_err(|error| error.to_string())?;
-            let mut lease = log
-                .log
-                .lease_within()
-                .await
-                .map_err(|error| error.to_string())?;
-            let fresh = update.header.is_some();
-            if let Some(header) = update.header.as_mut() {
-                let catalog =
-                    serde_json::to_string(&header.tools).map_err(|error| error.to_string())?;
-                let digest = nanocode_digest::blake3(catalog.as_bytes())
-                    .to_hex()
-                    .to_string();
-                let key = stored_key(TOOLS_MARK, &digest);
-                lease
-                    .index_owners(std::slice::from_ref(&key))
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if !lease.fold().contains(&key) {
-                    lease
-                        .push(Record::Stored {
-                            key,
-                            value: catalog,
-                        })
-                        .map_err(|error| error.to_string())?;
-                }
-                header.tools = [json!({ (TOOLS_MARK): digest })].into();
-            }
-            let shared = shared::shared_results(&update).map_err(|error| error.to_string())?;
-            let encoded = match shared {
-                Some(shared) => {
-                    let keys = shared
-                        .values
-                        .iter()
-                        .map(|(key, _)| stored_key(&update.session_id, key))
-                        .collect::<Vec<_>>();
-                    lease
-                        .load_owners(&keys)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    for ((_, value), key) in shared.values.into_iter().zip(keys) {
-                        if lease.fold().stored(&key) != Some(&*value) {
-                            lease
-                                .push(Record::Stored { key, value })
+            let weak = Arc::downgrade(&log);
+            log.written(
+                |error| error.to_string(),
+                move |writing| {
+                    Box::pin(async move {
+                        let log = upgraded(&weak);
+                        let fresh = update.header.is_some();
+                        if let Some(header) = update.header.as_mut() {
+                            let catalog = serde_json::to_string(&header.tools)
                                 .map_err(|error| error.to_string())?;
+                            let digest = nanocode_digest::blake3(catalog.as_bytes())
+                                .to_hex()
+                                .to_string();
+                            let key = stored_key(TOOLS_MARK, &digest);
+                            writing
+                                .index_owners(std::slice::from_ref(&key))
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            if !writing.fold().contains(&key) {
+                                writing
+                                    .push(Record::Stored {
+                                        key,
+                                        value: catalog,
+                                    })
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            header.tools = [json!({ (TOOLS_MARK): digest })].into();
                         }
-                    }
-                    shared.update
-                }
-                None => raw(&update).map_err(|error| error.to_string())?,
-            };
-            lease
-                .push(Record::Cell {
-                    cell: update.cell_id,
-                    fresh,
-                    session: update.session_id.clone(),
-                    update: encoded,
-                })
-                .map_err(|error| error.to_string())?;
-            let cell = (update.session_id.clone(), update.cell_id);
-            if update.finished {
-                log.live.update(|live| live.remove(&cell));
-            } else if fresh {
-                log.live.update(|live| live.insert(cell.clone()));
-            }
-            let seq = lease.fold().seq();
-            let timed = update
-                .entries
-                .iter()
-                .any(|entry| matches!(entry, JournalEntry::Timeout { .. }));
-            let pending = log.unsaved.read(|unsaved| unsaved.get(&cell) == Some(&seq));
-            let started = update
-                .calls
-                .iter()
-                .filter(|call| {
-                    matches!(call.state, JournaledCallState::Running)
-                        && log.effect_of(&call.name).needs_row()
-                })
-                .map(|call| call.id)
-                .collect::<Vec<_>>();
-            let results = update
-                .entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    JournalEntry::Result { id, .. } => Some(*id),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let answered = log.dispatched.update(|dispatched| {
-                let calls = dispatched.entry(cell.clone()).or_default();
-                calls.extend(started.iter().copied());
-                let before = calls.len();
-                calls.retain(|id| !results.contains(id));
-                let answered = calls.len() < before;
-                if calls.is_empty() || update.finished {
-                    dispatched.remove(&cell);
-                }
-                answered
-            });
-            let owed = log.answered.read(|owed| owed.get(&cell) == Some(&seq));
-            if external.is_empty()
-                && !owed
-                && !(answered && (timed || update.finished))
-                && !(timed && (fresh || pending))
-            {
-                log.unsaved.update(|unsaved| {
-                    if update.finished {
-                        unsaved.remove(&cell);
-                    } else if fresh {
-                        unsaved.insert(cell.clone(), seq);
-                    }
-                });
-                log.answered.update(|owed| {
-                    if update.finished {
-                        owed.remove(&cell);
-                    } else if answered {
-                        owed.insert(cell.clone(), seq);
-                    }
-                });
-                return Ok(());
-            }
-            log.unsaved.update(|unsaved| unsaved.remove(&cell));
-            log.answered.update(|owed| owed.remove(&cell));
-            for call in external {
-                lease.push(call).map_err(|error| error.to_string())?;
-            }
-            lease
-                .commit(Point::Call)
-                .await
-                .map(drop)
-                .map_err(|error| error.to_string())
+                        let shared =
+                            shared::shared_results(&update).map_err(|error| error.to_string())?;
+                        let encoded = match shared {
+                            Some(shared) => {
+                                let keys = shared
+                                    .values
+                                    .iter()
+                                    .map(|(key, _)| stored_key(&update.session_id, key))
+                                    .collect::<Vec<_>>();
+                                writing
+                                    .load_owners(&keys)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                for ((_, value), key) in shared.values.into_iter().zip(keys) {
+                                    if writing.fold().stored(&key) != Some(&*value) {
+                                        writing
+                                            .push(Record::Stored { key, value })
+                                            .map_err(|error| error.to_string())?;
+                                    }
+                                }
+                                shared.update
+                            }
+                            None => raw(&update).map_err(|error| error.to_string())?,
+                        };
+                        writing
+                            .push(Record::Cell {
+                                cell: update.cell_id,
+                                fresh,
+                                session: update.session_id.clone(),
+                                update: encoded,
+                            })
+                            .map_err(|error| error.to_string())?;
+                        let cell = (update.session_id.clone(), update.cell_id);
+                        if update.finished {
+                            log.live.update(|live| live.remove(&cell));
+                        } else if fresh {
+                            log.live.update(|live| live.insert(cell.clone()));
+                        }
+                        let seq = writing.fold().seq();
+                        let timed = update
+                            .entries
+                            .iter()
+                            .any(|entry| matches!(entry, JournalEntry::Timeout { .. }));
+                        let pending = log.unsaved.read(|unsaved| unsaved.get(&cell) == Some(&seq));
+                        let started = update
+                            .calls
+                            .iter()
+                            .filter(|call| {
+                                matches!(call.state, JournaledCallState::Running)
+                                    && log.effect_of(&call.name).needs_row()
+                            })
+                            .map(|call| call.id)
+                            .collect::<Vec<_>>();
+                        let results = update
+                            .entries
+                            .iter()
+                            .filter_map(|entry| match entry {
+                                JournalEntry::Result { id, .. } => Some(*id),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        let answered = log.dispatched.update(|dispatched| {
+                            let calls = dispatched.entry(cell.clone()).or_default();
+                            calls.extend(started.iter().copied());
+                            let before = calls.len();
+                            calls.retain(|id| !results.contains(id));
+                            let answered = calls.len() < before;
+                            if calls.is_empty() || update.finished {
+                                dispatched.remove(&cell);
+                            }
+                            answered
+                        });
+                        let owed = log.answered.read(|owed| owed.get(&cell) == Some(&seq));
+                        if external.is_empty()
+                            && !owed
+                            && !(answered && (timed || update.finished))
+                            && !(timed && (fresh || pending))
+                        {
+                            log.unsaved.update(|unsaved| {
+                                if update.finished {
+                                    unsaved.remove(&cell);
+                                } else if fresh {
+                                    unsaved.insert(cell.clone(), seq);
+                                }
+                            });
+                            log.answered.update(|owed| {
+                                if update.finished {
+                                    owed.remove(&cell);
+                                } else if answered {
+                                    owed.insert(cell.clone(), seq);
+                                }
+                            });
+                            return Ok(());
+                        }
+                        log.unsaved.update(|unsaved| unsaved.remove(&cell));
+                        log.answered.update(|owed| owed.remove(&cell));
+                        for call in external {
+                            writing.push(call).map_err(|error| error.to_string())?;
+                        }
+                        writing
+                            .commit(Point::Call)
+                            .await
+                            .map(drop)
+                            .map_err(|error| error.to_string())
+                    })
+                },
+            )
+            .await
         })
     }
 
@@ -1890,26 +2144,32 @@ impl CellJournalSink for OneLogJournals {
             .live
             .update(|live| live.remove(&(session.clone(), cell_id)));
         Box::pin(async move {
-            let mut lease = match log.log.lease_within().await {
-                Ok(lease) => lease,
-                Err(error) => {
-                    nanocode_trace::warn!(%error, "turn log could not load a cell journal to forget");
-                    return;
-                }
-            };
-            if let Err(error) = lease.load_owners(std::slice::from_ref(&session)).await {
+            let forgotten = log
+                .log
+                .write_within(move |writing| {
+                    Box::pin(async move {
+                        if let Err(error) =
+                            writing.load_owners(std::slice::from_ref(&session)).await
+                        {
+                            nanocode_trace::warn!(%error, "turn log could not load a cell journal to forget");
+                            return Ok(());
+                        }
+                        if let Err(error) = writing.push(Record::Forget {
+                            cell: cell_id,
+                            session,
+                        }) {
+                            nanocode_trace::warn!(%error, "turn log could not forget a cell journal");
+                            return Ok(());
+                        }
+                        if unfinished && let Err(error) = writing.commit(Point::Call).await {
+                            nanocode_trace::warn!(%error, "turn log could not commit a forgotten cell journal");
+                        }
+                        Ok::<_, StoreError>(())
+                    })
+                })
+                .await;
+            if let Err(error) = forgotten {
                 nanocode_trace::warn!(%error, "turn log could not load a cell journal to forget");
-                return;
-            }
-            if let Err(error) = lease.push(Record::Forget {
-                cell: cell_id,
-                session,
-            }) {
-                nanocode_trace::warn!(%error, "turn log could not forget a cell journal");
-                return;
-            }
-            if unfinished && let Err(error) = lease.commit(Point::Call).await {
-                nanocode_trace::warn!(%error, "turn log could not commit a forgotten cell journal");
             }
         })
     }
@@ -1936,11 +2196,13 @@ impl CellJournalSink for OneLogJournals {
         let key = stored_key(session_id, STORED_MARK);
         Box::pin(async move {
             log.log
-                .lease_within()
+                .write_within(move |writing| {
+                    Box::pin(std::future::ready(
+                        writing.push(Record::Stored { key, value: stored }),
+                    ))
+                })
                 .await
-                .map_err(|error| error.to_string())?
-                .push(Record::Stored { key, value: stored })
-                .map_err(|error| error.to_string())
+                .map_err(|error: StoreError| error.to_string())
         })
     }
 
@@ -1951,8 +2213,9 @@ impl CellJournalSink for OneLogJournals {
         Box::pin(async move {
             let stored = log
                 .log
-                .read_owners(std::slice::from_ref(&key), |fold| {
-                    fold.stored(&key).map(str::to_owned)
+                .read_owners(std::slice::from_ref(&key), {
+                    let key = key.clone();
+                    move |fold| fold.stored(&key).map(str::to_owned)
                 })
                 .await
                 .map_err(|error| error.to_string())?;
@@ -1960,8 +2223,9 @@ impl CellJournalSink for OneLogJournals {
                 Some(stored) => Ok(Some(stored)),
                 None => log
                     .log
-                    .read_owners(std::slice::from_ref(&legacy), |fold| {
-                        fold.stored(&legacy).map(str::to_owned)
+                    .read_owners(std::slice::from_ref(&legacy), {
+                        let legacy = legacy.clone();
+                        move |fold| fold.stored(&legacy).map(str::to_owned)
                     })
                     .await
                     .map_err(|error| error.to_string()),
@@ -1972,22 +2236,21 @@ impl CellJournalSink for OneLogJournals {
 
 impl OneLogStore {
     fn replaced(
-        &self,
-        lease: &mut nanocode_turnlog::Lease<'_>,
+        log: &OneLog,
+        writing: &mut Writing,
         state_id: &str,
         owner: &OwnerToken,
         expected_revision: u64,
         payload: &str,
         records: &[StoreRecord],
     ) -> Result<u64, StoreError> {
-        if self
-            .0
+        if log
             .owners
             .read(|owners| owners.get(state_id) != Some(owner))
         {
             return Err(StoreError::Fenced);
         }
-        let actual = lease
+        let actual = writing
             .fold()
             .checkpoint(state_id)
             .map_or(0, |checkpoint| checkpoint.revision);
@@ -1998,8 +2261,8 @@ impl OneLogStore {
             });
         }
         let revision = actual + 1;
-        put(lease, state_id, records)?;
-        lease.push(Record::Checkpoint {
+        put(writing, state_id, records)?;
+        writing.push(Record::Checkpoint {
             payload: payload.to_owned(),
             revision,
             state: state_id.to_owned(),
@@ -2032,8 +2295,9 @@ impl StateStore for OneLogStore {
             let value = self
                 .0
                 .log
-                .read_owners(std::slice::from_ref(&owned), |fold| {
-                    fold.stored(&owned).map(str::to_owned)
+                .read_owners(std::slice::from_ref(&owned), {
+                    let owned = owned.clone();
+                    move |fold| fold.stored(&owned).map(str::to_owned)
                 })
                 .await?;
             Ok(self.0.whole(state_id, vec![value]).await?.pop().flatten())
@@ -2053,11 +2317,14 @@ impl StateStore for OneLogStore {
             let values = self
                 .0
                 .log
-                .read_owners(&owned, |fold| {
-                    owned
-                        .iter()
-                        .map(|key| fold.stored(key).map(str::to_owned))
-                        .collect()
+                .read_owners(&owned, {
+                    let owned = owned.clone();
+                    move |fold| {
+                        owned
+                            .iter()
+                            .map(|key| fold.stored(key).map(str::to_owned))
+                            .collect()
+                    }
                 })
                 .await?;
             self.0.whole(state_id, values).await
@@ -2071,8 +2338,9 @@ impl StateStore for OneLogStore {
         Box::pin(async move {
             self.0
                 .log
-                .read_owners(&[state_id.to_owned()], |fold| {
-                    Self::stored_state(fold, state_id)
+                .read_owners(&[state_id.to_owned()], {
+                    let state_id = state_id.to_owned();
+                    move |fold| Self::stored_state(fold, &state_id)
                 })
                 .await
         })
@@ -2087,7 +2355,7 @@ impl StateStore for OneLogStore {
             Ok(self
                 .0
                 .log
-                .read(|fold| {
+                .read(move |fold| {
                     fold.states()
                         .into_iter()
                         .take(limit)
@@ -2105,10 +2373,13 @@ impl StateStore for OneLogStore {
         Box::pin(async move {
             self.0
                 .log
-                .read_owner(state_id, |fold| {
-                    export::records_of(fold, state_id)
-                        .map(|(key, _)| key.to_owned())
-                        .collect()
+                .read_owner(state_id, {
+                    let state_id = state_id.to_owned();
+                    move |fold| {
+                        export::records_of(fold, &state_id)
+                            .map(|(key, _)| key.to_owned())
+                            .collect()
+                    }
                 })
                 .await
         })
@@ -2127,20 +2398,24 @@ impl StateStore for OneLogStore {
         state_id: &'a str,
         owner_id: OwnerId,
     ) -> StoreFuture<'a, Result<OwnedState, StoreError>> {
-        Box::pin(async move {
-            let mut lease = self.0.log.lease_within().await?;
-            lease.load_owners(&[state_id.to_owned()]).await?;
-            let owner = self.0.owners.update(|owners| {
-                let fence = owners.get(state_id).map_or(0, OwnerToken::fence) + 1;
-                let token = OwnerToken::new(owner_id.clone(), fence);
-                owners.insert(state_id.to_owned(), token.clone());
-                token
-            });
-            Ok(OwnedState {
-                owner,
-                state: Self::stored_state(lease.fold(), state_id),
+        let log = Arc::downgrade(&self.0);
+        let state_id = state_id.to_owned();
+        Box::pin(self.0.log.write_within(move |writing| {
+            Box::pin(async move {
+                let log = upgraded(&log);
+                writing.load_owners(std::slice::from_ref(&state_id)).await?;
+                let owner = log.owners.update(|owners| {
+                    let fence = owners.get(&state_id).map_or(0, OwnerToken::fence) + 1;
+                    let token = OwnerToken::new(owner_id.clone(), fence);
+                    owners.insert(state_id.clone(), token.clone());
+                    token
+                });
+                Ok(OwnedState {
+                    owner,
+                    state: Self::stored_state(writing.fold(), &state_id),
+                })
             })
-        })
+        }))
     }
 
     fn replace<'a>(
@@ -2151,22 +2426,30 @@ impl StateStore for OneLogStore {
         payload: &'a str,
         records: &'a [StoreRecord],
     ) -> StoreFuture<'a, Result<u64, StoreError>> {
-        Box::pin(async move {
-            let mut lease = self.0.log.lease_within().await?;
-            staging(&mut lease, state_id, records).await?;
-            let revision = self.replaced(
-                &mut lease,
-                state_id,
-                owner,
-                expected_revision,
-                payload,
-                records,
-            )?;
-            if *self.0.durable_settles.get() {
-                lease.commit(Point::Progress).await?;
-            }
-            Ok(revision)
-        })
+        let log = Arc::downgrade(&self.0);
+        let state_id = state_id.to_owned();
+        let owner = owner.clone();
+        let payload = payload.to_owned();
+        let records = records.to_vec();
+        Box::pin(self.0.log.write_within(move |writing| {
+            Box::pin(async move {
+                let log = upgraded(&log);
+                staging(writing, &state_id, &records).await?;
+                let revision = Self::replaced(
+                    &log,
+                    writing,
+                    &state_id,
+                    &owner,
+                    expected_revision,
+                    &payload,
+                    &records,
+                )?;
+                if *log.durable_settles.get() {
+                    writing.commit(Point::Progress).await?;
+                }
+                Ok(revision)
+            })
+        }))
     }
 
     fn commit<'a>(
@@ -2176,59 +2459,66 @@ impl StateStore for OneLogStore {
         expected_revision: u64,
         commit: StateCommit<'a>,
     ) -> StoreFuture<'a, Result<Committed, StoreError>> {
-        Box::pin(async move {
-            if !commit.events.is_empty() {
-                return Err(StoreError::NotCommitted(
-                    "this store does not record state events".to_owned(),
-                ));
-            }
-            let mut lease = self.0.log.lease_within().await?;
-            staging(&mut lease, state_id, commit.records).await?;
-            let revision = self.replaced(
-                &mut lease,
-                state_id,
-                owner,
-                expected_revision,
-                commit.payload,
-                commit.records,
-            )?;
-            let recovering = lease.fold().recovering();
-            if commit.settle == Settle::Durable && (recovering || *self.0.durable_settles.get()) {
-                if !recovering && *self.0.deferred_settles.get() {
-                    self.0.owed.set(true);
-                } else {
-                    lease.commit(Point::Progress).await?;
+        if !commit.events.is_empty() {
+            return Box::pin(std::future::ready(Err(StoreError::NotCommitted(
+                "this store does not record state events".to_owned(),
+            ))));
+        }
+        let log = Arc::downgrade(&self.0);
+        let state_id = state_id.to_owned();
+        let owner = owner.clone();
+        let payload = commit.payload.to_owned();
+        let records = commit.records.to_vec();
+        let settle = commit.settle;
+        Box::pin(self.0.log.write_within(move |writing| {
+            Box::pin(async move {
+                let log = upgraded(&log);
+                staging(writing, &state_id, &records).await?;
+                let revision = Self::replaced(
+                    &log,
+                    writing,
+                    &state_id,
+                    &owner,
+                    expected_revision,
+                    &payload,
+                    &records,
+                )?;
+                let recovering = writing.fold().recovering();
+                if settle == Settle::Durable && (recovering || *log.durable_settles.get()) {
+                    if !recovering && *log.deferred_settles.get() {
+                        log.owed.set(true);
+                    } else {
+                        writing.commit(Point::Progress).await?;
+                    }
                 }
-            }
-            Ok(Committed {
-                revision,
-                first_event: None,
+                Ok(Committed {
+                    revision,
+                    first_event: None,
+                })
             })
-        })
+        }))
     }
 
     fn collect_unreachable<'a>(
         &'a mut self,
         state_id: &'a str,
     ) -> StoreFuture<'a, Result<(), StoreError>> {
-        Box::pin(async move {
-            self.0
-                .log
-                .lease_within()
-                .await?
-                .collect_unreachable(state_id);
-            Ok(())
-        })
+        let state_id = state_id.to_owned();
+        Box::pin(self.0.log.write_within(move |writing| {
+            writing.collect_unreachable(&state_id);
+            Box::pin(std::future::ready(Ok(())))
+        }))
     }
 
     fn flush(&mut self) -> StoreFuture<'_, Result<(), StoreError>> {
-        Box::pin(async move {
-            let mut lease = self.0.log.lease_within().await?;
-            if lease.buffered() > 0 {
-                lease.commit(Point::Progress).await?;
-            }
-            Ok(())
-        })
+        Box::pin(self.0.log.write_within(|writing| {
+            Box::pin(async move {
+                if writing.buffered() > 0 {
+                    writing.commit(Point::Progress).await?;
+                }
+                Ok(())
+            })
+        }))
     }
 
     fn put_records<'a>(
@@ -2236,12 +2526,15 @@ impl StateStore for OneLogStore {
         state_id: &'a str,
         records: &'a [StoreRecord],
     ) -> StoreFuture<'a, Result<bool, StoreError>> {
-        Box::pin(async move {
-            let mut lease = self.0.log.lease_within().await?;
-            staging(&mut lease, state_id, records).await?;
-            put(&mut lease, state_id, records)?;
-            Ok(true)
-        })
+        let state_id = state_id.to_owned();
+        let records = records.to_vec();
+        Box::pin(self.0.log.write_within(move |writing| {
+            Box::pin(async move {
+                staging(writing, &state_id, &records).await?;
+                put(writing, &state_id, &records)?;
+                Ok(true)
+            })
+        }))
     }
 }
 

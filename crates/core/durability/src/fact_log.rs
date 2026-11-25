@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use nanocode_platform::MaybeSend;
 use serde_json::value::RawValue;
 
 use crate::{
@@ -14,12 +13,7 @@ pub struct Replay {
     pub blobs: BTreeMap<Digest, Box<RawValue>>,
 }
 
-#[cfg(not(target_family = "wasm"))]
-pub type Append<'a> =
-    Box<dyn FnOnce(Replay, &mut dyn FactSink) -> Result<u64, FoldError> + Send + 'a>;
-
-#[cfg(target_family = "wasm")]
-pub type Append<'a> = Box<dyn FnOnce(Replay, &mut dyn FactSink) -> Result<u64, FoldError> + 'a>;
+pub type Append = Box<dyn FnOnce(Replay, &mut dyn FactSink) -> Result<u64, FoldError> + Send>;
 
 pub trait FactLogs: Send + Sync {
     fn scoped(&self, state: &str, turns: bool) -> std::sync::Arc<dyn FactLog>;
@@ -36,11 +30,7 @@ pub trait FactLog: Send + Sync {
         self.replay()
     }
 
-    fn append<'a>(
-        &'a self,
-        after: u64,
-        write: Append<'a>,
-    ) -> StoreFuture<'a, Result<u64, StoreError>>;
+    fn append(&self, after: u64, write: Append) -> StoreFuture<'_, Result<u64, StoreError>>;
 }
 
 struct Forward<'a>(&'a mut dyn FactSink);
@@ -111,11 +101,10 @@ pub async fn commit_fact<F>(
     fact: OwnedFact<F::Decision>,
 ) -> Result<(Folded<F>, u64), StoreError>
 where
-    F: DurableFold + MaybeSend,
-    F::Decision: MaybeSend,
+    F: DurableFold + Send + 'static,
+    F::Decision: Send + 'static,
 {
-    let mut committed = None;
-    let slot = &mut committed;
+    let (slot, mut committed) = nanocode_sync::oneshot::channel();
     let after = folded.seq();
     let seq = log
         .append(
@@ -127,11 +116,14 @@ where
                 if forward.cache_due() {
                     folded = folded.cache(&mut forward)?;
                 }
-                *slot = Some(folded);
+                drop(slot.send(folded));
                 Ok(seq)
             }),
         )
         .await?;
-    let folded = committed.expect("an append that returned a seq committed its fold");
+    let folded = committed
+        .try_recv()
+        .ok()
+        .expect("an append that returned a seq committed its fold");
     Ok((folded, seq))
 }
