@@ -645,7 +645,6 @@ pub struct Registry {
 
     claims: Atom<JournalClaims>,
 
-    spawn_admission: Atom<nanocode_sync::Map<String, Sequencer>>,
     journal_writer: std::sync::atomic::AtomicBool,
 
     journal_writers: Atom<HashMap<String, mpsc::UnboundedSender<JournalRequest>>>,
@@ -3156,7 +3155,6 @@ impl Registry {
             store: Atom::default(),
             journals: Atom::default(),
             claims: Atom::default(),
-            spawn_admission: Atom::default(),
             journal_writer: std::sync::atomic::AtomicBool::new(false),
             journal_writers: Atom::default(),
             steer_watchers: Atom::default(),
@@ -3382,9 +3380,6 @@ impl Registry {
         }) else {
             return;
         };
-        self.spawn_admission.update(|admission| {
-            admission.insert(root.clone(), Sequencer::new());
-        });
         let store: Arc<dyn SubagentStore> = Arc::new(durable::JournalStore(journal.store()));
         self.journals.update(|journals| {
             journals.insert(root.clone(), Arc::clone(&store));
@@ -3514,7 +3509,7 @@ impl Registry {
             .unwrap_or_else(|| session_id.to_owned())
     }
 
-    pub(crate) async fn admit_spawn(&self, session_id: &str) -> std::io::Result<Option<Turn>> {
+    pub(crate) async fn admit_spawn(&self, session_id: &str) -> std::io::Result<()> {
         let root = self.root_of(session_id);
         let restored = self.claims.read(|claims| {
             claims
@@ -3523,17 +3518,9 @@ impl Registry {
                 .is_none_or(|gate| matches!(*gate.borrow(), RestorationState::Ready))
         });
         if restored {
-            return Ok(None);
+            return Ok(());
         }
-        let admission = self
-            .spawn_admission
-            .read(|admission| admission.get(&root).cloned());
-        let guard = match admission {
-            Some(admission) => Some(admission.enter().await),
-            None => None,
-        };
-        self.await_restored(session_id).await?;
-        Ok(guard)
+        self.await_restored(session_id).await
     }
 
     pub(crate) async fn await_restored(&self, session_id: &str) -> std::io::Result<()> {

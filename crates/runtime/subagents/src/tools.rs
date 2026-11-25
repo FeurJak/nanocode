@@ -465,10 +465,9 @@ pub async fn start_agents_observed(
     let policy_parent = spawn_parent(parent, registry, session_id).await?;
     let prepared = prepare_batch(tasks)?;
     let capacities = registry.reserve_turns(prepared.len()).await?;
-    let admission = registry.admit_spawn(session_id).await?;
+    registry.admit_spawn(session_id).await?;
     let mut startup = registry.batch_startup();
     let reservations = registry.reserve_many(session_id, prepared.len()).await?;
-    drop(admission);
     let host_context = registry.host_context_for_session(session_id).await;
     let children = if let Some(router) = registry.spawn_router() {
         let mut routes = Vec::with_capacity(prepared.len());
@@ -761,10 +760,9 @@ fn start_child<'a>(
             Some(capacity) => capacity,
             None => registry.reserve_turn().await?,
         };
-        let admission = registry.admit_spawn(session_id).await?;
+        registry.admit_spawn(session_id).await?;
         let mut startup = registry.batch_startup();
         let reservation = registry.reserve(session_id).await?;
-        drop(admission);
         let id = reservation.id;
         let host_context = match host_context {
             Some(host_context) => Some(host_context),
@@ -926,9 +924,8 @@ async fn enqueue_child(
         Some(_) => options.clone(),
         None => admit_options(&registry.spawn_policy(), &policy_parent, options.clone())?,
     };
-    let admission = registry.admit_spawn(session_id).await?;
+    registry.admit_spawn(session_id).await?;
     let reservation = registry.reserve(session_id).await?;
-    drop(admission);
     let id = reservation.id;
     let host_context = match host_context {
         Some(host_context) => Some(host_context),
