@@ -1,128 +1,234 @@
-# Written by `uphill --update`: the accepted sizes, counts, checks, and line targets of each
-# metric. Each run reports what changed since.
+# Each measurement's `baseline`, the size, count, or check `uphill --update` accepted, and its
+# `target`. Edit a target here, and each run reports what changed since the baseline.
+
+speed:
+  startup: { target: 5.8ms }
+  tui-first-frame: { target: 8660µs }
+  tui-ready: { target: 12ms }
+  tui-ttft: { target: 8020µs }
+  exec-ttft:
+    "*": { target: 18.1ms }
+    claude: { target: 17.2ms }
+    codex: { target: 18.1ms }
+  exec-turn:
+    "*": { target: 20.8ms }
+    claude: { target: 19.9ms }
+    codex: { target: 20.8ms }
+  tool-turn:
+    "*": { target: 75.1ms }
+    claude: { target: 75.1ms }
+    codex: { target: 69.6ms }
+  resume-ready: { target: 20.3ms }
+  resume-ttft: { target: 27.9ms }
 
 footprint:
   cli-size:
-    nanocode: 111414832B
-    nanocode-exec: 111413728B
+    "*": { target: 113.6MB }
+    nanocode: { baseline: 111414832B, target: 113.6MB }
+    nanocode-exec: { baseline: 111413728B, target: 113.6MB }
+  tui-rss: { target: 20360kB }
+  resume-rss: { target: 26.7MB }
+  exec-peak-rss:
+    "*": { target: 20620kB }
+    claude: { target: 19970kB }
+    codex: { target: 20620kB }
+
+interaction:
+  keypress-latency: { target: 346µs }
+  keypress-worst: { target: 625µs }
+  resize-redraw: { target: 743µs }
+  stream-frame-gap: { target: 45.7ms }
+  stream-longest-stall: { target: 84.6ms }
+  stream-frames: { target: 35.2 }
+
+cpu:
+  startup-instructions: { target: 350800 }
+  startup-cycles: { target: 652600 }
+  first-frame-instructions: { target: 1723000 }
+  first-frame-cycles: { target: 5517000 }
+  exec-turn-instructions:
+    "*": { target: 14900000 }
+    claude: { target: 11550000 }
+    codex: { target: 14900000 }
+  exec-turn-cycles:
+    "*": { target: 25220000 }
+    claude: { target: 23280000 }
+    codex: { target: 25220000 }
+  exec-cpu-time:
+    "*": { target: 19.9ms }
+    claude: { target: 19.9ms }
+    codex: { target: 19.9ms }
+  exec-page-faults:
+    "*": { target: 3489 }
+    claude: { target: 3302 }
+    codex: { target: 3489 }
+  exec-context-switches:
+    "*": { target: 197.4 }
+    claude: { target: 197.4 }
+    codex: { target: 196.3 }
+  first-frame-threads: { target: 5.25 }
+  idle-cpu: { target: 2270µs }
+  idle-wakeups: { target: 9.66 }
+  idle-threads: { target: 9.45 }
 
 requests:
   request-bytes:
-    claude: 37355B
-    codex: 44841B
+    "*": { target: 45740B }
+    claude: { baseline: 37355B, target: 38.1kB }
+    codex: { baseline: 44841B, target: 45740B }
   request-section-bytes:
-    claude/messages: 61B
-    claude/system: 5834B
-    claude/tools: 30944B
-    codex/input: 44140B
-    codex/instructions: 0B
-    codex/tools: 0B
+    "*": { target: 45020B }
+    claude/messages: { baseline: 61B, target: 62B }
+    claude/system: { baseline: 5834B, target: 5951B }
+    claude/tools: { baseline: 30944B, target: 31560B }
+    codex/input: { baseline: 44140B, target: 45020B }
+    codex/instructions: { baseline: 0B, target: 1B }
+    codex/tools: { baseline: 0B, target: 1B }
   turn2-added-bytes:
-    claude: 135B
-    codex: 2317B
+    "*": { target: 2363B }
+    claude: { baseline: 135B, target: 138B }
+    codex: { baseline: 2317B, target: 2363B }
   cached-prefix:
-    claude: 99.6
-    codex: 95
+    "*": { target: 97.6 }
+    claude: { baseline: 99.6, target: 97.6 }
+    codex: { baseline: 95, target: 93.1 }
   requests-per-turn:
-    claude: 1
-    codex: 1
+    "*": { target: 1.02 }
+    claude: { baseline: 1, target: 1.02 }
+    codex: { baseline: 1, target: 1.02 }
+  session-bytes-per-turn:
+    "*": { target: 10740B }
+    claude: { target: 7408B }
+    codex: { target: 10740B }
+  session-bytes-first-turn:
+    "*": { target: 59580B }
+    claude: { target: 49520B }
+    codex: { target: 59580B }
 
 size:
   section-size:
-    ".bss": 10148B
-    ".data": 69584B
-    ".data.rel.ro": 6610104B
-    ".eh_frame": 6542888B
-    ".eh_frame_hdr": 1027308B
-    ".gcc_except_table": 4818236B
-    ".rodata": 17658660B
-    ".text": 40329304B
+    "*": { target: 41140kB }
+    ".bss": { baseline: 10148B, target: 10350B }
+    ".data": { baseline: 69584B, target: 70980B }
+    ".data.rel.ro": { baseline: 6610104B, target: 6742kB }
+    ".eh_frame": { baseline: 6542888B, target: 6674kB }
+    ".eh_frame_hdr": { baseline: 1027308B, target: 1048kB }
+    ".gcc_except_table": { baseline: 4818236B, target: 4915kB }
+    ".rodata": { baseline: 17658660B, target: 18010kB }
+    ".text": { baseline: 40329304B, target: 41140kB }
   download-size:
-    gzip: 34441797B
-    xz: 23202040B
+    "*": { target: 35130kB }
+    gzip: { baseline: 34441797B, target: 35130kB }
+    xz: { baseline: 23202040B, target: 23670kB }
   crate-size:
-    alloc: 4198957B
-    core: 7560528B
-    djs_core: 3131270B
-    nanocode_backend_claude: 1408128B
-    nanocode_backend_codex: 1049438B
-    nanocode_cli: 884459B
-    nanocode_mpp: 739967B
-    nanocode_subagents: 769161B
-    nanocode_sync: 1342960B
-    nanocode_sys: 1250537B
-    psh_engine: 1472679B
-    psh_utils: 3016876B
-    serde: 869542B
-    serde_json: 2688944B
-    std: 740068B
-  dependencies: 99
-  duplicate-dependencies: 0
+    "*": { target: 7712kB }
+    alloc: { baseline: 4198957B, target: 4283kB }
+    core: { baseline: 7560528B, target: 7712kB }
+    djs_core: { baseline: 3131270B, target: 3194kB }
+    nanocode_backend_claude: { baseline: 1408128B, target: 1436kB }
+    nanocode_backend_codex: { baseline: 1049438B, target: 1070kB }
+    nanocode_cli: { baseline: 884459B, target: 902.1kB }
+    nanocode_mpp: { baseline: 739967B, target: 754.8kB }
+    nanocode_subagents: { baseline: 769161B, target: 784.5kB }
+    nanocode_sync: { baseline: 1342960B, target: 1370kB }
+    nanocode_sys: { baseline: 1250537B, target: 1276kB }
+    psh_engine: { baseline: 1472679B, target: 1502kB }
+    psh_utils: { baseline: 3016876B, target: 3077kB }
+    serde: { baseline: 869542B, target: 886.9kB }
+    serde_json: { baseline: 2688944B, target: 2743kB }
+    std: { baseline: 740068B, target: 754.9kB }
+  dependencies: { baseline: 99, target: 101 }
+  duplicate-dependencies: { baseline: 0, target: 1 }
 
 memory:
   retained-ratio:
-    claude/memo: 0.61
-    claude/paged: 0.61
-    claude/reload: 0.61
-    claude/replay: 0.5
-    codex/memo: 1.15
-    codex/paged: 1.2
-    codex/reload: 1.15
-    codex/replay: 1.14
+    "*": { target: 1.05 }
+    claude/memo: { baseline: 0.61, target: 1.05 }
+    claude/paged: { baseline: 0.61, target: 1.05 }
+    claude/reload: { baseline: 0.61, target: 1.05 }
+    claude/replay: { baseline: 0.5, target: 1.05 }
+    codex/memo: { baseline: 1.15, target: 1.05 }
+    codex/paged: { baseline: 1.2, target: 1.05 }
+    codex/reload: { baseline: 1.15, target: 1.05 }
+    codex/replay: { baseline: 1.14, target: 1.05 }
   transient-xbody:
-    claude/memo: 3.4
-    claude/paged: 3
-    claude/reload: 3.4
-    claude/replay: 6.1
-    codex/memo: 1.1
-    codex/paged: 1
-    codex/reload: 1.1
-    codex/replay: 1.1
+    "*": { target: 1 }
+    claude/memo: { baseline: 3.4, target: 1 }
+    claude/paged: { baseline: 3, target: 1 }
+    claude/reload: { baseline: 3.4, target: 1 }
+    claude/replay: { baseline: 6.1, target: 1 }
+    codex/memo: { baseline: 1.1, target: 1 }
+    codex/paged: { baseline: 1, target: 1 }
+    codex/reload: { baseline: 1.1, target: 1 }
+    codex/replay: { baseline: 1.1, target: 1 }
   invariant:
-    claude/memo: pass
-    claude/paged: pass
-    claude/reload: pass
-    claude/replay: pass
-    codex/memo: pass
-    codex/paged: pass
-    codex/reload: pass
-    codex/replay: pass
+    claude/memo: { baseline: pass }
+    claude/paged: { baseline: pass }
+    claude/reload: { baseline: pass }
+    claude/replay: { baseline: pass }
+    codex/memo: { baseline: pass }
+    codex/paged: { baseline: pass }
+    codex/reload: { baseline: pass }
+    codex/replay: { baseline: pass }
   retained:
-    claude/memo: 4299162B
-    claude/paged: 3879731B
-    claude/reload: 4299162B
-    claude/replay: 2516582B
-    codex/memo: 11744051B
-    codex/paged: 11848909B
-    codex/reload: 11744051B
-    codex/replay: 11639194B
+    "*": { target: 12090kB }
+    claude/memo: { baseline: 4299162B, target: 4385kB }
+    claude/paged: { baseline: 3879731B, target: 3957kB }
+    claude/reload: { baseline: 4299162B, target: 4385kB }
+    claude/replay: { baseline: 2516582B, target: 2567kB }
+    codex/memo: { baseline: 11744051B, target: 11980kB }
+    codex/paged: { baseline: 11848909B, target: 12090kB }
+    codex/reload: { baseline: 11744051B, target: 11980kB }
+    codex/replay: { baseline: 11639194B, target: 11870kB }
   transient:
-    claude/memo: 2202010B
-    claude/paged: 1992294B
-    claude/reload: 2202010B
-    claude/replay: 4089446B
-    codex/memo: 11114906B
-    codex/paged: 10695475B
-    codex/reload: 11114906B
-    codex/replay: 11534336B
+    "*": { target: 11770kB }
+    claude/memo: { baseline: 2202010B, target: 2246kB }
+    claude/paged: { baseline: 1992294B, target: 2032kB }
+    claude/reload: { baseline: 2202010B, target: 2246kB }
+    claude/replay: { baseline: 4089446B, target: 4171kB }
+    codex/memo: { baseline: 11114906B, target: 11340kB }
+    codex/paged: { baseline: 10695475B, target: 10910kB }
+    codex/reload: { baseline: 11114906B, target: 11340kB }
+    codex/replay: { baseline: 11534336B, target: 11770kB }
   bytes-per-message:
-    claude/memo: 0
-    claude/paged: 0
-    claude/reload: 0
-    claude/replay: 0
-    codex/memo: 615
-    codex/paged: 692
-    codex/reload: 615
-    codex/replay: 569
+    "*": { target: 705.8 }
+    claude/memo: { baseline: 0, target: 1 }
+    claude/paged: { baseline: 0, target: 1 }
+    claude/reload: { baseline: 0, target: 1 }
+    claude/replay: { baseline: 0, target: 1 }
+    codex/memo: { baseline: 615, target: 627.3 }
+    codex/paged: { baseline: 692, target: 705.8 }
+    codex/reload: { baseline: 615, target: 627.3 }
+    codex/replay: { baseline: 569, target: 580.4 }
 
 long-session:
   long-retained-ratio:
-    claude/memo: 0.4
-    codex/memo: 1.12
+    "*": { target: 1.05 }
+    claude/memo: { baseline: 0.4, target: 1.05 }
+    codex/memo: { baseline: 1.12, target: 1.05 }
   retained-per-turn:
-    claude/memo: 71653B
-    codex/memo: 196608B
+    "*": { target: 200.5kB }
+    claude/memo: { baseline: 71653B, target: 73090B }
+    codex/memo: { baseline: 196608B, target: 200.5kB }
+
+engines:
+  engine-instructions:
+    "*": { target: 1010000000 }
+    djs/int-loop: { target: 84780000 }
+    djs/json: { target: 294500000 }
+    djs/objects: { target: 1010000000 }
+    djs/strings: { target: 250600000 }
+    psh/awk: { target: 198500000 }
+    psh/jq: { target: 167700000 }
+    psh/sed: { target: 108600000 }
+    psh/sort: { target: 64920000 }
 
 build:
-  clippy-warnings: 28
-  unsafe-blocks: 1842
+  cold-check: { target: 49.4s }
+  edit-check:
+    "*": { target: 33.9s }
+    nanocode-cli: { target: 1940ms }
+    nanocode-code-mode: { target: 11.5s }
+    nanocode-sys: { target: 33.9s }
+  clippy-warnings: { baseline: 28, target: 1 }
+  unsafe-blocks: { baseline: 1842, target: 1879 }

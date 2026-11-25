@@ -3,70 +3,70 @@ timeout: 30m
 speed:
   run: python3 .agents/metrics/cli.py
   description: Release CLI against a local Anthropic and OpenAI mock that answers at once, median of 9 runs per round.
-  startup: { title: nanocode-exec --version, target: 5.8ms }
-  tui-first-frame: { target: 8.66ms }
-  tui-ready: { target: 12ms }
-  tui-ttft: { title: TUI time to first token, target: 8.02ms }
-  exec-ttft: { title: Exec time to first token, target: 18.1ms, targets: { "codex": 18.1ms, "claude": 17.2ms } }
-  exec-turn: { target: 20.8ms, targets: { "codex": 20.8ms, "claude": 19.9ms } }
-  tool-turn: { title: Exec turn with one Code Mode cell, target: 75.1ms, targets: { "claude": 75.1ms, "codex": 69.6ms } }
-  resume-ready: { title: TUI ready on a resumed 200-turn session, target: 20.3ms }
-  resume-ttft: { title: Exec time to first token on a resumed 200-turn session, target: 27.9ms }
+  startup: { title: nanocode-exec --version }
+  tui-first-frame: {}
+  tui-ready: {}
+  tui-ttft: { title: TUI time to first token }
+  exec-ttft: { title: Exec time to first token }
+  exec-turn: {}
+  tool-turn: { title: Exec turn with one Code Mode cell }
+  resume-ready: { title: TUI ready on a resumed 200-turn session }
+  resume-ttft: { title: Exec time to first token on a resumed 200-turn session }
 
 footprint:
   run: python3 .agents/metrics/cli.py
   description: Release CLI binaries and resident memory.
-  cli-size: { target: 113.6MB, targets: { "nanocode": 113.6MB, "nanocode-exec": 113.6MB } }
-  tui-rss: { varies: true, target: 20.36MB }
-  resume-rss: { varies: true, target: 26.7MB }
-  exec-peak-rss: { varies: true, target: 20.62MB, targets: { "codex": 20.62MB, "claude": 19.97MB } }
+  cli-size: {}
+  tui-rss: { varies: true }
+  resume-rss: { varies: true }
+  exec-peak-rss: { varies: true }
 
 interaction:
   run: python3 .agents/metrics/latency.py
   description: TUI responsiveness on a pty, the Lighthouse INP and TBT of a terminal.
-  keypress-latency: { title: Keypress to echo, target: 346us }
-  keypress-worst: { target: 625us }
-  resize-redraw: { target: 743us }
-  stream-frame-gap: { title: Frame gap while streaming, target: 45.7ms }
-  stream-longest-stall: { target: 84.6ms }
-  stream-frames: { varies: true, better: higher, target: 35.2 }
+  keypress-latency: { title: Keypress to echo }
+  keypress-worst: {}
+  resize-redraw: {}
+  stream-frame-gap: { title: Frame gap while streaming }
+  stream-longest-stall: {}
+  stream-frames: { varies: true, better: higher }
 
 cpu:
   run: python3 .agents/metrics/cpu.py
   description: Hardware counters (user space) and scheduler stats per run.
-  startup-instructions: { varies: true, target: 350800 }
-  startup-cycles: { varies: true, target: 652600 }
-  first-frame-instructions: { varies: true, target: 1723000 }
-  first-frame-cycles: { varies: true, target: 5517000 }
-  exec-turn-instructions: { varies: true, target: 14900000, targets: { "codex": 14900000, "claude": 11550000 } }
-  exec-turn-cycles: { varies: true, target: 25220000, targets: { "codex": 25220000, "claude": 23280000 } }
-  exec-cpu-time: { target: 19.9ms, targets: { "claude": 19.9ms, "codex": 19.9ms } }
-  exec-page-faults: { varies: true, target: 3489, targets: { "codex": 3489, "claude": 3302 } }
-  exec-context-switches: { varies: true, target: 197.4, targets: { "claude": 197.4, "codex": 196.3 } }
-  first-frame-threads: { varies: true, target: 5.25 }
-  idle-cpu: { title: CPU time per idle second, target: 2.27ms }
-  idle-wakeups: { title: Context switches per idle second, varies: true, target: 9.66 }
-  idle-threads: { varies: true, target: 9.45 }
+  startup-instructions: { varies: true }
+  startup-cycles: { varies: true }
+  first-frame-instructions: { varies: true }
+  first-frame-cycles: { varies: true }
+  exec-turn-instructions: { varies: true }
+  exec-turn-cycles: { varies: true }
+  exec-cpu-time: {}
+  exec-page-faults: { varies: true }
+  exec-context-switches: { varies: true }
+  first-frame-threads: { varies: true }
+  idle-cpu: { title: CPU time per idle second }
+  idle-wakeups: { title: Context switches per idle second, varies: true }
+  idle-threads: { varies: true }
 
 requests:
   run: python3 .agents/metrics/requests.py
   description: What one exec turn and one resumed turn send to the model and write to disk.
-  request-bytes: { target: 45.74kB, targets: { "codex": 45.74kB, "claude": 38.1kB } }
-  request-section-bytes: { target: 45.02kB, targets: { "codex/input": 45.02kB, "claude/tools": 31.56kB, "claude/system": 5.951kB, "claude/messages": 62B, "codex/instructions": 1B, "codex/tools": 1B } }
-  turn2-added-bytes: { target: 2.363kB, targets: { "codex": 2.363kB, "claude": 138B } }
-  cached-prefix: { better: higher, score: min, target: 97.6, targets: { "codex": 93.1, "claude": 97.6 } }
-  requests-per-turn: { target: 1.02 }
-  session-bytes-per-turn: { varies: true, target: 10.74kB, targets: { "codex": 10.74kB, "claude": 7.408kB } }
-  session-bytes-first-turn: { varies: true, target: 59.58kB, targets: { "codex": 59.58kB, "claude": 49.52kB } }
+  request-bytes: {}
+  request-section-bytes: {}
+  turn2-added-bytes: {}
+  cached-prefix: { better: higher, score: min }
+  requests-per-turn: {}
+  session-bytes-per-turn: { varies: true }
+  session-bytes-first-turn: { varies: true }
 
 size:
   run: python3 .agents/metrics/size.py
   description: Release nanocode binary by section, compressed for download, by crate (from a symbol build), and its dependencies.
-  section-size: { target: 41.14MB, targets: { ".text": 41.14MB, ".rodata": 18.01MB, ".data.rel.ro": 6.742MB, ".eh_frame": 6.674MB, ".gcc_except_table": 4.915MB, ".eh_frame_hdr": 1.048MB, ".data": 70.98kB, ".bss": 10.35kB } }
-  download-size: { target: 35.13MB, targets: { "gzip": 35.13MB, "xz": 23.67MB } }
-  crate-size: { target: 7.712MB, targets: { "core": 7.712MB, "alloc": 4.283MB, "djs_core": 3.194MB, "psh_utils": 3.077MB, "serde_json": 2.743MB, "psh_engine": 1.502MB, "nanocode_backend_claude": 1.436MB, "nanocode_sync": 1.37MB, "nanocode_sys": 1.276MB, "nanocode_backend_codex": 1.07MB, "nanocode_cli": 902.1kB, "serde": 886.9kB, "nanocode_subagents": 784.5kB, "std": 754.9kB, "nanocode_mpp": 754.8kB } }
-  dependencies: { target: 101 }
-  duplicate-dependencies: { target: 1 }
+  section-size: {}
+  download-size: {}
+  crate-size: {}
+  dependencies: {}
+  duplicate-dependencies: {}
 
 wasm:
   run: sh .agents/metrics/wasm.sh
@@ -77,29 +77,29 @@ wasm:
 memory:
   run: python3 .agents/metrics/memory.py
   description: nanocode-sim --memory against docs/memory-invariant.md.
-  retained-ratio: { target: 1.05, score: max }
-  transient-xbody: { target: 1, score: max }
+  retained-ratio: { score: max }
+  transient-xbody: { score: max }
   invariant: {}
-  retained: { target: 12.09MB, targets: { "codex/paged": 12.09MB, "codex/memo": 11.98MB, "codex/reload": 11.98MB, "codex/replay": 11.87MB, "claude/memo": 4.385MB, "claude/reload": 4.385MB, "claude/paged": 3.957MB, "claude/replay": 2.567MB } }
-  transient: { target: 11.77MB, targets: { "codex/replay": 11.77MB, "codex/memo": 11.34MB, "codex/reload": 11.34MB, "codex/paged": 10.91MB, "claude/replay": 4.171MB, "claude/memo": 2.246MB, "claude/reload": 2.246MB, "claude/paged": 2.032MB } }
-  bytes-per-message: { target: 705.8, targets: { "codex/paged": 705.8, "codex/memo": 627.3, "codex/reload": 627.3, "codex/replay": 580.4, "claude/paged": 1, "claude/memo": 1, "claude/reload": 1, "claude/replay": 1 } }
+  retained: {}
+  transient: {}
+  bytes-per-message: {}
 
 long-session:
   run: python3 .agents/metrics/leak.py
   description: nanocode-sim --memory over 120 turns, to catch retained memory that grows with the session.
-  long-retained-ratio: { target: 1.05, score: max }
-  retained-per-turn: { target: 200.5kB, targets: { "codex/memo": 200.5kB, "claude/memo": 73.09kB } }
+  long-retained-ratio: { score: max }
+  retained-per-turn: {}
 
 engines:
   run: python3 .agents/metrics/engines.py
   description: User-space instructions of one Code Mode cell running each workload, minus a cell that runs text(1 + 1).
-  engine-instructions: { varies: true, target: 1010000000, targets: { "djs/objects": 1010000000, "djs/json": 294500000, "djs/strings": 250600000, "psh/awk": 198500000, "psh/jq": 167700000, "psh/sed": 108600000, "djs/int-loop": 84780000, "psh/sort": 64920000 } }
+  engine-instructions: { varies: true }
 
 build:
   run: python3 .agents/metrics/build.py
   timeout: 120m
   description: A copy of the checkout with no build cache, measured once per revision and reused for every round.
-  cold-check: { title: Cold cargo check, target: 49.4s }
-  edit-check: { title: cargo check after a one-line edit, target: 33.9s, targets: { "nanocode-sys": 33.9s, "nanocode-code-mode": 11.5s, "nanocode-cli": 1.94s } }
-  clippy-warnings: { target: 1, poor: 10 }
-  unsafe-blocks: { target: 1879 }
+  cold-check: { title: Cold cargo check }
+  edit-check: { title: cargo check after a one-line edit }
+  clippy-warnings: { poor: 10 }
+  unsafe-blocks: {}
