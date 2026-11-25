@@ -363,7 +363,6 @@ pub fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-const HELD_ALLOWED: &str = "bin/nanocode-sim/held-across-await.txt";
 const HELD_ROOTS: &[&str] = &["crates", "bin"];
 const HELD_SKIPPED: &[&str] = &["crates/patches", "bin/nanocode-sim", "bin/nanocode-fuzz"];
 const HELD_SKIPPED_DIRS: &[&str] = &["target", "tests", "benches", "examples", "output"];
@@ -683,16 +682,16 @@ fn counted(
     problems
 }
 
-pub fn held_problems(sources: &[(String, String)], allowed: &str) -> Vec<String> {
-    let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (path, guard) in guards_held(sources) {
-        let problem = format!(
-            "{path}:{}: {} {} lives across the .await on line {}; release it first or move the state to its owner's task",
-            guard.line, guard.kind, guard.name, guard.awaited
-        );
-        found.entry(path).or_default().push(problem);
-    }
-    counted(HELD_ALLOWED, allowed, &found, "guards held across an .await")
+pub fn held_problems(sources: &[(String, String)]) -> Vec<String> {
+    guards_held(sources)
+        .into_iter()
+        .map(|(path, guard)| {
+            format!(
+                "{path}:{}: {} {} lives across the .await on line {}; release it first or move the state to its owner's task",
+                guard.line, guard.kind, guard.name, guard.awaited
+            )
+        })
+        .collect()
 }
 
 pub fn bare_waits(code: &[u8]) -> Vec<(usize, String)> {
@@ -773,5 +772,5 @@ pub fn held(root: &Path) -> std::io::Result<Vec<String>> {
     for directory in HELD_ROOTS {
         held_sources(root, &root.join(directory), &mut sources)?;
     }
-    Ok(held_problems(&sources, &std::fs::read_to_string(root.join(HELD_ALLOWED))?))
+    Ok(held_problems(&sources))
 }

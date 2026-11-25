@@ -224,10 +224,6 @@ fn run_seed(seed: u64, mutation: HeldAwaitMutation) -> (u64, Option<String>, Hel
         ..HeldAwaitStats::default()
     };
     let (files, truth) = sources(&mut rng, mutation, &mut stats);
-    let allowed: String = truth
-        .iter()
-        .map(|(path, count)| format!("{path} {count}\n"))
-        .collect();
     let mut found: BTreeMap<String, u64> = BTreeMap::new();
     for (path, _) in tidy::guards_held(&files) {
         *found.entry(path).or_default() += 1;
@@ -239,9 +235,11 @@ fn run_seed(seed: u64, mutation: HeldAwaitMutation) -> (u64, Option<String>, Hel
     if mutation != HeldAwaitMutation::HeldAcrossAwait && found != truth {
         return (digest, Some(format!("detector found {found:?}, the owners hold {truth:?}")), stats);
     }
-    let problems = tidy::held_problems(&files, &allowed);
-    let wrong = (!problems.is_empty())
-        .then(|| format!("I3 held across await: {}", problems.join("; ")))
+    let problems = tidy::held_problems(&files);
+    let held: u64 = truth.values().sum();
+    let reported = u64::try_from(problems.len()).expect("a problem count fits a u64");
+    let wrong = (reported != held)
+        .then(|| format!("I3 held across await: tidy reports {reported} guards where the owners hold {held}: {}", problems.join("; ")))
         .or_else(|| waits(&mut rng, mutation, &mut stats));
     (digest, wrong, stats)
 }
