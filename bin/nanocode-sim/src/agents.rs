@@ -59,10 +59,11 @@ pub enum AgentsMutation {
     WaitRepeatsIds,
     RestoreRemembersWaits,
     RouteSkipsClaim,
+    ScopeJobsOverlap,
 }
 
 impl AgentsMutation {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::None,
         Self::CancelIgnored,
         Self::ShutdownHangs,
@@ -74,6 +75,7 @@ impl AgentsMutation {
         Self::WaitRepeatsIds,
         Self::RestoreRemembersWaits,
         Self::RouteSkipsClaim,
+        Self::ScopeJobsOverlap,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -95,6 +97,7 @@ impl AgentsMutation {
             Self::WaitRepeatsIds => "wait_repeats_ids",
             Self::RestoreRemembersWaits => "restore_remembers_waits",
             Self::RouteSkipsClaim => "route_skips_claim",
+            Self::ScopeJobsOverlap => "scope_jobs_overlap",
         }
     }
 
@@ -987,6 +990,49 @@ async fn routed_once(shape: &Shape, ledger: &Arc<Ledger>) -> Result<(), String> 
     Ok(())
 }
 
+const ORDER_SESSION: &str = "scope-order";
+
+async fn scoped_in_order(ledger: &Arc<Ledger>) -> Result<(), String> {
+    let (registry, control, updates) = nanocode_subagents::channel(DEFAULT_MAX_SUBAGENTS);
+    let root = AgentHandle::new(
+        ORDER_SESSION,
+        simulated_model(),
+        Arc::new(ScriptedFactory::new(Arc::clone(ledger))),
+    );
+    let ids = nanocode_subagents::start_agents(&root, &registry, ORDER_SESSION, tasks(1))
+        .await
+        .map_err(|error| format!("start_agents for the scope order check failed: {error}"))?
+        .into_iter()
+        .map(|report| report.agent_id)
+        .collect::<Vec<_>>();
+    let [id] = ids[..] else {
+        return Err(format!(
+            "start_agents started {} agents for one task",
+            ids.len()
+        ));
+    };
+    let (closed, interrupted) = nanocode_sync::join!(
+        registry.close(ORDER_SESSION, id),
+        registry.interrupt(ORDER_SESSION, id),
+    );
+    closed.map_err(|error| format!("closing agent {id} failed: {error}"))?;
+    if let Ok(summaries) = interrupted
+        && let Some(summary) = summaries.iter().find(|summary| summary.agent_id == id)
+        && summary.status != AgentStatus::Closed
+    {
+        return Err(format!(
+            "an interrupt queued behind the close of agent {id} ran before the close finished: it reads the agent as {:?}",
+            summary.status
+        ));
+    }
+    control
+        .close_all(ORDER_SESSION)
+        .await
+        .map_err(|error| format!("close_all after the scope order check failed: {error}"))?;
+    drop((registry, updates, root));
+    Ok(())
+}
+
 async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Result<u64, String> {
     let run = build(ledger, shape);
     nanocode_subagents::start_agents(
@@ -1023,6 +1069,8 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Resul
     ledger.trace("redelivered");
     routed_once(shape, ledger).await?;
     ledger.trace("routed once");
+    scoped_in_order(ledger).await?;
+    ledger.trace("scoped in order");
     Ok(took_ms)
 }
 
@@ -1044,6 +1092,9 @@ pub fn simulate(seed: u64, mutation: AgentsMutation) -> AgentOutcome {
     }
     if mutation == AgentsMutation::RouteSkipsClaim {
         nanocode_subagents::sim::mutate(nanocode_subagents::sim::Mutation::RouteSkipsClaim);
+    }
+    if mutation == AgentsMutation::ScopeJobsOverlap {
+        nanocode_subagents::sim::mutate(nanocode_subagents::sim::Mutation::ScopeJobsOverlap);
     }
     let shape = Shape::of(seed, mutation);
     let clock = Clock::new();

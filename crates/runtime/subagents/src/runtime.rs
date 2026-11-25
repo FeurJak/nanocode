@@ -1279,9 +1279,11 @@ enum JournalRequest {
     },
 }
 
+pub(super) type ScopeJob = Box<dyn FnOnce(Arc<Registry>) -> RegistryFuture<'static, ()> + Send>;
+
 #[derive(Default)]
 pub(super) struct ScopeLocks {
-    pub(super) closing: Sequencer,
+    closer: std::sync::OnceLock<mpsc::UnboundedSender<ScopeJob>>,
     thawed: watch::Sender<u64>,
     pub(super) pending_checkpoints: AtomicUsize,
     evicting: Rerun,
@@ -3250,8 +3252,24 @@ impl Registry {
         let Ok(steers) = coordination.steers(&session).await else {
             return;
         };
-        let locks = self.session_locks(root_session_id).await;
-        let _closing = locks.closing.enter().await;
+        let root = root_session_id.to_owned();
+        let ordered = self
+            .in_scope_order(root_session_id, move |registry| {
+                Box::pin(async move { registry.deliver_steers(&root, id, priority, steers).await })
+            })
+            .await;
+        if let Err(error) = ordered {
+            nanocode_trace::debug!(%error, %id, "board steers were not delivered");
+        }
+    }
+
+    async fn deliver_steers(
+        self: &Arc<Self>,
+        root_session_id: &str,
+        id: AgentId,
+        priority: MessagePriority,
+        steers: Vec<String>,
+    ) {
         for body in steers {
             let root = root_session_id.to_owned();
             if self
@@ -3676,8 +3694,28 @@ impl Registry {
         })
     }
 
-    async fn session_locks(&self, session_id: &str) -> Arc<ScopeLocks> {
-        self.scope_locks(&self.root_of(session_id))
+    pub(super) async fn in_scope_order<T, F>(&self, session_id: &str, job: F) -> std::io::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<Self>) -> RegistryFuture<'static, T> + Send + 'static,
+    {
+        let closed = || std::io::Error::other("subagent runtime is closed");
+        let this = self.this.get().cloned().ok_or_else(closed)?;
+        this.upgrade().ok_or_else(closed)?;
+        let locks = self.scope_locks(&self.root_of(session_id));
+        let jobs = locks.closer.get_or_init(|| {
+            let (jobs, queued) = mpsc::unbounded_channel();
+            drop(platform::spawn(run_scope_jobs(this, queued)));
+            jobs
+        });
+        let (done, result) = oneshot::channel();
+        let job: ScopeJob = Box::new(move |registry| {
+            Box::pin(async move {
+                let _ = done.send(job(registry).await);
+            })
+        });
+        jobs.send(job).map_err(|_| closed())?;
+        result.await.map_err(|_| closed())
     }
 
     pub(super) async fn pause_messages(&self, session_id: &str) -> MessagePause {
@@ -7776,9 +7814,22 @@ impl Registry {
         id: AgentId,
     ) -> std::io::Result<Vec<AgentSummary>> {
         self.await_restored(session_id).await?;
-        let _warm = self.warm_subtree(session_id, id).await?;
-        let locks = self.session_locks(session_id).await;
-        let _closing = locks.closing.enter().await;
+        let warm = self.warm_subtree(session_id, id).await?;
+        let session = session_id.to_owned();
+        self.in_scope_order(session_id, move |registry| {
+            Box::pin(async move {
+                let _warm = warm;
+                registry.interrupt_in_order(&session, id).await
+            })
+        })
+        .await?
+    }
+
+    async fn interrupt_in_order(
+        &self,
+        session_id: &str,
+        id: AgentId,
+    ) -> std::io::Result<Vec<AgentSummary>> {
         let _paused = self.pause_messages(session_id).await;
         let session = session_id.to_owned();
         let (root_session_id, ids, held) = self
@@ -7805,9 +7856,18 @@ impl Registry {
 
     async fn close_all(&self, session_id: &str) -> std::io::Result<Vec<AgentSummary>> {
         self.await_restored(session_id).await?;
-        let _warm = self.warm_pending(session_id).await?;
-        let locks = self.session_locks(session_id).await;
-        let _closing = locks.closing.enter().await;
+        let warm = self.warm_pending(session_id).await?;
+        let session = session_id.to_owned();
+        self.in_scope_order(session_id, move |registry| {
+            Box::pin(async move {
+                let _warm = warm;
+                registry.close_all_in_order(&session).await
+            })
+        })
+        .await?
+    }
+
+    async fn close_all_in_order(&self, session_id: &str) -> std::io::Result<Vec<AgentSummary>> {
         let _paused = self.pause_messages(session_id).await;
         let mut revision = self.revision.subscribe();
         let capture_deadline = nanocode_platform::now() + AGENT_STOP_TIMEOUT;
@@ -7941,8 +8001,14 @@ impl Registry {
             )
             .await,
         );
-        let locks = self.session_locks(root_session_id).await;
-        let _closing = locks.closing.enter().await;
+        let root = root_session_id.to_owned();
+        self.in_scope_order(root_session_id, move |registry| {
+            Box::pin(async move { registry.release_scope_in_order(&root).await })
+        })
+        .await?
+    }
+
+    async fn release_scope_in_order(&self, root_session_id: &str) -> std::io::Result<()> {
         let _paused = self.pause_messages(root_session_id).await;
         if self.store_for(root_session_id).is_some()
             && let Ok(Err(error)) = timeout_at(
@@ -7986,15 +8052,28 @@ impl Registry {
         if self.await_restored(session_id).await.is_err() {
             return;
         }
-        let _warm = match self.warm_pending(session_id).await {
+        let warm = match self.warm_pending(session_id).await {
             Ok(warm) => warm,
             Err(error) => {
                 nanocode_trace::warn!(%error, session_id, "queued subagents could not be read back to cancel them");
                 return;
             }
         };
-        let locks = self.session_locks(session_id).await;
-        let _closing = locks.closing.enter().await;
+        let session = session_id.to_owned();
+        let ordered = self
+            .in_scope_order(session_id, move |registry| {
+                Box::pin(async move {
+                    let _warm = warm;
+                    registry.cancel_all_in_order(&session).await;
+                })
+            })
+            .await;
+        if let Err(error) = ordered {
+            nanocode_trace::debug!(%error, session_id, "subagents were not cancelled");
+        }
+    }
+
+    async fn cancel_all_in_order(&self, session_id: &str) {
         let _paused = self.pause_messages(session_id).await;
         let session = session_id.to_owned();
         let (root_session_id, ids, held) = self
@@ -8474,6 +8553,25 @@ impl SubagentControl {
     pub fn runtime_id(&self) -> SubagentRuntimeId {
         self.registry.id
     }
+}
+
+#[inline(never)]
+fn run_scope_jobs(
+    registry: Weak<Registry>,
+    mut jobs: mpsc::UnboundedReceiver<ScopeJob>,
+) -> RegistryFuture<'static, ()> {
+    Box::pin(async move {
+        while let Some(job) = jobs.recv().await {
+            let Some(registry) = registry.upgrade() else {
+                return;
+            };
+            if crate::sim::mutated(crate::sim::Mutation::ScopeJobsOverlap) {
+                drop(platform::spawn(job(registry)));
+                continue;
+            }
+            job(registry).await;
+        }
+    })
 }
 
 #[inline(never)]

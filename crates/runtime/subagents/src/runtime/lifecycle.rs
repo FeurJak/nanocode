@@ -425,9 +425,25 @@ pub(super) fn close<'a>(
 ) -> RegistryFuture<'a, std::io::Result<Vec<AgentSummary>>> {
     Box::pin(async move {
         reg.await_restored(session_id).await?;
-        let _warm = reg.warm_subtree(session_id, id).await?;
-        let locks = reg.session_locks(session_id).await;
-        let _closing = locks.closing.enter().await;
+        let warm = reg.warm_subtree(session_id, id).await?;
+        let session = session_id.to_owned();
+        reg.in_scope_order(session_id, move |registry| {
+            Box::pin(async move {
+                let _warm = warm;
+                close_in_order(&registry, &session, id).await
+            })
+        })
+        .await?
+    })
+}
+
+#[inline(never)]
+fn close_in_order<'a>(
+    reg: &'a Registry,
+    session_id: &'a str,
+    id: AgentId,
+) -> RegistryFuture<'a, std::io::Result<Vec<AgentSummary>>> {
+    Box::pin(async move {
         let _paused = reg.pause_messages(session_id).await;
         let CloseRequest {
             root_session_id,
