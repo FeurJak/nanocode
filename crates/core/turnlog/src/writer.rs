@@ -13,12 +13,12 @@ use nanocode_durability_core::{
 };
 #[cfg(not(target_family = "wasm"))]
 use nanocode_sync::future::Shared;
-use nanocode_trace::Instrument as _;
 use nanocode_sync::{
     FutureExt,
     future::{Either, select},
     mpsc, oneshot,
 };
+use nanocode_trace::Instrument as _;
 use serde_json::value::RawValue;
 
 use crate::{
@@ -460,11 +460,21 @@ fn index(
     Ok(index)
 }
 
+#[derive(Default)]
+struct Chains(BTreeMap<u64, (u64, History)>);
+
+impl Chains {
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
 async fn section_records(
     host: &dyn LogHost,
     scope: &str,
     owner: &str,
     section: Section,
+    chains: &mut Chains,
 ) -> Result<Vec<Record>, StoreError> {
     let end = section.row + section.rows;
     let mut stored = host.scan(scope, section.row, end).await?;
@@ -481,20 +491,35 @@ async fn section_records(
             stored.len()
         )));
     }
+    let mut history = History::default();
+    let mut keyframe = None;
     if linked {
         let (back, _) = codec::linked(&stored[0].1[LINKED.len_utf8()..])?;
-        let keyframe = section.row.checked_sub(back).ok_or_else(|| {
+        let first = section.row.checked_sub(back).ok_or_else(|| {
             StoreError::Backend(format!(
                 "turn log section of {owner} at row {} links back past the log's start",
                 section.row
             ))
         })?;
-        if keyframe < section.row {
-            stored = chain_rows(host.scan(scope, keyframe, end).await?);
+        keyframe = Some(first);
+        if first < section.row {
+            let from = match chains.0.remove(&first) {
+                Some((next, held)) if next <= section.row => {
+                    history = held;
+                    next
+                }
+                _ => first,
+            };
+            nanocode_trace::event!(target: "nc_metrics", nanocode_trace::Level::INFO, {
+                monotonic_counter.nc.turnlog.chain_rows_skipped = from - first
+            });
+            if from < section.row {
+                stored = chain_rows(host.scan(scope, from, end).await?);
+            }
         }
     }
     let mut records = Vec::new();
-    each_row(stored, &mut History::default(), |row| {
+    each_row(stored, &mut history, |row| {
         if row.seq >= section.row {
             crate::record::each(&row.plain, |record| {
                 records.push(record);
@@ -503,6 +528,11 @@ async fn section_records(
         }
         Ok(true)
     })?;
+    if let Some(keyframe) = keyframe
+        && history.keyframe() == Some(keyframe)
+    {
+        chains.0.insert(keyframe, (end, history));
+    }
     Ok(records)
 }
 
@@ -511,9 +541,10 @@ async fn root(
     scope: &str,
     fold: &mut Fold,
     stats: &mut Stats,
+    chains: &mut Chains,
 ) -> Result<(), StoreError> {
     if let Some(section) = fold.cold_root() {
-        let records = section_records(host, scope, "the index root", section).await?;
+        let records = section_records(host, scope, "the index root", section, chains).await?;
         fold.rooted(records)?;
         stats.index_loads += 1;
     }
@@ -525,12 +556,13 @@ async fn page(
     scope: &str,
     fold: &mut Fold,
     stats: &mut Stats,
+    chains: &mut Chains,
     owner: &str,
 ) -> Result<(), StoreError> {
     fold.unshelve_owner(owner);
-    root(host, scope, fold, stats).await?;
+    root(host, scope, fold, stats, chains).await?;
     if let Some((first, section)) = fold.unpaged(owner) {
-        let records = section_records(host, scope, &first, section).await?;
+        let records = section_records(host, scope, &first, section, chains).await?;
         fold.paged(&first, records)?;
         stats.index_loads += 1;
     }
@@ -579,10 +611,11 @@ async fn warm(
     scope: &str,
     fold: &mut Fold,
     stats: &mut Stats,
+    chains: &mut Chains,
     owner: &str,
 ) -> Result<(), StoreError> {
-    locate(host, scope, fold, stats, owner).await?;
-    load(host, scope, fold, stats, owner).await
+    locate(host, scope, fold, stats, chains, owner).await?;
+    load(host, scope, fold, stats, chains, owner).await
 }
 
 async fn locate(
@@ -590,15 +623,16 @@ async fn locate(
     scope: &str,
     fold: &mut Fold,
     stats: &mut Stats,
+    chains: &mut Chains,
     owner: &str,
 ) -> Result<(), StoreError> {
     if let Some(legacy) = legacy_name(owner) {
-        page(host, scope, fold, stats, &legacy).await?;
+        page(host, scope, fold, stats, chains, &legacy).await?;
         if fold.is_legacy(&legacy) {
-            load(host, scope, fold, stats, &legacy).await?;
+            load(host, scope, fold, stats, chains, &legacy).await?;
         }
     }
-    page(host, scope, fold, stats, owner).await
+    page(host, scope, fold, stats, chains, owner).await
 }
 
 async fn load(
@@ -606,12 +640,13 @@ async fn load(
     scope: &str,
     fold: &mut Fold,
     stats: &mut Stats,
+    chains: &mut Chains,
     owner: &str,
 ) -> Result<(), StoreError> {
-    page(host, scope, fold, stats, owner).await?;
+    page(host, scope, fold, stats, chains, owner).await?;
     if fold.is_legacy(owner) {
         for (first, section) in fold.key_pages(owner.trim_end_matches('\n')) {
-            let records = section_records(host, scope, &first, section).await?;
+            let records = section_records(host, scope, &first, section, chains).await?;
             fold.paged(&first, records)?;
             stats.index_loads += 1;
         }
@@ -622,10 +657,10 @@ async fn load(
     let legacy = fold.is_legacy(owner);
     let mut groups = Vec::with_capacity(sections.len());
     for section in sections {
-        let records = section_records(host, scope, owner, section).await?;
+        let records = section_records(host, scope, owner, section, chains).await?;
         if !legacy {
             for (first, page) in fold.group_pages(&records) {
-                let listed = section_records(host, scope, &first, page).await?;
+                let listed = section_records(host, scope, &first, page, chains).await?;
                 fold.paged(&first, listed)?;
                 stats.index_loads += 1;
             }
@@ -641,17 +676,18 @@ async fn warm_state(
     scope: &str,
     fold: &mut Fold,
     stats: &mut Stats,
+    chains: &mut Chains,
     state: &str,
 ) -> Result<(), StoreError> {
-    warm(host, scope, fold, stats, state).await?;
+    warm(host, scope, fold, stats, chains, state).await?;
     fold.unshelve_state(state);
     for (first, section) in fold.key_pages(state) {
-        let records = section_records(host, scope, &first, section).await?;
+        let records = section_records(host, scope, &first, section, chains).await?;
         fold.paged(&first, records)?;
         stats.index_loads += 1;
     }
     for key in fold.cold_keys(state) {
-        warm(host, scope, fold, stats, &key).await?;
+        warm(host, scope, fold, stats, chains, &key).await?;
     }
     fold.touch(state);
     Ok(())
@@ -1025,12 +1061,14 @@ impl Follower {
             .scan(&self.scope, from, i64::MAX.unsigned_abs())
             .await?;
         let taken = self.take(stored)?;
+        let mut chains = Chains::default();
         for owner in self.fold.take_forgets() {
             warm(
                 &*self.host,
                 &self.scope,
                 &mut self.fold,
                 &mut self.stats,
+                &mut chains,
                 &owner,
             )
             .await?;
@@ -1195,8 +1233,9 @@ impl Follower {
             within,
             ..
         } = self;
+        let mut chains = Chains::default();
         for owner in fold.forgetting() {
-            warm(&*host, &scope, &mut fold, &mut stats, &owner).await?;
+            warm(&*host, &scope, &mut fold, &mut stats, &mut chains, &owner).await?;
         }
         fold.reopen(EVENT_GAP);
         let floor = Some(fold.last_event());
@@ -1213,6 +1252,7 @@ impl Follower {
             writer: Writer {
                 bases: BTreeMap::new(),
                 buffer: Vec::new(),
+                chains: Chains::default(),
                 check: snapshot,
                 collectable: BTreeSet::new(),
                 fenced: false,
@@ -1267,6 +1307,7 @@ struct Riding {
 struct Writer {
     bases: BTreeMap<String, Option<Checkpoint>>,
     buffer: Vec<Record>,
+    chains: Chains,
     check: usize,
     collectable: BTreeSet<String>,
     fenced: bool,
@@ -1503,6 +1544,7 @@ impl TurnLog {
                     queue.ms = waited.as_secs_f64() * 1_000.0,
                 );
                 let _ = started.send(());
+                writing.writer.chains.clear();
                 let work = std::panic::AssertUnwindSafe(async move { job(writing).await });
                 let answer = {
                     let abandoned = Box::pin(reply.closed());
@@ -1735,10 +1777,18 @@ impl Writing {
             &self.scope,
             &mut writer.fold,
             &mut writer.stats,
+            &mut writer.chains,
         )
         .await?;
         for (first, section) in writer.fold.cold_pages() {
-            let records = section_records(&*self.host, &self.scope, &first, section).await?;
+            let records = section_records(
+                &*self.host,
+                &self.scope,
+                &first,
+                section,
+                &mut writer.chains,
+            )
+            .await?;
             writer.fold.paged(&first, records)?;
             writer.stats.index_loads += 1;
         }
@@ -1755,6 +1805,7 @@ impl Writing {
                 &self.scope,
                 &mut writer.fold,
                 &mut writer.stats,
+                &mut writer.chains,
                 owner,
             )
             .await?;
@@ -2134,6 +2185,7 @@ impl Writing {
                 &self.scope,
                 &mut writer.fold,
                 &mut writer.stats,
+                &mut writer.chains,
                 owner,
             )
             .await?;
@@ -2151,6 +2203,7 @@ impl Writing {
                 &self.scope,
                 &mut writer.fold,
                 &mut writer.stats,
+                &mut writer.chains,
                 owner,
             )
             .await?;
@@ -2166,6 +2219,7 @@ impl Writing {
             &self.scope,
             &mut writer.fold,
             &mut writer.stats,
+            &mut writer.chains,
             owner,
         )
         .await
@@ -2318,6 +2372,7 @@ impl Writing {
                 &self.scope,
                 &mut writer.fold,
                 &mut writer.stats,
+                &mut writer.chains,
                 &key,
             )
             .await?;
@@ -2422,6 +2477,7 @@ impl Writing {
                     &self.scope,
                     &mut writer.fold,
                     &mut writer.stats,
+                    &mut writer.chains,
                     &owner,
                 )
                 .await?;
@@ -2433,6 +2489,7 @@ impl Writing {
                     &self.scope,
                     &mut writer.fold,
                     &mut writer.stats,
+                    &mut writer.chains,
                     &owner,
                 )
                 .await?;
@@ -2442,10 +2499,18 @@ impl Writing {
                 &self.scope,
                 &mut writer.fold,
                 &mut writer.stats,
+                &mut writer.chains,
             )
             .await?;
             for (first, section) in writer.fold.unlisted() {
-                let records = section_records(&*self.host, &self.scope, &first, section).await?;
+                let records = section_records(
+                    &*self.host,
+                    &self.scope,
+                    &first,
+                    section,
+                    &mut writer.chains,
+                )
+                .await?;
                 writer.fold.paged(&first, records)?;
                 writer.stats.index_loads += 1;
             }
