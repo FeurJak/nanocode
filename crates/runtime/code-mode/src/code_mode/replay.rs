@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 
 use nanocode_code_mode_engine::{JournalEntry, SharedJournal};
-use nanocode_sync::{Atom, Inbox, Owned, Set};
+use nanocode_sync::{Atom, Inbox, OnceCell, Set, mpsc, oneshot};
 
 use crate::embedded::HostFuture;
 
@@ -292,15 +292,100 @@ struct Journals {
     loaded: Atom<Set<String>>,
     preempted: Atom<Set<String>>,
     stored: Atom<HashMap<String, HashMap<String, Arc<RawValue>>>>,
-    saving_stored: Arc<Owned<()>>,
+    saving_stored: Arc<OnceCell<StoredJobs>>,
     sink: Option<Arc<dyn CellJournalSink>>,
 }
 
 pub(super) struct Persistence {
     sink: Arc<dyn CellJournalSink>,
-    saving: Owned<Saving>,
-    saving_stored: Arc<Owned<()>>,
+    saving: OnceCell<SavingJobs>,
+    saving_stored: Arc<OnceCell<StoredJobs>>,
     queued: Inbox<Arc<JournaledCall>>,
+}
+
+const SAVING_STOPPED: &str = "the journal's saving task stopped";
+
+enum SavingJob {
+    Persist {
+        record: Arc<CellRecord>,
+        started: Vec<(u64, u8)>,
+    },
+    Finish(Arc<CellRecord>),
+    Stop,
+}
+
+type SavingJobs = mpsc::UnboundedSender<(SavingJob, oneshot::Sender<()>)>;
+
+type StoredJob = (
+    Arc<CellRecord>,
+    Arc<Atom<HashMap<String, Arc<RawValue>>>>,
+    oneshot::Sender<Result<(), String>>,
+);
+
+type StoredJobs = mpsc::UnboundedSender<StoredJob>;
+
+impl Persistence {
+    async fn save(&self, job: SavingJob) -> std::io::Result<()> {
+        let jobs = self
+            .saving
+            .get_or_try_init(|| std::future::ready(start_saving()))
+            .await?;
+        let (reply, saved) = oneshot::channel();
+        jobs.send((job, reply))
+            .map_err(|_| std::io::Error::other(SAVING_STOPPED))?;
+        saved
+            .await
+            .map_err(|_| std::io::Error::other(SAVING_STOPPED))
+    }
+
+    async fn stop(&self) -> std::io::Result<()> {
+        self.save(SavingJob::Stop).await
+    }
+
+    async fn save_stored(
+        &self,
+        record: Arc<CellRecord>,
+        stored: Arc<Atom<HashMap<String, Arc<RawValue>>>>,
+    ) -> Result<(), String> {
+        let jobs = self
+            .saving_stored
+            .get_or_try_init(|| std::future::ready(start_saving_stored()))
+            .await
+            .map_err(|error| error.to_string())?;
+        let (reply, saved) = oneshot::channel();
+        jobs.send((record, stored, reply))
+            .map_err(|_| SAVING_STOPPED.to_owned())?;
+        saved.await.map_err(|_| SAVING_STOPPED.to_owned())?
+    }
+}
+
+fn start_saving() -> std::io::Result<SavingJobs> {
+    let (jobs, mut received) = mpsc::unbounded_channel::<(SavingJob, oneshot::Sender<()>)>();
+    super::spawn_owner(async move {
+        let mut saving = Saving::Unsaved;
+        while let Some((job, reply)) = received.recv().await {
+            let saving = &mut saving;
+            super::answer(reply, async move {
+                match job {
+                    SavingJob::Persist { record, started } => record.save(saving, &started).await,
+                    SavingJob::Finish(record) => record.save_finished(saving).await,
+                    SavingJob::Stop => *saving = Saving::Stopped,
+                }
+            })
+            .await;
+        }
+    })?;
+    Ok(jobs)
+}
+
+fn start_saving_stored() -> std::io::Result<StoredJobs> {
+    let (jobs, mut received) = mpsc::unbounded_channel::<StoredJob>();
+    super::spawn_owner(async move {
+        while let Some((record, stored, reply)) = received.recv().await {
+            super::answer(reply, async move { record.write_stored(&stored).await }).await;
+        }
+    })?;
+    Ok(jobs)
 }
 
 enum Saving {
@@ -389,7 +474,7 @@ impl CellJournals {
     pub(super) fn persistence(&self) -> Option<Persistence> {
         self.0.sink.as_ref().map(|sink| Persistence {
             sink: Arc::clone(sink),
-            saving: Owned::new(Saving::Unsaved),
+            saving: OnceCell::new(),
             saving_stored: Arc::clone(&self.0.saving_stored),
             queued: Inbox::default(),
         })
@@ -986,7 +1071,7 @@ impl CellRecord {
             .collect()
     }
 
-    pub(super) async fn persist(&self, calls: Vec<JournaledCall>) {
+    pub(super) async fn persist(self: &Arc<Self>, calls: Vec<JournaledCall>) {
         let Some(persistence) = &self.persistence else {
             return;
         };
@@ -997,7 +1082,30 @@ impl CellRecord {
         for call in calls {
             persistence.queued.push(Arc::new(call));
         }
-        let mut saving = persistence.saving.acquire().await;
+        let saved = persistence
+            .save(SavingJob::Persist {
+                record: Arc::clone(self),
+                started,
+            })
+            .await;
+        if let Err(error) = saved {
+            self.unsaved(&error);
+        }
+    }
+
+    fn unsaved(&self, error: &dyn std::fmt::Display) {
+        nanocode_trace::warn!(
+            target: "nanocode_code_mode",
+            cell_id = self.cell_id,
+            %error,
+            "a Code Mode cell journal could not be saved, so the cell cannot be resumed after a restart"
+        );
+    }
+
+    async fn save(&self, saving: &mut Saving, started: &[(u64, u8)]) {
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
         if let Saving::Saved { calls: saved, .. } = &*saving
             && !started.is_empty()
             && started
@@ -1117,12 +1225,7 @@ impl CellRecord {
                 };
             }
             Err(error) => {
-                nanocode_trace::warn!(
-                    target: "nanocode_code_mode",
-                    cell_id = self.cell_id,
-                    %error,
-                    "a Code Mode cell journal could not be saved, so the cell cannot be resumed after a restart"
-                );
+                self.unsaved(&error);
                 *saving = Saving::Stopped;
                 persistence
                     .sink
@@ -1132,27 +1235,16 @@ impl CellRecord {
         }
     }
 
-    pub(super) async fn save_stored(&self, stored: &Atom<HashMap<String, Arc<RawValue>>>) {
+    pub(super) async fn save_stored(
+        self: &Arc<Self>,
+        stored: &Arc<Atom<HashMap<String, Arc<RawValue>>>>,
+    ) {
         let Some(persistence) = &self.persistence else {
             return;
         };
-        let _saving = persistence.saving_stored.acquire().await;
-        let values = stored.get();
-        let encoded = serde_json::to_string(
-            &values
-                .iter()
-                .map(|(key, value)| (key.as_str(), &**value))
-                .collect::<BTreeMap<_, _>>(),
-        );
-        let saved = match encoded {
-            Ok(encoded) => {
-                persistence
-                    .sink
-                    .save_stored(&self.session_id, encoded)
-                    .await
-            }
-            Err(error) => Err(error.to_string()),
-        };
+        let saved = persistence
+            .save_stored(Arc::clone(self), Arc::clone(stored))
+            .await;
         if let Err(error) = saved {
             nanocode_trace::warn!(
                 target: "nanocode_code_mode",
@@ -1160,6 +1252,31 @@ impl CellRecord {
                 %error,
                 "Code Mode stored values could not be saved, so load() after a restart reads the values saved before"
             );
+        }
+    }
+
+    async fn write_stored(
+        &self,
+        stored: &Atom<HashMap<String, Arc<RawValue>>>,
+    ) -> Result<(), String> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        let values = stored.get();
+        let encoded = serde_json::to_string(
+            &values
+                .iter()
+                .map(|(key, value)| (key.as_str(), &**value))
+                .collect::<BTreeMap<_, _>>(),
+        );
+        match encoded {
+            Ok(encoded) => {
+                persistence
+                    .sink
+                    .save_stored(&self.session_id, encoded)
+                    .await
+            }
+            Err(error) => Err(error.to_string()),
         }
     }
 
@@ -1171,15 +1288,33 @@ impl CellRecord {
         }
     }
 
-    pub(super) async fn flush(&self) {
+    pub(super) async fn flush(self: &Arc<Self>) {
         self.persist(Vec::new()).await;
     }
 
-    async fn mark_finished(&self) {
+    async fn mark_finished(self: &Arc<Self>) {
         let Some(persistence) = &self.persistence else {
             return;
         };
-        let mut saving = persistence.saving.acquire().await;
+        let marked = persistence.save(SavingJob::Finish(Arc::clone(self))).await;
+        if let Err(error) = marked {
+            self.unfinished(&error);
+        }
+    }
+
+    fn unfinished(&self, error: &dyn std::fmt::Display) {
+        nanocode_trace::warn!(
+            target: "nanocode_code_mode",
+            cell_id = self.cell_id,
+            %error,
+            "a finished Code Mode cell's journal could not be marked finished"
+        );
+    }
+
+    async fn save_finished(&self, saving: &mut Saving) {
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
         let Saving::Saved {
             persisted,
             next_seq,
@@ -1210,12 +1345,7 @@ impl CellRecord {
             finished: true,
         };
         if let Err(error) = persistence.sink.save(update).await {
-            nanocode_trace::warn!(
-                target: "nanocode_code_mode",
-                cell_id = self.cell_id,
-                %error,
-                "a finished Code Mode cell's journal could not be marked finished"
-            );
+            self.unfinished(&error);
         }
         *saving = Saving::Stopped;
     }
@@ -1224,7 +1354,9 @@ impl CellRecord {
         let Some(persistence) = &self.persistence else {
             return;
         };
-        *persistence.saving.acquire().await = Saving::Stopped;
+        if let Err(error) = persistence.stop().await {
+            self.unsaved(&error);
+        }
         persistence
             .sink
             .forget(&self.session_id, self.cell_id)
@@ -1240,7 +1372,9 @@ impl CellRecord {
             let Some(persistence) = &record.persistence else {
                 return;
             };
-            *persistence.saving.acquire().await = Saving::Stopped;
+            if let Err(error) = persistence.stop().await {
+                record.unsaved(&error);
+            }
             persistence
                 .sink
                 .forget(&record.session_id, record.cell_id)

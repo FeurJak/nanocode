@@ -50,11 +50,44 @@ fn spawn(future: impl std::future::Future<Output = ()> + Send + 'static) {
 fn spawn(future: impl std::future::Future<Output = ()> + 'static) {
     nanocode_platform::spawn_local(future);
 }
+
+#[cfg(not(target_family = "wasm"))]
+fn spawn_owner(
+    future: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    nanocode_platform::Handle::try_current()
+        .map_err(std::io::Error::other)?
+        .spawn(future);
+    Ok(())
+}
+
+#[cfg(target_family = "wasm")]
+fn spawn_owner(future: impl std::future::Future<Output = ()> + 'static) -> std::io::Result<()> {
+    nanocode_platform::spawn_local(future);
+    Ok(())
+}
+
+async fn answer<R>(mut reply: oneshot::Sender<R>, work: impl std::future::Future<Output = R>) {
+    if reply.is_closed() {
+        return;
+    }
+    let output = {
+        let work = std::pin::pin!(work);
+        let abandoned = std::pin::pin!(reply.closed());
+        match nanocode_sync::future::select(work, abandoned).await {
+            nanocode_sync::future::Either::Left((output, _)) => Some(output),
+            nanocode_sync::future::Either::Right(_) => None,
+        }
+    };
+    if let Some(output) = output {
+        let _ = reply.send(output);
+    }
+}
 use serde_json::{Value, value::RawValue};
 
 use nanocode_platform::Instant;
 use nanocode_process_contracts::MIN_POLL_YIELD_MS;
-use nanocode_sync::{Atom, InOrder, Leased, Owned, Sequencer, Signal, Slot, Turn};
+use nanocode_sync::{Atom, InOrder, Sequencer, Signal, Slot, Turn};
 use nanocode_sync::{Notify, mpsc, oneshot, watch};
 use nanocode_trace::{Instrument, info_span};
 
@@ -231,7 +264,8 @@ struct LiveCell {
     origin_call_id: String,
     session_id: String,
     turn_id: AtomicU64,
-    observation: Arc<Owned<CellObservationState>>,
+    observation: mpsc::UnboundedSender<Watch>,
+    observers: Atom<std::sync::Weak<()>>,
     lifecycle: Arc<CellLifecycle>,
     interrupt: Interrupt,
     terminate: Slot<oneshot::Sender<()>>,
@@ -857,7 +891,7 @@ impl CodeModeRuntime {
             }
         };
         let record = cell.record.clone()?;
-        let observation = cell.begin_observation().await.ok()?;
+        let claim = cell.begin_observation().await.ok()?;
         let yield_time_ms = record.update(|status| {
             let observer_yield_ms = status
                 .observer_yield_ms
@@ -892,16 +926,16 @@ impl CodeModeRuntime {
                 consumed: Arc::clone(&self.preempt_consumed),
             });
         let yield_after = observer_yield_timeout(Duration::from_millis(yield_time_ms));
-        let (mut execution, running) = observe_cell(
-            &cell,
-            observation,
-            started_at,
-            ObservationMode::YieldAfter(yield_after, yield_after, preempt, YieldChoice::Named),
-            record.max_output_tokens,
-            Some(call_id),
-            observer,
-        )
-        .await;
+        let (mut execution, running) = cell
+            .observe(
+                claim,
+                started_at,
+                ObservationMode::YieldAfter(yield_after, yield_after, preempt, YieldChoice::Named),
+                record.max_output_tokens,
+                Some(call_id),
+                observer,
+            )
+            .await;
         if running {
             cell.yielded();
             if let Some(record) = &cell.record {
@@ -1086,7 +1120,7 @@ impl CodeModeRuntime {
             cell
         };
         drop(admission);
-        let observation = Arc::clone(&cell.observation).acquire_owned().await;
+        let claim = cell.claim();
         let choice = match source.yield_time_ms {
             Some(_) => YieldChoice::Named,
             None => YieldChoice::Default,
@@ -1095,16 +1129,16 @@ impl CodeModeRuntime {
             .yield_time_ms
             .map_or(self.yields.exec, Duration::from_millis);
         let yield_after = observer_yield_timeout(yield_after);
-        let (mut execution, running) = observe_cell(
-            &cell,
-            observation,
-            started_at,
-            ObservationMode::Started(yield_after, preempt, choice),
-            Some(output_token_budget),
-            Some(&cell.origin_call_id),
-            observer,
-        )
-        .await;
+        let (mut execution, running) = cell
+            .observe(
+                claim,
+                started_at,
+                ObservationMode::Started(yield_after, preempt, choice),
+                Some(output_token_budget),
+                Some(&cell.origin_call_id),
+                observer,
+            )
+            .await;
         if running {
             cell.yielded();
             if let Some(record) = &cell.record {
@@ -1201,8 +1235,8 @@ impl CodeModeRuntime {
         span.record("tool.call_id", cell.origin_call_id.as_str());
         cell.turn_id
             .store(self.current_turn.load(Ordering::Acquire), Ordering::Release);
-        let observation = match cell.begin_observation().await {
-            Ok(observation) => observation,
+        let claim = match cell.begin_observation().await {
+            Ok(claim) => claim,
             Err(CellError::Busy) => {
                 return failed_execution(
                     started_at,
@@ -1223,16 +1257,16 @@ impl CodeModeRuntime {
         let output_token_budget = arguments.max_tokens;
         if arguments.terminate {
             cell.request_terminate();
-            let (mut execution, running) = observe_cell(
-                &cell,
-                observation,
-                started_at,
-                ObservationMode::Terminate,
-                output_token_budget,
-                Some(call_id),
-                observer,
-            )
-            .await;
+            let (mut execution, running) = cell
+                .observe(
+                    claim,
+                    started_at,
+                    ObservationMode::Terminate,
+                    output_token_budget,
+                    Some(call_id),
+                    observer,
+                )
+                .await;
             if !running {
                 self.remove_and_join(&cell).await;
             }
@@ -1245,16 +1279,16 @@ impl CodeModeRuntime {
         let yield_time = Duration::from_millis(yield_time_ms);
         let yield_time = observer_yield_timeout(yield_time);
         let quiet_until = yield_time.max(Duration::from_millis(MIN_POLL_YIELD_MS));
-        let (mut execution, running) = observe_cell(
-            &cell,
-            observation,
-            started_at,
-            ObservationMode::YieldAfter(yield_time, quiet_until, Some(preempt), choice),
-            output_token_budget,
-            Some(call_id),
-            observer,
-        )
-        .await;
+        let (mut execution, running) = cell
+            .observe(
+                claim,
+                started_at,
+                ObservationMode::YieldAfter(yield_time, quiet_until, Some(preempt), choice),
+                output_token_budget,
+                Some(call_id),
+                observer,
+            )
+            .await;
         if running {
             cell.yielded();
             if let Some(record) = &cell.record {
@@ -1612,6 +1646,21 @@ impl LiveCell {
             record,
             plan,
         });
+        let (observation, watches) = mpsc::unbounded_channel();
+        spawn(watch_cell(
+            CellObservationState {
+                updates,
+                replay: VecDeque::new(),
+                buffered: ObservationBuffer::default(),
+                receipts: Vec::new(),
+                streamed: 0,
+                streamed_bytes: 0,
+                content_seen,
+                running: Vec::new(),
+                yielded: false,
+            },
+            watches,
+        ));
         spawn(
             run_cell_actor(
                 host,
@@ -1639,17 +1688,8 @@ impl LiveCell {
             origin_call_id,
             session_id,
             turn_id: AtomicU64::new(turn_id),
-            observation: Arc::new(Owned::new(CellObservationState {
-                updates,
-                replay: VecDeque::new(),
-                buffered: ObservationBuffer::default(),
-                receipts: Vec::new(),
-                streamed: 0,
-                streamed_bytes: 0,
-                content_seen,
-                running: Vec::new(),
-                yielded: false,
-            })),
+            observation,
+            observers: Atom::default(),
             lifecycle,
             interrupt,
             terminate: Slot::new(Some(terminate)),
@@ -1680,14 +1720,72 @@ impl LiveCell {
             self.relay.put(previous);
             return;
         }
-        let Some(observation) = Arc::clone(&self.observation).try_acquire_owned() else {
+        let Some(claim) = self.try_claim() else {
             self.relay.take();
             return;
         };
-        spawn(async move {
-            let _finished = finished;
-            relay_cell_updates(observation, stop, sink).await;
+        let relay = Watch::Relay {
+            finished,
+            claim,
+            stop,
+            sink,
+        };
+        if self.observation.send(relay).is_err() {
+            self.relay.take();
+        }
+    }
+
+    fn claim(&self) -> Arc<()> {
+        self.observers.update(|held| {
+            held.upgrade().unwrap_or_else(|| {
+                let claim = Arc::new(());
+                *held = Arc::downgrade(&claim);
+                claim
+            })
+        })
+    }
+
+    fn try_claim(&self) -> Option<Arc<()>> {
+        self.observers.try_update(|held| {
+            (held.strong_count() == 0).then(|| {
+                let claim = Arc::new(());
+                *held = Arc::downgrade(&claim);
+                claim
+            })
+        })
+    }
+
+    async fn observe(
+        self: &Arc<Self>,
+        claim: Arc<()>,
+        started_at: Instant,
+        mode: ObservationMode,
+        max_output_tokens: Option<usize>,
+        carrier: Option<&str>,
+        observer: &mut dyn CodeModeObserver,
+    ) -> (CodeModeExecution, bool) {
+        let (events, mut forwarded) = mpsc::unbounded_channel();
+        let (reply, observed) = oneshot::channel();
+        let sent = self.observation.send(Watch::Observe {
+            cell: Arc::clone(self),
+            claim,
+            started_at,
+            mode,
+            max_output_tokens,
+            carrier: carrier.map(str::to_owned),
+            events,
+            reply,
         });
+        assert!(
+            sent.is_ok(),
+            "a cell's observation task runs while the cell lives"
+        );
+        while let Some(event) = forwarded.recv().await {
+            event.deliver(observer);
+        }
+        observed
+            .await
+            .expect("a cell's observation task answers every observation it starts")
     }
 
     async fn finish_relay(&self, stop: bool) {
@@ -1699,11 +1797,11 @@ impl LiveCell {
         }
     }
 
-    async fn begin_observation(&self) -> Result<Leased<CellObservationState>, CellError> {
+    async fn begin_observation(&self) -> Result<Arc<()>, CellError> {
         loop {
             self.finish_relay(true).await;
-            if let Some(observation) = Arc::clone(&self.observation).try_acquire_owned() {
-                return Ok(observation);
+            if let Some(claim) = self.try_claim() {
+                return Ok(claim);
             }
             if self.relay.is_empty() {
                 return Err(CellError::Busy);
@@ -1727,21 +1825,21 @@ impl LiveCell {
         }
     }
 
-    async fn join_and_observe(&self, observer: &mut dyn CodeModeObserver) {
+    async fn join_and_observe(self: &Arc<Self>, observer: &mut dyn CodeModeObserver) {
         self.join_actor().await;
         self.finish_relay(true).await;
 
-        let observation = Arc::clone(&self.observation).acquire_owned().await;
-        let _ = observe_cell(
-            self,
-            observation,
-            nanocode_platform::now(),
-            ObservationMode::Terminate,
-            None,
-            None,
-            observer,
-        )
-        .await;
+        let claim = self.claim();
+        let _ = self
+            .observe(
+                claim,
+                nanocode_platform::now(),
+                ObservationMode::Terminate,
+                None,
+                None,
+                observer,
+            )
+            .await;
     }
 
     async fn join(&self) {
@@ -1829,8 +1927,157 @@ enum ObservationMode {
     Terminate,
 }
 
+enum Watch {
+    Observe {
+        cell: Arc<LiveCell>,
+        claim: Arc<()>,
+        started_at: Instant,
+        mode: ObservationMode,
+        max_output_tokens: Option<usize>,
+        carrier: Option<String>,
+        events: mpsc::UnboundedSender<Observed>,
+        reply: oneshot::Sender<(CodeModeExecution, bool)>,
+    },
+    Relay {
+        finished: Finished,
+        claim: Arc<()>,
+        stop: Arc<Notify>,
+        sink: Box<dyn CodeModeObserver>,
+    },
+}
+
+async fn watch_cell(
+    mut observation: CellObservationState,
+    mut watches: mpsc::UnboundedReceiver<Watch>,
+) {
+    while let Some(watch) = watches.recv().await {
+        match watch {
+            Watch::Observe {
+                cell,
+                claim,
+                started_at,
+                mode,
+                max_output_tokens,
+                carrier,
+                events,
+                reply,
+            } => {
+                let observation = &mut observation;
+                answer(reply, async move {
+                    let _claim = claim;
+                    observe_cell(
+                        &cell,
+                        observation,
+                        started_at,
+                        mode,
+                        max_output_tokens,
+                        carrier.as_deref(),
+                        &mut Forward(events),
+                    )
+                    .await
+                })
+                .await;
+            }
+            Watch::Relay {
+                finished,
+                claim,
+                stop,
+                sink,
+            } => {
+                let _finished = finished;
+                let _claim = claim;
+                relay_cell_updates(&mut observation, stop, sink).await;
+            }
+        }
+    }
+}
+
+enum Observed {
+    Started {
+        call_id: String,
+        name: String,
+        input: Value,
+    },
+    Completed(NestedToolCall),
+    Notification(CodeModeNotification),
+    Finished,
+    Terminated {
+        origin_call_id: String,
+        output: String,
+    },
+}
+
+impl Observed {
+    fn deliver(self, observer: &mut dyn CodeModeObserver) {
+        match self {
+            Self::Started {
+                call_id,
+                name,
+                input,
+            } => observer.update(CodeModeUpdate::NestedCallStarted {
+                call_id: &call_id,
+                name: &name,
+                input: &input,
+            }),
+            Self::Completed(call) => observer.update(CodeModeUpdate::NestedCallCompleted(&call)),
+            Self::Notification(notification) => {
+                observer.update(CodeModeUpdate::Notification(&notification));
+            }
+            Self::Finished => observer.completed(),
+            Self::Terminated {
+                origin_call_id,
+                output,
+            } => observer.cell_terminated(&origin_call_id, &output),
+        }
+    }
+}
+
+struct Forward(mpsc::UnboundedSender<Observed>);
+
+impl CodeModeObserver for Forward {
+    fn update(&mut self, update: CodeModeUpdate<'_>) {
+        let observed = match update {
+            CodeModeUpdate::NestedCallStarted {
+                call_id,
+                name,
+                input,
+            } => Observed::Started {
+                call_id: call_id.to_owned(),
+                name: name.to_owned(),
+                input: input.clone(),
+            },
+            CodeModeUpdate::NestedCallCompleted(call) => Observed::Completed(NestedToolCall {
+                call_id: call.call_id.clone(),
+                name: call.name.clone(),
+                input: call.input.clone(),
+                output: call.output.clone(),
+                structured_result: call.structured_result.clone(),
+                success: call.success,
+                started_after_ns: call.started_after_ns,
+                duration_ns: call.duration_ns,
+                metadata: call.metadata.clone(),
+            }),
+            CodeModeUpdate::Notification(notification) => Observed::Notification(
+                CodeModeNotification::new(&notification.call_id, notification.text.clone()),
+            ),
+        };
+        let _ = self.0.send(observed);
+    }
+
+    fn completed(&mut self) {
+        let _ = self.0.send(Observed::Finished);
+    }
+
+    fn cell_terminated(&mut self, origin_call_id: &str, output: &str) {
+        let _ = self.0.send(Observed::Terminated {
+            origin_call_id: origin_call_id.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+}
+
 async fn relay_cell_updates(
-    mut observation: Leased<CellObservationState>,
+    observation: &mut CellObservationState,
     stop: Arc<Notify>,
     mut sink: Box<dyn CodeModeObserver>,
 ) {
@@ -1898,7 +2145,7 @@ async fn relay_cell_updates(
 #[allow(clippy::too_many_arguments)]
 async fn observe_cell(
     cell: &LiveCell,
-    mut observation: Leased<CellObservationState>,
+    observation: &mut CellObservationState,
     started_at: Instant,
     mode: ObservationMode,
     max_output_tokens: Option<usize>,
@@ -1907,7 +2154,7 @@ async fn observe_cell(
 ) -> (CodeModeExecution, bool) {
     let (mut execution, running) = observe_updates(
         cell,
-        &mut observation,
+        observation,
         started_at,
         mode,
         max_output_tokens,
@@ -1933,7 +2180,7 @@ async fn observe_cell(
 #[allow(clippy::too_many_lines)]
 async fn observe_updates(
     cell: &LiveCell,
-    observation: &mut Leased<CellObservationState>,
+    observation: &mut CellObservationState,
     started_at: Instant,
     mode: ObservationMode,
     max_output_tokens: Option<usize>,
@@ -3422,11 +3669,11 @@ async fn run_cell_actor(
     }
     match terminal {
         Ok(CellTerminal::Completed { stored }) => {
-            keep_stored(&shared_stored, record.as_deref(), stored).await;
+            keep_stored(&shared_stored, record.as_ref(), stored).await;
             let _ = updates.send(CellUpdate::Completed);
         }
         Ok(CellTerminal::ScriptFailed { message, stored }) => {
-            keep_stored(&shared_stored, record.as_deref(), stored).await;
+            keep_stored(&shared_stored, record.as_ref(), stored).await;
             let _ = updates.send(CellUpdate::ScriptFailed { message });
         }
         Ok(CellTerminal::Diverged { message }) => {
@@ -3437,11 +3684,11 @@ async fn run_cell_actor(
             let _ = updates.send(CellUpdate::HostFailed(message));
         }
         Ok(CellTerminal::Terminated { stored }) => {
-            keep_stored(&shared_stored, record.as_deref(), stored).await;
+            keep_stored(&shared_stored, record.as_ref(), stored).await;
             let _ = updates.send(CellUpdate::Terminated);
         }
         Ok(CellTerminal::Stopped { message }) => {
-            keep_stored(&shared_stored, record.as_deref(), host.worker.take_stored()).await;
+            keep_stored(&shared_stored, record.as_ref(), host.worker.take_stored()).await;
             let _ = updates.send(CellUpdate::ScriptFailed { message });
         }
         Err(failure) => {
@@ -3465,8 +3712,8 @@ async fn run_cell_actor(
 }
 
 async fn keep_stored(
-    shared_stored: &Atom<HashMap<String, Arc<RawValue>>>,
-    record: Option<&CellRecord>,
+    shared_stored: &Arc<Atom<HashMap<String, Arc<RawValue>>>>,
+    record: Option<&Arc<CellRecord>>,
     stored: HashMap<String, Arc<RawValue>>,
 ) {
     if stored.is_empty() {
