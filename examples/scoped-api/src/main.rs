@@ -63,7 +63,7 @@ fn migrate(url: &str, options: &Options) -> Result<(), String> {
     let sql = pg(url, 1)?;
     runtime(1)?.block_on(async {
         PartedLog::new(store(&sql), parts)
-            .prepare()
+            .migrate()
             .await
             .map_err(|error| format!("migrate log: {error}"))?;
         sql.transaction(
