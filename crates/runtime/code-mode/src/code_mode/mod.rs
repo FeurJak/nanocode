@@ -179,8 +179,6 @@ impl Default for Yields {
 }
 
 pub struct CodeModeRuntime {
-    reopened: watch::Sender<()>,
-
     cells: Arc<Atom<CellRegistry>>,
     stored: Arc<Atom<HashMap<String, Arc<RawValue>>>>,
     host: Arc<Slot<EmbeddedHost>>,
@@ -210,26 +208,8 @@ pub struct CodeModeControl {
     current_turn: Arc<AtomicU64>,
     preempt: watch::Sender<(u64, u64)>,
     preempt_consumed: Arc<AtomicU64>,
-    reopened: watch::Sender<()>,
-
     cells: Arc<Atom<CellRegistry>>,
     host: Arc<Slot<EmbeddedHost>>,
-}
-
-pub struct CodeModeQuiescence {
-    _closed: Closed,
-}
-
-struct Closed {
-    cells: Arc<Atom<CellRegistry>>,
-    reopened: watch::Sender<()>,
-}
-
-impl Drop for Closed {
-    fn drop(&mut self) {
-        self.cells.update(CellRegistry::reopen);
-        self.reopened.send_replace(());
-    }
 }
 
 struct EmbeddedHost {
@@ -274,13 +254,7 @@ struct CellRegistry {
     next_cell_id: u64,
     live_cells: BTreeMap<u64, Arc<LiveCell>>,
     finished: BTreeMap<String, CellJournals>,
-    admission: Admission,
-}
-
-#[derive(Clone, Copy)]
-struct Admission {
-    epoch: u64,
-    closed: u64,
+    admission_epoch: u64,
 }
 
 struct LiveCell {
@@ -636,16 +610,11 @@ struct HostFailure {
 impl CodeModeRuntime {
     pub fn new_with_turn(current_turn: Arc<AtomicU64>) -> Self {
         Self {
-            reopened: watch::channel(()).0,
-
             cells: Arc::new(Atom::new(CellRegistry {
                 next_cell_id: 1,
                 live_cells: BTreeMap::new(),
                 finished: BTreeMap::new(),
-                admission: Admission {
-                    epoch: 0,
-                    closed: 0,
-                },
+                admission_epoch: 0,
             })),
             stored: Arc::default(),
             host: Arc::default(),
@@ -749,7 +718,7 @@ impl CodeModeRuntime {
         if !journals.has_restored(&context.session_id) {
             return;
         }
-        let epoch = admission_open(&self.cells, &self.reopened).await;
+        let epoch = self.cells.read(|registry| registry.admission_epoch);
         let Some(restored) = journals.take_restored(&context.session_id).map(Arc::new) else {
             return;
         };
@@ -925,7 +894,7 @@ impl CodeModeRuntime {
             None => {
                 let journals = self.journals.as_ref()?;
                 let (journal, restored) = journals.take_dormant(&context.session_id, call_id)?;
-                let epoch = admission_open(&self.cells, &self.reopened).await;
+                let epoch = self.cells.read(|registry| registry.admission_epoch);
                 let turn = self.current_turn.load(Ordering::Acquire);
                 match self.revive(
                     &tools,
@@ -1021,18 +990,9 @@ impl CodeModeRuntime {
             current_turn: Arc::clone(&self.current_turn),
             preempt: self.preempt.clone(),
             preempt_consumed: Arc::clone(&self.preempt_consumed),
-            reopened: self.reopened.clone(),
-
             cells: Arc::clone(&self.cells),
             host: Arc::clone(&self.host),
         }
-    }
-
-    async fn admission_held(&self) -> Option<Closed> {
-        if !crate::sim::mutated(crate::sim::Mutation::AdmissionHeld) {
-            return None;
-        }
-        Some(close_exclusive(&self.cells, &self.reopened, false).await.0)
     }
 
     pub async fn execute(
@@ -1094,7 +1054,7 @@ impl CodeModeRuntime {
             seen: self.preempt_consumed.load(Ordering::Acquire),
             consumed: Arc::clone(&self.preempt_consumed),
         };
-        let admission_epoch = self.cells.read(|registry| registry.admission.epoch);
+        let admission_epoch = self.cells.read(|registry| registry.admission_epoch);
         let source = match parse_exec_source(source) {
             Ok(source) => source,
             Err(message) => return failed_execution(started_at, &message, Vec::new()),
@@ -1105,15 +1065,12 @@ impl CodeModeRuntime {
         nanocode_trace::Span::current().record("output.max_tokens", output_token_budget);
         let context = context.with_output_token_budget(output_token_budget);
 
-        let open = admission_open(&self.cells, &self.reopened).await;
-        let held = self.admission_held().await;
-        if open != admission_epoch {
-            return terminated_execution(tools.as_ref(), started_at, output_token_budget);
-        }
+        let held = crate::sim::hold_admission();
         if let Some(journals) = &self.journals {
             journals.load(&context.session_id).await;
             journals.await_restore(&context.session_id).await;
         }
+        crate::sim::release_admission(held);
         if !self.cells.read(|registry| registry.admits(admission_epoch)) {
             return terminated_execution(tools.as_ref(), started_at, output_token_budget);
         }
@@ -1195,7 +1152,6 @@ impl CodeModeRuntime {
             }
             cell
         };
-        drop(held);
         let claim = cell.claim();
         let choice = match source.yield_time_ms {
             Some(_) => YieldChoice::Named,
@@ -1526,11 +1482,9 @@ impl CodeModeControl {
         turn_id: u64,
         mut observer: Option<&mut dyn CodeModeObserver>,
     ) {
-        if crate::sim::mutated(crate::sim::Mutation::AdmissionHeld) {
-            admission_open(&self.cells, &self.reopened).await;
-        }
+        crate::sim::admission_released().await;
         let cells = self.cells.update(|registry| {
-            registry.close(true);
+            registry.fence();
             let ids = registry
                 .live_cells
                 .iter()
@@ -1542,10 +1496,6 @@ impl CodeModeControl {
                 .filter_map(|id| registry.live_cells.remove(&id))
                 .collect::<Vec<_>>()
         });
-        let _closed = Closed {
-            cells: Arc::clone(&self.cells),
-            reopened: self.reopened.clone(),
-        };
         for cell in &cells {
             cell.retire();
             cell.request_terminate();
@@ -1559,11 +1509,11 @@ impl CodeModeControl {
         }
     }
 
-    pub async fn terminate_all(
-        &self,
-        mut observer: Option<&mut dyn CodeModeObserver>,
-    ) -> CodeModeQuiescence {
-        let (closed, cells) = close_exclusive(&self.cells, &self.reopened, true).await;
+    pub async fn terminate_all(&self, mut observer: Option<&mut dyn CodeModeObserver>) {
+        let cells = self.cells.update(|registry| {
+            registry.fence();
+            std::mem::take(&mut registry.live_cells)
+        });
         let cells = cells.into_values().collect::<Vec<_>>();
         for cell in &cells {
             cell.retire();
@@ -1580,7 +1530,6 @@ impl CodeModeControl {
         if let Some(mut host) = self.host.take() {
             host.worker.terminate().await;
         }
-        CodeModeQuiescence { _closed: closed }
     }
 }
 
@@ -1665,30 +1614,14 @@ fn millis(duration: Duration) -> u64 {
 
 impl CellRegistry {
     fn admits(&self, epoch: u64) -> bool {
-        self.admission.epoch == epoch || crate::sim::mutated(crate::sim::Mutation::AdmitsStale)
+        self.admission_epoch == epoch || crate::sim::mutated(crate::sim::Mutation::AdmitsStale)
     }
 
-    fn close(&mut self, fence: bool) {
-        if fence {
-            self.admission.epoch = self
-                .admission
-                .epoch
-                .checked_add(1)
-                .expect("admission epochs fit in u64");
-        }
-        self.admission.closed = self
-            .admission
-            .closed
+    fn fence(&mut self) {
+        self.admission_epoch = self
+            .admission_epoch
             .checked_add(1)
-            .expect("admission closures fit in u64");
-    }
-
-    fn reopen(&mut self) {
-        assert!(
-            self.admission.closed > 0,
-            "only a closure reopens admission"
-        );
-        self.admission.closed -= 1;
+            .expect("admission epochs fit in u64");
     }
 
     const fn allocate_cell_id(&mut self) -> u64 {
@@ -2942,51 +2875,6 @@ fn running_observation(
         ),
         true,
     )
-}
-
-async fn admission_open(cells: &Atom<CellRegistry>, reopened: &watch::Sender<()>) -> u64 {
-    loop {
-        let mut reopening = reopened.subscribe();
-        let admission = cells.read(|registry| registry.admission);
-        if admission.closed == 0 {
-            return admission.epoch;
-        }
-        reopening
-            .changed()
-            .await
-            .expect("the runtime keeps its admission sender");
-    }
-}
-
-async fn close_exclusive(
-    cells: &Arc<Atom<CellRegistry>>,
-    reopened: &watch::Sender<()>,
-    fence: bool,
-) -> (Closed, BTreeMap<u64, Arc<LiveCell>>) {
-    loop {
-        let mut reopening = reopened.subscribe();
-        let taken = cells.try_update(|registry| {
-            (registry.admission.closed == 0).then(|| {
-                registry.close(fence);
-                if fence {
-                    std::mem::take(&mut registry.live_cells)
-                } else {
-                    BTreeMap::new()
-                }
-            })
-        });
-        if let Some(taken) = taken {
-            let closed = Closed {
-                cells: Arc::clone(cells),
-                reopened: reopened.clone(),
-            };
-            return (closed, taken);
-        }
-        reopening
-            .changed()
-            .await
-            .expect("the runtime keeps its admission sender");
-    }
 }
 
 fn terminated_execution(

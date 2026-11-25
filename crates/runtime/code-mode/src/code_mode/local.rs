@@ -473,7 +473,7 @@ impl CodeModeHost for LocalCells {
         let session = self.sessions.update(|sessions| sessions.remove(session_id));
         Box::pin(async move {
             if let Some(session) = session {
-                let _ = session.runtime.control().terminate_all(None).await;
+                session.runtime.control().terminate_all(None).await;
             }
             self.release_stored(session_id);
             Ok(())
@@ -488,7 +488,7 @@ impl CodeModeHost for LocalCells {
         let session = self.sessions.update(|sessions| sessions.remove(session_id));
         Box::pin(async move {
             if let Some(session) = session {
-                let _ = session
+                session
                     .runtime
                     .control()
                     .terminate_all(Some(observer))

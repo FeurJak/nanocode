@@ -1318,7 +1318,7 @@ impl NativeToolRuntimeControl {
     #[doc(hidden)]
     pub fn cancel<'call>(&'call self) -> nanocode_sync::future::BoxFuture<'call, ()> {
         Box::pin(async move {
-            let _code_mode_quiescence = self.code_mode.terminate_all(None).await;
+            self.code_mode.terminate_all(None).await;
             if let Some(workspace) = &self.workspace {
                 workspace.cancel().await;
             }
@@ -1336,7 +1336,7 @@ impl NativeToolRuntimeControl {
         observer: &'call mut dyn CodeModeObserver,
     ) -> nanocode_sync::future::BoxFuture<'call, ()> {
         Box::pin(async move {
-            let _code_mode_quiescence = self.code_mode.terminate_all(Some(&mut *observer)).await;
+            self.code_mode.terminate_all(Some(&mut *observer)).await;
             if let Some(workspace) = &self.workspace {
                 workspace.cancel().await;
             }
