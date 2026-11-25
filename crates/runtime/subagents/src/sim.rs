@@ -6,13 +6,15 @@ pub enum Mutation {
     None,
     WaitRepeatsIds,
     RestoreRemembersWaits,
+    RouteSkipsClaim,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::None,
         Self::WaitRepeatsIds,
         Self::RestoreRemembersWaits,
+        Self::RouteSkipsClaim,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -20,6 +22,7 @@ impl Mutation {
             Self::None => "none",
             Self::WaitRepeatsIds => "subagents_wait_repeats_ids",
             Self::RestoreRemembersWaits => "subagents_restore_remembers_waits",
+            Self::RouteSkipsClaim => "subagents_route_skips_claim",
         }
     }
 }

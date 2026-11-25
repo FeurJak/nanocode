@@ -203,18 +203,8 @@ pub(super) fn dispatch_parent<'a>(
             ));
         }
         let _warm = reg.warm(root_session_id, vec![id]).await?;
-        let dispatch = reg.completion_dispatch.update(|dispatch| {
-            dispatch
-                .entry((root_session_id.to_owned(), id))
-                .or_default()
-                .clone()
-        });
-        let _dispatch = dispatch.enter().await;
         let key = (root_session_id.to_owned(), id);
-        if reg
-            .completion_routes
-            .read(|routes| routes.get(&key) == Some(&revision))
-        {
+        if reg.route_claimed(root_session_id, id, revision) {
             return Ok(Routed::Skipped);
         }
         let Some((_, _, _, parked)) = reg.peek_completion(root_session_id, id, revision).await
@@ -238,15 +228,16 @@ pub(super) fn dispatch_parent<'a>(
             reg.retry_completion(root_session_id, id, revision);
             return Err(error);
         }
-        let Some((status, session_id, attempt, _)) =
-            reg.peek_completion(root_session_id, id, revision).await
-        else {
-            return Ok(Routed::Skipped);
-        };
-        let request_id = completion_request_id(&session_id, revision, attempt);
         if !reg.claim_route(root_session_id, id, revision) {
             return Ok(Routed::Skipped);
         }
+        let Some((status, session_id, attempt, _)) =
+            reg.peek_completion(root_session_id, id, revision).await
+        else {
+            reg.release_route(root_session_id, id, revision);
+            return Ok(Routed::Skipped);
+        };
+        let request_id = completion_request_id(&session_id, revision, attempt);
         let prompt = completion_continuation_prompt(id, &status);
         let (steered, injected) = reg.watch_steer(root_session_id, parent, &request_id, &prompt);
         match parent
@@ -317,7 +308,6 @@ pub(super) fn dispatch_parent_batch<'a>(
             let result = reg
                 .dispatch_parent(parent, root_session_id, id, revision)
                 .await;
-            reg.release_dispatch(root_session_id, &[id]);
             return result.map(|routed| match routed {
                 Routed::Steered(injected) => vec![injected],
                 Routed::Skipped | Routed::Started => Vec::new(),
@@ -329,24 +319,10 @@ pub(super) fn dispatch_parent_batch<'a>(
                 completions.iter().map(|(id, _)| *id).collect(),
             )
             .await?;
-        let mut dispatches = Vec::with_capacity(completions.len());
-        for &(id, _) in &completions {
-            let dispatch = reg.completion_dispatch.update(|dispatch| {
-                dispatch
-                    .entry((root_session_id.to_owned(), id))
-                    .or_default()
-                    .clone()
-            });
-            dispatches.push(dispatch.enter().await);
-        }
         let mut ready = Vec::new();
         let mut parked_any = false;
         for (id, revision) in completions {
-            let key = (root_session_id.to_owned(), id);
-            if reg
-                .completion_routes
-                .read(|routes| routes.get(&key) == Some(&revision))
-            {
+            if reg.route_claimed(root_session_id, id, revision) {
                 continue;
             }
             let Some((_, _, _, parked)) = reg.peek_completion(root_session_id, id, revision).await
@@ -406,7 +382,6 @@ pub(super) fn dispatch_parent_batch<'a>(
         for (_, group) in groups {
             steered.extend(reg.route_completions(parent, root_session_id, group).await);
         }
-        drop(dispatches);
         Ok(steered)
     })
 }
@@ -441,10 +416,22 @@ pub(super) fn route_completions<'a>(
     group: Vec<(AgentId, u64, AgentStatus, String, u32)>,
 ) -> RegistryFuture<'a, Option<Arc<Signal>>> {
     Box::pin(async move {
-        let group = group
-            .into_iter()
-            .filter(|(id, revision, _, _, _)| reg.claim_route(root_session_id, *id, *revision))
-            .collect::<Vec<_>>();
+        let mut claimed = Vec::with_capacity(group.len());
+        for (id, revision, status, session_id, attempt) in group {
+            if !reg.claim_route(root_session_id, id, revision) {
+                continue;
+            }
+            if reg
+                .peek_completion(root_session_id, id, revision)
+                .await
+                .is_none()
+            {
+                reg.release_route(root_session_id, id, revision);
+                continue;
+            }
+            claimed.push((id, revision, status, session_id, attempt));
+        }
+        let group = claimed;
         let (_, first_revision, _, first_session, _) = group.first()?;
         let request_id = if let [(_, revision, _, session_id, attempt)] = &group[..] {
             completion_request_id(session_id, *revision, *attempt)

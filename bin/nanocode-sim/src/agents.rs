@@ -58,10 +58,11 @@ pub enum AgentsMutation {
     PoolForgetsIntent,
     WaitRepeatsIds,
     RestoreRemembersWaits,
+    RouteSkipsClaim,
 }
 
 impl AgentsMutation {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::None,
         Self::CancelIgnored,
         Self::ShutdownHangs,
@@ -72,6 +73,7 @@ impl AgentsMutation {
         Self::PoolForgetsIntent,
         Self::WaitRepeatsIds,
         Self::RestoreRemembersWaits,
+        Self::RouteSkipsClaim,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -92,6 +94,7 @@ impl AgentsMutation {
             Self::PoolForgetsIntent => "pool_forgets_intent",
             Self::WaitRepeatsIds => "wait_repeats_ids",
             Self::RestoreRemembersWaits => "restore_remembers_waits",
+            Self::RouteSkipsClaim => "route_skips_claim",
         }
     }
 
@@ -918,6 +921,72 @@ async fn redelivered(shape: &Shape, ledger: &Arc<Ledger>) -> Result<(), String> 
     Ok(())
 }
 
+const ROUTE_SESSION: &str = "route-once";
+const ROUTE_CHILDREN: u64 = 1;
+
+async fn routed_once(shape: &Shape, ledger: &Arc<Ledger>) -> Result<(), String> {
+    let (registry, control, updates) = nanocode_subagents::channel(DEFAULT_MAX_SUBAGENTS);
+    let root = AgentHandle::new(
+        ROUTE_SESSION,
+        simulated_model(),
+        Arc::new(ScriptedFactory::new(Arc::clone(ledger))),
+    );
+    let ids =
+        nanocode_subagents::start_agents(&root, &registry, ROUTE_SESSION, tasks(ROUTE_CHILDREN))
+            .await
+            .map_err(|error| format!("start_agents for the route check failed: {error}"))?
+            .into_iter()
+            .map(|report| report.agent_id)
+            .collect::<Vec<_>>();
+    let poll = Duration::from_millis(shape.script.step_latency_ms_min);
+    loop {
+        let listed = registry
+            .directory(ROUTE_SESSION, true, false)
+            .await
+            .map_err(|error| {
+                format!("the directory did not answer before the route check: {error}")
+            })?;
+        if listed.iter().all(|entry| !entry.status.is_active()) {
+            break;
+        }
+        nanocode_platform::sleep(poll).await;
+    }
+    let (parent, events) = ledger.agent(ROUTE_SESSION, simulated_model());
+    let (first, second) = nanocode_sync::join!(
+        registry.deliver_completions(&parent, ROUTE_SESSION),
+        registry.deliver_completions(&parent, ROUTE_SESSION),
+    );
+    let mut routed = std::collections::BTreeMap::<AgentId, u64>::new();
+    for (id, result) in first.into_iter().chain(second) {
+        if matches!(result, Ok(true)) {
+            *routed.entry(id).or_default() += 1;
+        }
+    }
+    if let Some((id, times)) = routed.iter().find(|(_, times)| **times > 1) {
+        return Err(format!(
+            "two dispatchers racing over one completion routed agent {id}'s completion to the parent {times} times"
+        ));
+    }
+    let turn = Duration::from_millis(shape.script.steps_max * shape.script.step_latency_ms_max);
+    nanocode_platform::sleep(turn).await;
+    if let Some((request, times)) = ledger.repeated_request(ROUTE_SESSION) {
+        return Err(format!(
+            "two dispatchers racing over one completion began the parent's turn {request} {times} times"
+        ));
+    }
+    if let Some(id) = ids.iter().find(|id| !routed.contains_key(id)) {
+        return Err(format!(
+            "neither of two dispatchers routed agent {id}'s completion to the parent"
+        ));
+    }
+    control
+        .close_all(ROUTE_SESSION)
+        .await
+        .map_err(|error| format!("close_all after the route check failed: {error}"))?;
+    drop((registry, updates, parent, events));
+    Ok(())
+}
+
 async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Result<u64, String> {
     let run = build(ledger, shape);
     nanocode_subagents::start_agents(
@@ -952,6 +1021,8 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Resul
     drop(run.updates);
     redelivered(shape, ledger).await?;
     ledger.trace("redelivered");
+    routed_once(shape, ledger).await?;
+    ledger.trace("routed once");
     Ok(took_ms)
 }
 
@@ -970,6 +1041,9 @@ pub fn simulate(seed: u64, mutation: AgentsMutation) -> AgentOutcome {
     }
     if mutation == AgentsMutation::RestoreRemembersWaits {
         nanocode_subagents::sim::mutate(nanocode_subagents::sim::Mutation::RestoreRemembersWaits);
+    }
+    if mutation == AgentsMutation::RouteSkipsClaim {
+        nanocode_subagents::sim::mutate(nanocode_subagents::sim::Mutation::RouteSkipsClaim);
     }
     let shape = Shape::of(seed, mutation);
     let clock = Clock::new();

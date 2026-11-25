@@ -63,6 +63,7 @@ pub struct Ledger {
     running_turns: AtomicUsize,
     steps_left: Atom<BTreeMap<String, u64>>,
     pending: Atom<BTreeMap<String, (String, Value)>>,
+    begun: Atom<BTreeMap<(String, String), u64>>,
     counts: Atom<Counts>,
 }
 
@@ -78,6 +79,7 @@ impl Ledger {
             running_turns: AtomicUsize::new(0),
             steps_left: Atom::default(),
             pending: Atom::default(),
+            begun: Atom::default(),
             counts: Atom::default(),
         })
     }
@@ -136,6 +138,11 @@ impl Ledger {
                 (request_id.to_owned(), input.clone()),
             )
         });
+        self.begun.update(|begun| {
+            *begun
+                .entry((session_id.to_owned(), request_id.to_owned()))
+                .or_default() += 1;
+        });
         self.running_turns.fetch_add(1, Ordering::SeqCst);
         self.count(|counts| counts.turns += 1);
         self.trace(&format!("turn {session_id} {request_id}"));
@@ -162,12 +169,25 @@ impl Ledger {
         self.trace(&format!("finished {session_id}"));
     }
 
+    pub fn repeated_request(&self, session_id: &str) -> Option<(String, u64)> {
+        self.begun.read(|begun| {
+            begun
+                .iter()
+                .find(|((session, _), times)| session == session_id && **times > 1)
+                .map(|((_, request), times)| (request.clone(), *times))
+        })
+    }
+
     pub fn pending_turn(&self, session_id: &str) -> Option<(String, Value)> {
         self.pending
             .read(|pending| pending.get(session_id).cloned())
     }
 
-    fn agent(self: &Arc<Self>, session_id: &str, model: ModelSelection) -> (Agent, AgentEvents) {
+    pub fn agent(
+        self: &Arc<Self>,
+        session_id: &str,
+        model: ModelSelection,
+    ) -> (Agent, AgentEvents) {
         let (runtime, events) = BackendRuntime::new(session_id.to_owned());
         let backend = ScriptedBackend {
             inner: Arc::new(Inner {

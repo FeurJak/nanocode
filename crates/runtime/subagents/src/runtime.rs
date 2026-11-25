@@ -675,7 +675,6 @@ pub struct Registry {
     this: std::sync::OnceLock<Weak<Self>>,
 
     completion_retries: Atom<AgentMap<(u32, bool)>>,
-    completion_dispatch: Atom<AgentMap<Sequencer>>,
     completion_batches: Atom<nanocode_sync::Map<String, mpsc::UnboundedSender<(AgentId, u64)>>>,
     completion_routes: Atom<AgentMap<u64>>,
     completion_wakes: Atom<HashMap<String, (Instant, Instant)>>,
@@ -3196,7 +3195,6 @@ impl Registry {
             idle_waits: Atom::default(),
             this: std::sync::OnceLock::new(),
             completion_retries: Atom::default(),
-            completion_dispatch: Atom::default(),
             completion_batches: Atom::default(),
             completion_routes: Atom::default(),
             completion_wakes: Atom::default(),
@@ -6195,12 +6193,8 @@ impl Registry {
         root_session_id: &str,
         completions: Vec<(AgentId, u64)>,
     ) -> std::io::Result<Vec<Arc<Signal>>> {
-        let ids = completions.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-        let result = self
-            .dispatch_parent_batch(parent, root_session_id, completions)
-            .await;
-        self.release_dispatch(root_session_id, &ids);
-        result
+        self.dispatch_parent_batch(parent, root_session_id, completions)
+            .await
     }
 
     async fn root_active(&self, root_session_id: &str) -> bool {
@@ -6242,18 +6236,18 @@ impl Registry {
         });
     }
 
-    fn release_dispatch(&self, root_session_id: &str, ids: &[AgentId]) {
-        self.completion_dispatch.update(|dispatch| {
-            for &id in ids {
-                let key = (root_session_id.to_owned(), id);
-                if dispatch.get(&key).is_some_and(Sequencer::is_unshared) {
-                    dispatch.remove(&key);
-                }
-            }
-        });
+    fn route_claimed(&self, root_session_id: &str, id: AgentId, revision: u64) -> bool {
+        let key = (root_session_id.to_owned(), id);
+        !crate::sim::mutated(crate::sim::Mutation::RouteSkipsClaim)
+            && self
+                .completion_routes
+                .read(|routes| routes.get(&key) == Some(&revision))
     }
 
     fn claim_route(&self, root_session_id: &str, id: AgentId, revision: u64) -> bool {
+        if crate::sim::mutated(crate::sim::Mutation::RouteSkipsClaim) {
+            return true;
+        }
         let key = (root_session_id.to_owned(), id);
         self.completion_routes
             .try_update(|routes| {
@@ -6349,11 +6343,9 @@ impl Registry {
         id: AgentId,
         revision: u64,
     ) -> std::io::Result<bool> {
-        let result = self
-            .dispatch_parent(parent, root_session_id, id, revision)
-            .await;
-        self.release_dispatch(root_session_id, &[id]);
-        result.map(|routed| !matches!(routed, Routed::Skipped))
+        self.dispatch_parent(parent, root_session_id, id, revision)
+            .await
+            .map(|routed| !matches!(routed, Routed::Skipped))
     }
 
     async fn dispatch_parent(
@@ -6402,21 +6394,11 @@ impl Registry {
         outcome: NoticeOutcome,
         parent: &WeakAgent,
     ) {
-        let key = (root_session_id.to_owned(), id);
-        if self
-            .completion_routes
-            .read(|routes| routes.get(&key) == Some(&revision))
-        {
-            self.completion_routes.update(|routes| {
-                if routes.get(&key) == Some(&revision) {
-                    routes.remove(&key);
-                }
-            });
-        }
         match outcome {
             NoticeOutcome::Read => {
                 self.acknowledge_completion(root_session_id, id, revision)
                     .await;
+                self.release_route(root_session_id, id, revision);
                 if self.store_for(root_session_id).is_some()
                     && let Err(error) = self.persist_durably(root_session_id).await
                 {
@@ -6428,17 +6410,23 @@ impl Registry {
             NoticeOutcome::Unread => {
                 self.next_completion_attempt(root_session_id, id, revision)
                     .await;
+                self.release_route(root_session_id, id, revision);
                 self.retry_completion(root_session_id, id, revision);
             }
             NoticeOutcome::Undelivered => {
+                self.release_route(root_session_id, id, revision);
                 self.schedule_parent_continuation(root_session_id, id, revision);
             }
-            NoticeOutcome::Pending => self.retry_completion(root_session_id, id, revision),
+            NoticeOutcome::Pending => {
+                self.release_route(root_session_id, id, revision);
+                self.retry_completion(root_session_id, id, revision);
+            }
             NoticeOutcome::Cancelled => {
-                if !self
+                let parked = self
                     .park_completion(root_session_id, id, revision, true)
-                    .await
-                {
+                    .await;
+                self.release_route(root_session_id, id, revision);
+                if !parked {
                     return;
                 }
                 if let Some(parent) = parent.upgrade() {
@@ -6450,7 +6438,7 @@ impl Registry {
                     nanocode_trace::warn!(%error, %id, revision, "parked subagent completion was not journaled");
                 }
             }
-            NoticeOutcome::Stopped => {}
+            NoticeOutcome::Stopped => self.release_route(root_session_id, id, revision),
         }
     }
 
