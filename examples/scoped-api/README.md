@@ -37,6 +37,11 @@ that holds it, by its listen address.
   behind. The replicas' Postgres role carries `statement_timeout`, `lock_timeout` and
   `idle_in_transaction_session_timeout`, and lease traffic uses its own pool so data load never
   delays a heartbeat or renewal.
+- Renewal runs on its own task every `renew_ms` (default `lease_ms / 10`), apart from the
+  heartbeat, which has its own one-connection pool. Lease and membership calls have a
+  client-side deadline of `renew_deadline_ms` (default `lease_ms / 10`); a renewal that misses
+  it is retried at once at the same epochs on a fresh connection, so a cut to Postgres of up to
+  about `lease_ms - renew_ms - renew_deadline_ms` keeps every lease.
 
 ## Running it
 

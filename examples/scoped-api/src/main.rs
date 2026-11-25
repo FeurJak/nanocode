@@ -2,14 +2,14 @@ mod drive;
 mod http;
 mod replica;
 
-use std::{collections::BTreeMap, num::NonZeroU32, process::ExitCode, sync::Arc};
+use std::{collections::BTreeMap, num::NonZeroU32, process::ExitCode, sync::Arc, time::Duration};
 
 use nanocode_durability_core::{Sql, SqlStatement};
 use nanocode_partitions::Partition;
-use nanocode_store_sql::{PgOptions, PgPool, PgSql};
+use nanocode_store_sql::{PgBounds, PgLimits, PgOptions, PgPool, PgSql};
 use nanocode_turnlog::parted::{PartStore, PartedLog, SqlParts};
 
-const USAGE: &str = "scoped-api migrate URL [parts=N] | serve URL listen=HOST:PORT [parts= pool= lease_pool= threads= lease_ms= member_ms= grace_ms= tick_ms= renew_ms= batch= queue= forward_idle=] | drive ADMIN_URL replicas=A,B [parts= concurrency= scopes= seconds= writes= threads= retry_ms= pause_ms= sample_ms= ready_s= route=any|owner route_ms= kill=PID@S victim=ADDR | handoff=ADDR@S]";
+const USAGE: &str = "scoped-api migrate URL [parts=N] | serve URL listen=HOST:PORT [parts= pool= lease_pool= threads= lease_ms= member_ms= grace_ms= tick_ms= renew_ms= renew_deadline_ms= batch= queue= forward_idle=] | drive ADMIN_URL replicas=A,B [parts= concurrency= scopes= seconds= writes= threads= retry_ms= pause_ms= sample_ms= ready_s= route=any|owner route_ms= kill=PID@S victim=ADDR | handoff=ADDR@S]";
 const MEMBERS_CREATE: &str =
     "CREATE TABLE IF NOT EXISTS scoped_api_member (node TEXT PRIMARY KEY, seen_ms BIGINT NOT NULL)";
 const MEMBERS_CHECK: &str = "SELECT CAST(count(*) AS TEXT) FROM scoped_api_member";
@@ -41,8 +41,30 @@ impl Options {
 }
 
 pub fn pg(url: &str, connections: usize) -> Result<Arc<PgSql>, String> {
+    pg_limited(url, connections, PgLimits::default())
+}
+
+/// A pool whose every call answers within deadline on the client: waiting for a connection or
+/// connecting within half of it, and each transaction within all of it (also set as its
+/// statement, lock and idle-in-transaction timeouts, so a cut connection holds no lock longer).
+fn pg_within(url: &str, connections: usize, deadline: Duration) -> Result<Arc<PgSql>, String> {
+    let bounds = PgBounds {
+        statement: deadline,
+        lock: deadline,
+        idle_in_transaction: deadline,
+    };
+    let limits = PgLimits {
+        acquire: deadline / 2,
+        read: bounds,
+        write: bounds,
+        ..PgLimits::default()
+    };
+    pg_limited(url, connections, limits)
+}
+
+fn pg_limited(url: &str, connections: usize, limits: PgLimits) -> Result<Arc<PgSql>, String> {
     let options = PgOptions::parse(url).map_err(|error| format!("bad url: {error}"))?;
-    let pool = PgPool::new(options, connections);
+    let pool = PgPool::limited(options, connections, limits);
     Ok(Arc::new(PgSql::reading(pool.clone(), pool)))
 }
 
@@ -97,13 +119,19 @@ fn serve(url: &str, options: &Options) -> Result<(), String> {
         member_ms: options.number("member_ms", 2_000)?,
         grace_ms: options.number("grace_ms", 0)?,
         tick_ms: options.number("tick_ms", 100)?,
-        renew_ms: options.number("renew_ms", lease_ms / 3)?,
+        renew_ms: options.number("renew_ms", lease_ms / 10)?,
+        renew_deadline_ms: options.number("renew_deadline_ms", lease_ms / 10)?,
         batch: size("batch", PART_ROWS_MAX)?,
         queue: size("queue", 4_096)?,
         forward_idle: size("forward_idle", 64)?,
     };
+    if settings.renew_ms + 2 * settings.renew_deadline_ms >= lease_ms {
+        return Err("renew_ms + 2 * renew_deadline_ms must stay under lease_ms".to_owned());
+    }
     let data = pg(url, size("pool", 8)?)?;
-    let leases = pg(url, size("lease_pool", 2)?)?;
+    let deadline = Duration::from_millis(settings.renew_deadline_ms.max(2));
+    let leases = pg_within(url, size("lease_pool", 2)?, deadline)?;
+    let members = pg_within(url, 1, deadline)?;
     let log = Arc::new(PartedLog::fenced(store(&leases), parts, &listen));
     runtime(options.number("threads", 2)?)?.block_on(async {
         let last = Partition(parts.get() - 1);
@@ -111,7 +139,7 @@ fn serve(url: &str, options: &Options) -> Result<(), String> {
             .fence(last)
             .await
             .map_err(|error| format!("schema behind (run migrate parts={parts}): {error}"))?;
-        leases
+        members
             .transaction(
                 "scoped_api_check",
                 &[SqlStatement {
@@ -124,7 +152,7 @@ fn serve(url: &str, options: &Options) -> Result<(), String> {
         eprintln!("scoped-api serving on {listen} parts={parts}");
         let stores = replica::Stores {
             data: store(&data),
-            leases,
+            members,
             log,
         };
         replica::serve(stores, settings).await

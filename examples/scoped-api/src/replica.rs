@@ -9,7 +9,7 @@ use std::{
 };
 
 use nanocode_durability_core::{Sql, SqlStatement, StoreError};
-use nanocode_executor::{TcpListener, spawn, timeout};
+use nanocode_executor::{TcpListener, sleep, spawn, timeout};
 use nanocode_partitions::{Member, Partition, Row, live, plan};
 use nanocode_store_sql::PgSql;
 use nanocode_sync::{Atom, Map, Slot, future::join_all, mpsc, oneshot};
@@ -28,6 +28,7 @@ pub struct Settings {
     pub grace_ms: u64,
     pub tick_ms: u64,
     pub renew_ms: u64,
+    pub renew_deadline_ms: u64,
     pub batch: usize,
     pub queue: usize,
     pub forward_idle: usize,
@@ -181,6 +182,7 @@ pub struct Counters {
     claims: AtomicU64,
     releases: AtomicU64,
     renew_failures: AtomicU64,
+    renew_retries: AtomicU64,
 }
 
 impl Counters {
@@ -214,6 +216,7 @@ impl Counters {
             "claims": read(&self.claims),
             "releases": read(&self.releases),
             "renew_failures": read(&self.renew_failures),
+            "renew_retries": read(&self.renew_retries),
         })
     }
 }
@@ -256,7 +259,7 @@ pub struct Shared {
 }
 
 pub struct Stores {
-    pub leases: Arc<PgSql>,
+    pub members: Arc<PgSql>,
     pub log: Arc<Log>,
     pub data: Arc<SqlParts<PgSql>>,
 }
@@ -269,7 +272,7 @@ pub async fn serve(stores: Stores, settings: Settings) -> Result<(), String> {
     let shared = Arc::new(Shared {
         me: settings.listen.clone(),
         log: stores.log,
-        sql: stores.leases,
+        sql: stores.members,
         data: stores.data,
         settings,
         owners: Atom::default(),
@@ -280,6 +283,7 @@ pub async fn serve(stores: Stores, settings: Settings) -> Result<(), String> {
         counters: Counters::default(),
     });
     spawn(keep(Arc::clone(&shared), received));
+    spawn(renew(Arc::clone(&shared)));
     loop {
         let (stream, _) = listener
             .accept()
@@ -778,8 +782,6 @@ impl Owning {
 
 async fn keep(shared: Arc<Shared>, mut commands: mpsc::Receiver<Command>) {
     let tick = Duration::from_millis(shared.settings.tick_ms);
-    let renew_every = Duration::from_millis(shared.settings.renew_ms);
-    let mut renewed = Instant::now();
     loop {
         let mut drains = Vec::new();
         match timeout(tick, commands.recv()).await {
@@ -801,11 +803,7 @@ async fn keep(shared: Arc<Shared>, mut commands: mpsc::Receiver<Command>) {
         if shared.draining.read(|draining| *draining) {
             continue;
         }
-        let renew = renewed.elapsed() >= renew_every;
-        if renew {
-            renewed = Instant::now();
-        }
-        if let Err(error) = balance(&shared, renew).await {
+        if let Err(error) = balance(&shared).await {
             shared.counters.store(&error);
         }
     }
@@ -853,7 +851,7 @@ async fn heartbeat(shared: &Shared) -> Result<(u64, Vec<Member<String>>), StoreE
     Ok((now, members))
 }
 
-async fn balance(shared: &Arc<Shared>, renew: bool) -> Result<(), StoreError> {
+async fn balance(shared: &Arc<Shared>) -> Result<(), StoreError> {
     let (now, members) = heartbeat(shared).await?;
     let live = live(&members, now, shared.settings.member_ms);
     let held: BTreeMap<Partition, u64> = shared.owners.read(|owners| {
@@ -879,19 +877,6 @@ async fn balance(shared: &Arc<Shared>, renew: bool) -> Result<(), StoreError> {
     )
     .await;
     join_all(planned.claim.iter().map(|part| claim(shared, *part, now))).await;
-    if renew {
-        let kept: Vec<Partition> = held
-            .keys()
-            .filter(|part| {
-                !planned
-                    .release
-                    .iter()
-                    .any(|token| token.partition == **part)
-            })
-            .copied()
-            .collect();
-        join_all(kept.iter().map(|part| renewed(shared, *part))).await;
-    }
     Ok(())
 }
 
@@ -921,14 +906,37 @@ async fn claim(shared: &Arc<Shared>, part: Partition, now: u64) {
     }
 }
 
-async fn renewed(shared: &Shared, part: Partition) {
-    match shared.log.renew(part, shared.settings.lease_ms).await {
-        Ok(()) => {}
-        Err(StoreError::Fenced) => {
-            Counters::bump(&shared.counters.renew_failures);
-            shared.owners.update(|owners| owners.remove(&part));
+/// Renews every held lease each renew_ms, on its own task and lease pool so a slow heartbeat or
+/// claim never delays it. Each attempt has renew_deadline_ms; one that misses it or fails is
+/// retried at once, at the same epochs, on a fresh connection (the pool discards the stuck one),
+/// until one lands or the round is over. A lease is lost only when the store says its epoch moved.
+async fn renew(shared: Arc<Shared>) {
+    let every = Duration::from_millis(shared.settings.renew_ms);
+    let bound = Duration::from_millis(shared.settings.renew_deadline_ms);
+    let pause = Duration::from_millis(shared.settings.tick_ms).min(bound);
+    loop {
+        let round = Instant::now();
+        loop {
+            match timeout(bound, shared.log.renew_all(shared.settings.lease_ms)).await {
+                Ok(Ok(lost)) => {
+                    for part in lost {
+                        Counters::bump(&shared.counters.renew_failures);
+                        shared.owners.update(|owners| owners.remove(&part));
+                    }
+                    break;
+                }
+                Ok(Err(error)) => {
+                    shared.counters.store(&error);
+                    Counters::bump(&shared.counters.renew_retries);
+                    sleep(pause).await;
+                }
+                Err(_) => Counters::bump(&shared.counters.renew_retries),
+            }
+            if round.elapsed() >= every {
+                break;
+            }
         }
-        Err(error) => shared.counters.store(&error),
+        sleep(every.saturating_sub(round.elapsed())).await;
     }
 }
 
