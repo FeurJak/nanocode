@@ -13,4 +13,4 @@ pub use connection::{Notification, PgCancel, PgConnection};
 pub use error::{DatabaseError, PgError};
 pub use options::{Host, PgBounds, PgLimits, PgOptions, TlsMode};
 pub use pool::{Lending, Lent, PgPool, Pooled};
-pub use sql::{PgSql, PgTimes, PgTransaction};
+pub use sql::{PgSql, PgTimes};
