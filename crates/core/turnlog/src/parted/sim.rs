@@ -21,10 +21,13 @@ pub enum Mutation {
     PruneIgnoresCursors,
     /// A lost acknowledgement is answered as a seq conflict, so the caller re-runs the step.
     LostAckRejected,
+    /// A draining partition refuses the appends queued before the drain instead of flushing
+    /// them at its epoch.
+    DrainRefusesQueued,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Unfenced,
         Self::Partial,
         Self::Overwrite,
@@ -33,6 +36,7 @@ impl Mutation {
         Self::SnapshotSkipped,
         Self::PruneIgnoresCursors,
         Self::LostAckRejected,
+        Self::DrainRefusesQueued,
     ];
 
     #[must_use]
@@ -47,6 +51,7 @@ impl Mutation {
             Self::SnapshotSkipped => "snapshot_skipped",
             Self::PruneIgnoresCursors => "prune_ignores_cursors",
             Self::LostAckRejected => "lost_ack_rejected",
+            Self::DrainRefusesQueued => "drain_refuses_queued",
         }
     }
 

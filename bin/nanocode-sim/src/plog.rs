@@ -33,6 +33,9 @@ pub use parted_sim::Mutation as PlogMutation;
 
 const LEASE_TICKS_MIN: u64 = 8;
 const LEASE_TICKS_MAX: u64 = 96;
+const HANDOFF_TTL_TICKS: u64 = u64::MAX / 4;
+const HANDOFF_APPENDS_MIN: u64 = 2;
+const HANDOFF_APPENDS_MAX: u64 = 6;
 
 pub fn names() -> String {
     PlogMutation::ALL
@@ -57,6 +60,7 @@ pub struct PlogStats {
     pub after: u64,
     pub pruned: u64,
     pub followed: u64,
+    pub drained: u64,
 }
 
 impl PlogStats {
@@ -74,6 +78,7 @@ impl PlogStats {
         self.after += other.after;
         self.pruned += other.pruned;
         self.followed += other.followed;
+        self.drained += other.drained;
     }
 }
 
@@ -352,6 +357,89 @@ async fn worker(
     }
 }
 
+/// A planned handoff with nothing else running: finish any earlier drain, claim far ahead (so
+/// neither expiry nor a peer can refuse a write), queue appends, then release. Every append
+/// queued before the release must flush at the held epoch: only a moved epoch may refuse one.
+async fn handoff(
+    node: &Node,
+    index: usize,
+    part: Partition,
+    appends: u64,
+    ledger: &RefCell<Ledger>,
+) {
+    let _ = node.log.release(part).await;
+    if node.log.claim(part, HANDOFF_TTL_TICKS).await.is_err() {
+        return;
+    }
+    let Some(epoch) = node.log.held(part) else {
+        return;
+    };
+    let scope = format!("handoff/{index}/p{}", part.0);
+    assert_eq!(node.log.partition(&scope), part, "a /p<n> scope lands on partition n");
+    let rows: Vec<Vec<(u64, String)>> = (0..appends)
+        .map(|seq| vec![(seq, format!("dh{index}.{}.{seq}#0:1", part.0))])
+        .collect();
+    let mut queued: Vec<_> = rows
+        .iter()
+        .map(|rows| node.log.append(&scope, rows))
+        .collect();
+    let mut answers: Vec<Option<Result<(), StoreError>>> = vec![None; rows.len()];
+    let mut release = Box::pin(node.log.release(part));
+    let mut released = None;
+    let mut admitted = false;
+    std::future::poll_fn(|context| {
+        if admitted
+            && released.is_none()
+            && let Poll::Ready(result) = release.as_mut().poll(context)
+        {
+            released = Some(result);
+        }
+        for (append, answer) in queued.iter_mut().zip(&mut answers) {
+            if answer.is_none()
+                && let Poll::Ready(result) = append.as_mut().poll(context)
+            {
+                *answer = Some(result);
+            }
+        }
+        admitted = true;
+        if released.is_some() && answers.iter().all(Option::is_some) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    let moved = node.log.store().fence_row(part).map(|row| row.epoch()) != Some(epoch);
+    let mut ledger = ledger.borrow_mut();
+    for (seq, answer) in answers.into_iter().flatten().enumerate() {
+        let step = |ack| Step {
+            id: format!("h{index}.{}.{seq}", part.0),
+            scope: scope.clone(),
+            rows: 1,
+            ack,
+            head: seq as u64,
+            node: index,
+        };
+        ledger.stats.appends += 1;
+        match answer {
+            Ok(()) => {
+                ledger.stats.acked += 1;
+                ledger.stats.drained += 1;
+                ledger.steps.push(step(Ack::Committed));
+            }
+            Err(StoreError::Fenced) if !moved => ledger.wrong.push(format!(
+                "node {index} drained partition {} at epoch {epoch} and refused append {seq}, queued before the release",
+                part.0
+            )),
+            Err(StoreError::Fenced) => ledger.stats.conflicts += 1,
+            Err(_) => {
+                ledger.stats.uncertain += 1;
+                ledger.steps.push(step(Ack::Uncertain));
+            }
+        }
+    }
+}
+
 async fn follow(node: &Node, index: usize, part: Partition, ledger: &RefCell<Ledger>) {
     let reader = format!("reader{index}");
     let mut after = node.log.store().cursor_of(part, &reader);
@@ -462,6 +550,19 @@ fn run(seed: u64, mutation: PlogMutation, stats: &mut PlogStats) -> Result<u64, 
         })
         .collect();
     let driven = drive(&mut rng, tasks, 2_000_000);
+    let handoffs: Vec<(usize, Partition, u64)> = (0..shape.nodes)
+        .flat_map(|index| (0..shape.parts).map(move |part| (index, Partition(part))))
+        .map(|(index, part)| {
+            let appends = rng.range(HANDOFF_APPENDS_MIN, HANDOFF_APPENDS_MAX + 1);
+            (index, part, appends)
+        })
+        .collect();
+    let planned: Vec<Task<'_>> = vec![Box::pin(async {
+        for (index, part, appends) in &handoffs {
+            handoff(&nodes[*index], *index, *part, *appends, &ledger).await;
+        }
+    })];
+    let handed = drive(&mut rng, planned, 2_000_000);
     let calm: Vec<Task<'_>> = (0..shape.nodes)
         .flat_map(|index| (0..shape.parts).map(move |part| (index, part)))
         .map(|(index, part)| -> Task<'_> {
@@ -471,6 +572,7 @@ fn run(seed: u64, mutation: PlogMutation, stats: &mut PlogStats) -> Result<u64, 
     let drained = drive(&mut rng, calm, 2_000_000);
     parted_sim::mutate(PlogMutation::None);
     driven?;
+    handed?;
     drained?;
     let mut ledger = ledger.into_inner();
     for (index, rung) in rungs.iter().enumerate() {

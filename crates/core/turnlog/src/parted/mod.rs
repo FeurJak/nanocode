@@ -480,6 +480,10 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         let now = (self.clock)();
         match self.held.read(|held| {
             held.get(&part)
+                .filter(|lease| {
+                    !(sim::mutated(sim::Mutation::DrainRefusesQueued)
+                        && matches!(lease, Lease::Draining(_)))
+                })
                 .and_then(|lease| lease.writable(now, self.bounds))
         }) {
             Some(Ok(epoch)) => Ok(Some(epoch)),
