@@ -11,5 +11,5 @@ crates/integrations/mpp/src/session.rs 1
 crates/runtime/subagents/src/runtime.rs 5
 crates/runtime/subagents/src/runtime/delivery.rs 1
 crates/runtime/subagents/src/runtime/lifecycle.rs 1
-crates/runtime/subagents/src/runtime/restore.rs 3
+crates/runtime/subagents/src/runtime/restore.rs 2
 crates/runtime/subagents/src/tools.rs 1

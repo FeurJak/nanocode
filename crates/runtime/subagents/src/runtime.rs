@@ -1138,6 +1138,8 @@ struct AgentScope {
     pins: HashMap<u64, usize>,
 
     recheck: BTreeSet<u64>,
+
+    thawing: BTreeSet<u64>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1281,7 +1283,7 @@ enum JournalRequest {
 #[derive(Default)]
 pub(super) struct ScopeLocks {
     pub(super) closing: Sequencer,
-    warming: Sequencer,
+    thawed: watch::Sender<u64>,
     pub(super) pending_checkpoints: AtomicUsize,
     evicting: Rerun,
 }
@@ -1306,6 +1308,29 @@ impl Drop for Warm {
                 registry.changed();
             }
         });
+    }
+}
+
+pub(super) struct Thawing {
+    state: StateMailbox,
+    root: String,
+    leaves: Vec<u64>,
+    thawed: watch::Sender<u64>,
+}
+
+impl Drop for Thawing {
+    fn drop(&mut self) {
+        let root = std::mem::take(&mut self.root);
+        let leaves = std::mem::take(&mut self.leaves);
+        self.state.send(move |state| {
+            if let Some(scope) = state.scopes.get_mut(&root) {
+                for leaf in &leaves {
+                    scope.thawing.remove(leaf);
+                }
+            }
+        });
+        self.thawed
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 }
 

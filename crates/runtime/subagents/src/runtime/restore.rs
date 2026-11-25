@@ -575,24 +575,67 @@ pub(super) fn thaw<'a>(
 ) -> RegistryFuture<'a, std::io::Result<()>> {
     Box::pin(async move {
         let locks = reg.scope_locks(root_session_id);
-        let _warming = locks.warming.enter().await;
-        let root = root_session_id.to_owned();
-        let wanted = leaves.to_vec();
-        let cold = reg
-            .state
-            .call(move |state| {
-                let Some(scope) = state.scopes.get(&root) else {
-                    return Vec::new();
+        loop {
+            let mut thawed = locks.thawed.subscribe();
+            let (cold, others) = claim_cold(reg, root_session_id, leaves).await;
+            if !cold.is_empty() {
+                let claim = Thawing {
+                    state: reg.state.clone(),
+                    root: root_session_id.to_owned(),
+                    leaves: cold.iter().map(|(leaf, _)| *leaf).collect(),
+                    thawed: locks.thawed.clone(),
                 };
-                wanted
-                    .iter()
-                    .filter_map(|leaf| Some((*leaf, Arc::clone(&scope.cold.get(leaf)?.key))))
-                    .collect::<Vec<_>>()
-            })
-            .await;
-        if cold.is_empty() {
-            return Ok(());
+                thaw_claimed(reg, root_session_id, store, cold).await?;
+                drop(claim);
+            } else if others {
+                thawed
+                    .changed()
+                    .await
+                    .expect("the scope's locks keep its thaw sender");
+            }
+            if !others {
+                return Ok(());
+            }
         }
+    })
+}
+
+async fn claim_cold(
+    reg: &Registry,
+    root_session_id: &str,
+    leaves: &[u64],
+) -> (Vec<(u64, Arc<str>)>, bool) {
+    let root = root_session_id.to_owned();
+    let wanted = leaves.to_vec();
+    reg.state
+        .call(move |state| {
+            let Some(scope) = state.scopes.get_mut(&root) else {
+                return (Vec::new(), false);
+            };
+            let mut others = false;
+            let mut cold = Vec::new();
+            for leaf in wanted {
+                let Some(key) = scope.cold.get(&leaf).map(|cold| Arc::clone(&cold.key)) else {
+                    continue;
+                };
+                if scope.thawing.insert(leaf) {
+                    cold.push((leaf, key));
+                } else {
+                    others = true;
+                }
+            }
+            (cold, others)
+        })
+        .await
+}
+
+fn thaw_claimed<'a>(
+    reg: &'a Registry,
+    root_session_id: &'a str,
+    store: &'a dyn SubagentStore,
+    cold: Vec<(u64, Arc<str>)>,
+) -> RegistryFuture<'a, std::io::Result<()>> {
+    Box::pin(async move {
         let thawed = cold.iter().map(|(leaf, _)| *leaf).collect::<Vec<_>>();
         let agents = durable::load_cold(store, root_session_id, cold).await?;
         let mut sessions = Vec::with_capacity(agents.len());
