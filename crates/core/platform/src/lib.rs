@@ -48,6 +48,11 @@ mod temporary;
 pub use temporary::{PersistError, TemporaryFile, TemporaryPath};
 
 #[cfg(not(target_family = "wasm"))]
+mod revisioned;
+#[cfg(not(target_family = "wasm"))]
+pub use revisioned::{Committed, Revision, Revisioned};
+
+#[cfg(not(target_family = "wasm"))]
 pub use std::time::Instant;
 pub use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
