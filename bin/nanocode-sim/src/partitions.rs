@@ -14,6 +14,7 @@ use crate::rng::{FNV_OFFSET, Rng, fnv};
 
 pub(crate) const TICK_MS: u64 = 100;
 pub(crate) const TTL_MS: u64 = 1_000;
+pub(crate) const GRACE_MS: u64 = LAND_TICKS_MAX * TICK_MS;
 const NODES_MIN: u64 = 3;
 const NODES_MAX: u64 = 10;
 const PARTITIONS_MIN: u64 = 1;
@@ -397,7 +398,7 @@ impl Store {
         Self {
             rows: partitions
                 .clone()
-                .map(|partition| (partition, Row::Free { epoch: 0 }))
+                .map(|partition| (partition, Row::unclaimed()))
                 .collect(),
             members: BTreeMap::new(),
             logs: partitions
@@ -433,11 +434,11 @@ impl Store {
         node: NodeId,
         now: u64,
         ttl: u64,
-        holder_live: bool,
+        grace: u64,
     ) -> Result<(Option<NodeId>, u64), Refused<NodeId>> {
         let row = &self.rows[&partition];
         let previous = row.holder().copied();
-        let (next, epoch) = row.claim(&node, now, ttl, holder_live)?;
+        let (next, epoch) = row.claim(&node, now, ttl, grace)?;
         self.rows.insert(partition, next);
         Ok((previous, epoch))
     }
@@ -461,7 +462,8 @@ impl Store {
         node: NodeId,
         epoch: u64,
     ) -> Result<(), Fenced> {
-        let next = self.rows[&partition].release(partition, &node, epoch)?;
+        let cursor = self.logs.get(&partition).map_or(0, Vec::len) as u64;
+        let next = self.rows[&partition].release(partition, &node, epoch, cursor)?;
         self.rows.insert(partition, next);
         Ok(())
     }
@@ -1071,7 +1073,15 @@ impl World {
             .iter()
             .map(|(partition, owned)| (*partition, owned.epoch))
             .collect();
-        let planned = plan(&id, self.count, &alive, &held, &self.store.rows, self.now);
+        let planned = plan(
+            &id,
+            self.count,
+            &alive,
+            &held,
+            &self.store.rows,
+            self.now,
+            GRACE_MS,
+        );
         let releasing: BTreeSet<Partition> = if leaving {
             held.keys().copied().collect()
         } else {
@@ -1089,7 +1099,7 @@ impl World {
         }
         if !leaving {
             for partition in planned.claim {
-                self.claim(at, partition, &alive)?;
+                self.claim(at, partition)?;
             }
         }
         let working: Vec<Partition> = self.nodes[at]
@@ -1144,23 +1154,17 @@ impl World {
         }
     }
 
-    fn claim(
-        &mut self,
-        at: usize,
-        partition: Partition,
-        alive: &BTreeSet<NodeId>,
-    ) -> Result<(), String> {
+    fn claim(&mut self, at: usize, partition: Partition) -> Result<(), String> {
         let id = self.nodes[at].id;
         let row = &self.store.rows[&partition];
         let before = row.epoch();
-        let holder_live = row.holder().is_some_and(|holder| alive.contains(holder));
         let expires_at = match row {
             Row::Held { expires_at, .. } => *expires_at,
-            Row::Free { .. } => self.now,
+            Row::Released { .. } => self.now,
         };
         let Ok((previous, epoch)) = self
             .store
-            .claim(partition, id, self.now, TTL_MS, holder_live)
+            .claim(partition, id, self.now, TTL_MS, GRACE_MS)
         else {
             return Ok(());
         };

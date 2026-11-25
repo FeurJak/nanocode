@@ -315,11 +315,12 @@ fn compacting(
 
 fn fence_parts(row: &Row<String>) -> [String; 3] {
     match row {
-        Row::Free { epoch } => [epoch.to_string(), String::new(), "0".to_owned()],
+        Row::Released { epoch, .. } => [epoch.to_string(), String::new(), "0".to_owned()],
         Row::Held {
             holder,
             epoch,
             expires_at,
+            ..
         } => [epoch.to_string(), holder.clone(), expires_at.to_string()],
     }
 }
@@ -640,12 +641,13 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
             let epoch = number(&cells, 0)?;
             let holder = cell(&cells, 1)?;
             Ok(if holder.is_empty() {
-                Row::Free { epoch }
+                Row::Released { epoch, cursor: 0 }
             } else {
                 Row::Held {
                     holder: holder.to_owned(),
                     epoch,
                     expires_at: number(&cells, 2)?,
+                    cursor: 0,
                 }
             })
         })

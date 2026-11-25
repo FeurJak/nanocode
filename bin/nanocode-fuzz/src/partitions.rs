@@ -9,8 +9,9 @@ const NODES: [&str; 5] = ["n0", "n1", "n2", "n3", "n4"];
 
 fn rows(rng: &mut Rng) -> Checked {
     let partition = Partition(u32::try_from(rng.below(64)).expect("a small partition fits"));
-    let mut row: Row<String> = Row::Free {
+    let mut row: Row<String> = Row::Released {
         epoch: rng.below(8),
+        cursor: rng.below(8),
     };
     let mut issued: Vec<(String, u64)> = Vec::new();
     let mut now = rng.below(1_000);
@@ -26,9 +27,9 @@ fn rows(rng: &mut Rng) -> Checked {
         let before = row.clone();
         match rng.below(4) {
             0 => {
-                let live = rng.chance(1, 2);
-                let claimable = row.claimable(&node, now, live);
-                match row.claim(&node, now, ttl, live) {
+                let grace = rng.below(50);
+                let claimable = row.claimable(&node, now, grace);
+                match row.claim(&node, now, ttl, grace) {
                     Ok((next, raised)) => {
                         ensure!(
                             claimable,
@@ -72,7 +73,8 @@ fn rows(rng: &mut Rng) -> Checked {
                                 == Row::Held {
                                     holder,
                                     epoch,
-                                    expires_at
+                                    expires_at,
+                                    cursor: before.cursor(),
                                 },
                             "refusal misreports {before:?}"
                         );
@@ -89,7 +91,8 @@ fn rows(rng: &mut Rng) -> Checked {
                         next == Row::Held {
                             holder: node,
                             epoch,
-                            expires_at: now.saturating_add(ttl)
+                            expires_at: now.saturating_add(ttl),
+                            cursor: before.cursor(),
                         },
                         "renew gave {next:?}"
                     );
@@ -108,13 +111,18 @@ fn rows(rng: &mut Rng) -> Checked {
                     );
                 }
             },
-            2 => match row.release(partition, &node, epoch) {
+            2 => match row.release(partition, &node, epoch, before.cursor() + rng.below(4)) {
                 Ok(next) => {
                     ensure!(
                         before.holder() == Some(&node) && before.epoch() == epoch,
                         "release by non-holder {node}@{epoch} admitted on {before:?}"
                     );
-                    ensure!(next == Row::Free { epoch }, "release gave {next:?}");
+                    ensure!(
+                        next.holder().is_none()
+                            && next.epoch() == epoch
+                            && next.cursor() >= before.cursor(),
+                        "release gave {next:?}"
+                    );
                     row = next;
                 }
                 Err(fenced) => {
@@ -153,7 +161,7 @@ fn rows(rng: &mut Rng) -> Checked {
                 );
             }
         }
-        if let Row::Free { .. } = row {
+        if let Row::Released { .. } = row {
             ensure!(
                 issued.iter().all(|(_, old)| row
                     .fence(Token {

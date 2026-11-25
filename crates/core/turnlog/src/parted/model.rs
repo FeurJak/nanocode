@@ -63,7 +63,7 @@ impl Model {
         let held = match (fence, epoch) {
             (_, None) => true,
             (Row::Held { epoch: current, .. }, Some(epoch)) => *current == epoch,
-            (Row::Free { .. }, Some(_)) => false,
+            (Row::Released { .. }, Some(_)) => false,
         };
         if held || mutated(Mutation::Unfenced) {
             Ok(fence.epoch())
@@ -219,7 +219,7 @@ impl PartStore for ModelParts {
                     model
                         .fences
                         .entry(Partition(part))
-                        .or_insert(Row::Free { epoch: 0 });
+                        .or_insert(Row::unclaimed());
                 }
             });
             Ok(())

@@ -374,12 +374,12 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         part: Partition,
         now_ms: u64,
         ttl_ms: u64,
-        holder_live: bool,
+        _holder_live: bool,
     ) -> Result<u64, StoreError> {
         let node = self.node()?;
         let row = self.store.fence(part).await?;
         let (next, epoch) = row
-            .claim(&node, now_ms, ttl_ms, holder_live)
+            .claim(&node, now_ms, ttl_ms, 0)
             .map_err(|_| StoreError::Fenced)?;
         if !self.store.swap_fence(part, &row, &next).await? {
             return Err(StoreError::Fenced);
@@ -413,7 +413,7 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         };
         self.drain(part).await;
         let row = self.store.fence(part).await?;
-        let released = match row.release(part, &node, epoch) {
+        let released = match row.release(part, &node, epoch, row.cursor()) {
             Ok(next) => self.store.swap_fence(part, &row, &next).await?,
             Err(_) => false,
         };

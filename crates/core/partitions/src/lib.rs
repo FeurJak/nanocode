@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
+pub mod lease;
 pub mod sim;
 
 use sim::{Mutation, mutated};
@@ -35,13 +36,15 @@ pub enum Refused<N> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Row<N> {
-    Free {
+    Released {
         epoch: u64,
+        cursor: u64,
     },
     Held {
         holder: N,
         epoch: u64,
         expires_at: u64,
+        cursor: u64,
     },
 }
 
@@ -122,27 +125,52 @@ pub fn live<N: Ord + Clone>(members: &[Member<N>], now: u64, ttl: u64) -> BTreeS
 
 impl<N: Clone + Eq> Row<N> {
     #[must_use]
+    pub const fn unclaimed() -> Self {
+        Self::Released {
+            epoch: 0,
+            cursor: 0,
+        }
+    }
+
+    #[must_use]
     pub const fn epoch(&self) -> u64 {
         match self {
-            Self::Free { epoch } | Self::Held { epoch, .. } => *epoch,
+            Self::Released { epoch, .. } | Self::Held { epoch, .. } => *epoch,
+        }
+    }
+
+    #[must_use]
+    pub const fn cursor(&self) -> u64 {
+        match self {
+            Self::Released { cursor, .. } | Self::Held { cursor, .. } => *cursor,
         }
     }
 
     #[must_use]
     pub const fn holder(&self) -> Option<&N> {
         match self {
-            Self::Free { .. } => None,
+            Self::Released { .. } => None,
             Self::Held { holder, .. } => Some(holder),
         }
     }
 
     #[must_use]
-    pub fn claimable(&self, node: &N, now: u64, holder_live: bool) -> bool {
+    pub fn claimable(&self, node: &N, now: u64, grace: u64) -> bool {
+        if mutated(Mutation::ClaimStealsLive) {
+            return true;
+        }
         match self {
-            Self::Free { .. } => true,
+            Self::Released { .. } => true,
             Self::Held {
                 holder, expires_at, ..
-            } => holder == node || *expires_at <= now || !holder_live,
+            } => {
+                let lapsed = if mutated(Mutation::ClaimSkipsGrace) {
+                    *expires_at < now
+                } else {
+                    expires_at.saturating_add(grace) < now
+                };
+                holder == node || lapsed
+            }
         }
     }
 
@@ -151,14 +179,15 @@ impl<N: Clone + Eq> Row<N> {
         node: &N,
         now: u64,
         ttl: u64,
-        holder_live: bool,
+        grace: u64,
     ) -> Result<(Self, u64), Refused<N>> {
         if let Self::Held {
             holder,
             epoch,
             expires_at,
+            ..
         } = self
-            && !self.claimable(node, now, holder_live)
+            && !self.claimable(node, now, grace)
         {
             return Err(Refused::Held {
                 holder: holder.clone(),
@@ -176,6 +205,7 @@ impl<N: Clone + Eq> Row<N> {
                 holder: node.clone(),
                 epoch: raised,
                 expires_at: now.saturating_add(ttl),
+                cursor: self.cursor(),
             },
             raised,
         ))
@@ -193,12 +223,16 @@ impl<N: Clone + Eq> Row<N> {
             Self::Held {
                 holder,
                 epoch: current,
+                cursor,
                 ..
-            } if holder == node && *current == epoch => Ok(Self::Held {
-                holder: node.clone(),
-                epoch,
-                expires_at: now.saturating_add(ttl),
-            }),
+            } if holder == node && (*current == epoch || mutated(Mutation::RenewIgnoresEpoch)) => {
+                Ok(Self::Held {
+                    holder: node.clone(),
+                    epoch: *current,
+                    expires_at: now.saturating_add(ttl),
+                    cursor: *cursor,
+                })
+            }
             _ => Err(Fenced {
                 partition,
                 held: epoch,
@@ -207,13 +241,27 @@ impl<N: Clone + Eq> Row<N> {
         }
     }
 
-    pub fn release(&self, partition: Partition, node: &N, epoch: u64) -> Result<Self, Fenced> {
+    pub fn release(
+        &self,
+        partition: Partition,
+        node: &N,
+        epoch: u64,
+        cursor: u64,
+    ) -> Result<Self, Fenced> {
         match self {
             Self::Held {
                 holder,
                 epoch: current,
+                cursor: before,
                 ..
-            } if holder == node && *current == epoch => Ok(Self::Free { epoch }),
+            } if holder == node && *current == epoch => Ok(Self::Released {
+                epoch,
+                cursor: if mutated(Mutation::ReleaseDropsCursor) {
+                    *before
+                } else {
+                    cursor
+                },
+            }),
             _ => Err(Fenced {
                 partition,
                 held: epoch,
@@ -225,7 +273,7 @@ impl<N: Clone + Eq> Row<N> {
     pub fn fence(&self, token: Token) -> Result<(), Fenced> {
         let admitted = match self {
             Self::Held { epoch, .. } => *epoch == token.epoch,
-            Self::Free { .. } => false,
+            Self::Released { .. } => false,
         };
         if admitted || mutated(Mutation::Unfenced) {
             return Ok(());
@@ -246,6 +294,7 @@ pub fn plan<N: AsRef<[u8]> + Ord + Clone>(
     held: &BTreeMap<Partition, u64>,
     rows: &BTreeMap<Partition, Row<N>>,
     now: u64,
+    grace: u64,
 ) -> Plan {
     let mut plan = Plan::default();
     for partition in (0..count.get()).map(Partition) {
@@ -253,11 +302,10 @@ pub fn plan<N: AsRef<[u8]> + Ord + Clone>(
         match (mine, held.get(&partition)) {
             (true, None) => {
                 let claimable = rows.get(&partition).is_none_or(|row| {
-                    let holder_live = row.holder().is_some_and(|holder| live.contains(holder));
                     if mutated(Mutation::WaitsForFree) {
                         return row.holder().is_none();
                     }
-                    row.claimable(me, now, holder_live)
+                    row.claimable(me, now, grace)
                 });
                 if claimable {
                     plan.claim.push(partition);

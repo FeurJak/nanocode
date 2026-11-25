@@ -9,6 +9,10 @@ pub enum Mutation {
     WaitsForFree,
     KeepsMoved,
     AssignByIndex,
+    ClaimStealsLive,
+    ClaimSkipsGrace,
+    RenewIgnoresEpoch,
+    ReleaseDropsCursor,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

@@ -150,9 +150,9 @@ impl World {
         let partition = u32::try_from(index).map_err(|error| error.to_string())?;
         let node = rng.word(&NODES);
         let ttl = rng.range(1, 2_000);
-        let live = rng.chance(1, 2);
+        let grace = rng.below(ttl);
         let current = self.leases[index].epoch();
-        let Ok((row, epoch)) = self.leases[index].claim(&node, self.now, ttl, live) else {
+        let Ok((row, epoch)) = self.leases[index].claim(&node, self.now, ttl, grace) else {
             // The lease is held: an epoch at or below the fence must bounce.
             let stale = rng.below(current + 1);
             let (_, verdict) = self.write(
@@ -544,7 +544,7 @@ pub fn check(rng: &mut Rng) -> Checked {
     let mut world = World {
         count,
         folds: (0..count.get()).map(|_| Fold::default()).collect(),
-        leases: (0..count.get()).map(|_| Row::Free { epoch: 0 }).collect(),
+        leases: (0..count.get()).map(|_| Row::unclaimed()).collect(),
         now: rng.below(1_000),
         minted: 0,
         cap,

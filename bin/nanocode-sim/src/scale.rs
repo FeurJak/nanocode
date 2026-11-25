@@ -5,10 +5,10 @@ use std::{
     process::ExitCode,
 };
 
-use nanocode_partitions::{Partition, Token, assignment, plan};
+use nanocode_partitions::{Partition, Row, Token, assignment, plan};
 
 use crate::{
-    partitions::{NodeId, Record, Store, TICK_MS, TTL_MS, thread_partition},
+    partitions::{GRACE_MS, NodeId, Record, Store, TICK_MS, TTL_MS, thread_partition},
     rng::{FNV_OFFSET, PPM, Rng, fnv},
 };
 
@@ -465,6 +465,7 @@ impl World {
             &self.nodes[at].held,
             &self.store.rows,
             now_ms,
+            GRACE_MS,
         );
         if self.mutation == ScaleMutation::DoubleClaim {
             steps.claim = assignment(self.count, &live)
@@ -491,12 +492,21 @@ impl World {
                 .retain(|(_, agent)| agents[*agent as usize].partition != token.partition);
         }
         for partition in steps.claim {
-            let holder_live = self.mutation != ScaleMutation::DoubleClaim
-                && self.store.rows[&partition]
-                    .holder()
-                    .is_some_and(|holder| live.contains(holder));
-            let Ok((_, epoch)) = self.store.claim(partition, id, now_ms, TTL_MS, holder_live)
-            else {
+            let claimed = if self.mutation == ScaleMutation::DoubleClaim {
+                let row = &self.store.rows[&partition];
+                let epoch = row.epoch() + 1;
+                let stolen = Row::Held {
+                    holder: id,
+                    epoch,
+                    expires_at: now_ms + TTL_MS,
+                    cursor: row.cursor(),
+                };
+                self.store.rows.insert(partition, stolen);
+                Ok((None, epoch))
+            } else {
+                self.store.claim(partition, id, now_ms, TTL_MS, GRACE_MS)
+            };
+            let Ok((_, epoch)) = claimed else {
                 continue;
             };
             self.claims += 1;
@@ -701,6 +711,7 @@ impl World {
                     &node.held,
                     &self.store.rows,
                     now_ms,
+                    GRACE_MS,
                 )
                 .release
                 .is_empty()
