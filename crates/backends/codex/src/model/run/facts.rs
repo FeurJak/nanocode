@@ -45,44 +45,48 @@ struct Synced {
     ready: bool,
 }
 
-pub(super) struct FactRequest<'a> {
+pub(super) struct FactRequest {
     pub(super) template: serde_json::Map<String, Value>,
     pub(super) tool_output_tokens: usize,
-    pub(super) prefix: &'a [ResponseItem],
-    pub(super) sent: &'a [&'a ResponseItem],
+    pub(super) prefix: Arc<[ResponseItem]>,
+    pub(super) sent: ResponseHistory,
 }
 
-pub(super) async fn sync_facts(facts: &CodexFacts, request: FactRequest<'_>) -> Result<()> {
+pub(super) async fn sync_facts(facts: &CodexFacts, request: FactRequest) -> Result<()> {
     let FactRequest {
         template,
         tool_output_tokens,
         prefix,
         sent,
     } = request;
-    let synced = facts
-        .read(|fold| {
+    let (synced, template, prefix, sent) = facts
+        .read(move |fold| {
+            let items = sent.iter().collect::<Vec<_>>();
             let history = fold.history();
             let from = history
                 .iter()
-                .zip(sent)
+                .zip(&items)
                 .take_while(|(left, right)| same(left, right))
                 .count();
             let kept = history[from..]
                 .iter()
                 .rev()
-                .zip(sent[from..].iter().rev())
+                .zip(items[from..].iter().rev())
                 .take_while(|(left, right)| same(left, right))
                 .count();
-            Synced {
+            let synced = Synced {
                 template: fold.template() != Some((&template, tool_output_tokens)),
-                prefix: !same_all(fold.prefix(), prefix),
+                prefix: !same_all(fold.prefix(), &prefix),
                 from,
                 to: history.len(),
                 kept,
                 ready: fold.ready(),
-            }
+            };
+            drop(items);
+            (synced, template, prefix, sent)
         })
         .await?;
+    let sent = sent.iter().collect::<Vec<_>>();
     if synced.template {
         let decision = CodexDecision::Template {
             request: raw(&template)?,
@@ -125,7 +129,10 @@ pub(super) async fn fact_model(
 ) -> Result<()> {
     if replayed
         && facts
-            .read(|fold| fold.previous_response_id() == Some(id))
+            .read({
+                let id = id.to_owned();
+                move |fold| fold.previous_response_id() == Some(id.as_str())
+            })
             .await?
     {
         return Ok(());
@@ -141,9 +148,10 @@ pub(super) async fn fact_intent(steps: &ExecutionSteps, call_id: &str, tool: &st
     let Some(facts) = steps.facts() else {
         return Ok(());
     };
+    let id = call_id.to_owned();
     let open = facts
-        .read(|fold| {
-            fold.open_call(call_id)
+        .read(move |fold| {
+            fold.open_call(&id)
                 .filter(|call| !call.intended)
                 .map(|call| call.block)
         })
@@ -169,9 +177,10 @@ pub(super) async fn fact_result(
     let Some(facts) = steps.facts() else {
         return Ok(());
     };
+    let id = completed.call_id.clone();
     let open = facts
-        .read(|fold| {
-            fold.open_call(&completed.call_id)
+        .read(move |fold| {
+            fold.open_call(&id)
                 .is_some_and(|call| call.intended && !call.output)
         })
         .await?;
@@ -200,7 +209,10 @@ pub(super) async fn settled_output(
         return Ok(None);
     };
     facts
-        .read(|fold| fold.settled_output(call_id).cloned())
+        .read({
+            let id = call_id.to_owned();
+            move |fold| fold.settled_output(&id).cloned()
+        })
         .await
 }
 
@@ -213,7 +225,7 @@ pub(super) async fn settled_aborts(
         return Ok(HashMap::new());
     };
     let intended = facts
-        .read(|fold| {
+        .read(move |fold| {
             open.into_iter()
                 .filter(|id| {
                     fold.open_call(id)
@@ -234,20 +246,20 @@ pub(super) async fn settled_aborts(
                 .map_err(NanocodeError::InvalidExecutionPolicy)?
                 .is_some()
             {
-                abandoned.push(id.as_str());
+                abandoned.push(id.clone());
             }
         }
     }
     facts.refresh().await?;
     let settled = facts
-        .read(|fold| {
+        .read(move |fold| {
             intended
                 .iter()
                 .filter_map(|id| Some((id.clone(), fold.settled_output(id).cloned()?)))
                 .collect::<HashMap<_, _>>()
         })
         .await?;
-    if abandoned.iter().any(|id| !settled.contains_key(*id)) {
+    if abandoned.iter().any(|id| !settled.contains_key(id)) {
         return Err(NanocodeError::InvalidExecutionPolicy(
             "a Codex call the runtime abandoned has no result in its fact log".into(),
         ));

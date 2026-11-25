@@ -34,6 +34,8 @@ pub use agent::{
 };
 
 pub mod durability;
+#[doc(hidden)]
+pub mod sim;
 
 pub mod execution;
 

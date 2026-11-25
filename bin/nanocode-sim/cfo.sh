@@ -448,6 +448,7 @@ default_table='
 1 canary_backend_facts_result_without_intent canary:20 --scenario backend_facts --mutation result_without_intent
 1 canary_backend_facts_media_unrendered canary:20 --scenario backend_facts --mutation media_unrendered
 1 canary_backend_facts_undecided_notice canary:20 --scenario backend_facts --mutation undecided_notice
+1 canary_backend_facts_abandoned_commit_poisons canary:20 --scenario backend_facts --mutation abandoned_commit_poisons
 8 secrets pass --scenario secrets
 2 secrets_twice pass --scenario secrets --twice
 1 canary_secrets_paths_ignored canary:20 --scenario secrets --mutation paths_ignored

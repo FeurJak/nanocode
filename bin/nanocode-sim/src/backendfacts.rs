@@ -24,6 +24,8 @@ use serde_json::{
 
 use crate::rng::{FNV_OFFSET, Rng, fnv};
 
+mod abandoned;
+
 const SCOPE: &str = "backend-facts";
 const LEGACY_STATE: &str = "session";
 const OPS_MIN: u64 = 20;
@@ -48,13 +50,15 @@ pub enum BackendFactsMutation {
     ResultWithoutIntent,
     MediaUnrendered,
     UndecidedNotice,
+    AbandonedCommitPoisons,
 }
 
 impl BackendFactsMutation {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::ResultWithoutIntent,
         Self::MediaUnrendered,
         Self::UndecidedNotice,
+        Self::AbandonedCommitPoisons,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -63,6 +67,7 @@ impl BackendFactsMutation {
             Self::ResultWithoutIntent => "result_without_intent",
             Self::MediaUnrendered => "media_unrendered",
             Self::UndecidedNotice => "undecided_notice",
+            Self::AbandonedCommitPoisons => "abandoned_commit_poisons",
         }
     }
 
@@ -806,18 +811,38 @@ impl<F: Family> World<F> {
     }
 }
 
+fn owned_mutation(mutation: BackendFactsMutation) {
+    let (claude, codex) = if mutation == BackendFactsMutation::AbandonedCommitPoisons {
+        (
+            nanocode::claude::sim::Mutation::AbandonedCommitPoisons,
+            nanocode_backend_codex::sim::Mutation::AbandonedCommitPoisons,
+        )
+    } else {
+        (
+            nanocode::claude::sim::Mutation::None,
+            nanocode_backend_codex::sim::Mutation::None,
+        )
+    };
+    nanocode::claude::sim::mutate(claude);
+    nanocode_backend_codex::sim::mutate(codex);
+}
+
 fn run_seed(seed: u64, mutation: BackendFactsMutation) -> Result<u64, String> {
     MUTATION.store(mutation as u8, Ordering::SeqCst);
+    owned_mutation(mutation);
     let claude = mutation == BackendFactsMutation::MediaUnrendered
         || Rng::derive(seed, SCOPE).chance(CLAUDE_PPM);
     let outcome = std::panic::catch_unwind(|| {
-        if claude {
+        let digest = if claude {
             World::<ClaudeFold>::run(seed)
         } else {
             World::<CodexFold>::run(seed)
-        }
+        }?;
+        let owned = abandoned::run(seed, claude)?;
+        Ok(fnv(digest, &owned.to_le_bytes()))
     });
     MUTATION.store(BackendFactsMutation::None as u8, Ordering::SeqCst);
+    owned_mutation(BackendFactsMutation::None);
     outcome.unwrap_or_else(|panic| {
         Err(format!(
             "panic: {}",

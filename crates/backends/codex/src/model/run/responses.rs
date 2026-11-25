@@ -140,14 +140,13 @@ impl ModelRun {
             let mut template = serde_json::Map::new();
             template.insert("model".into(), Value::from(model.as_str()));
             template.insert("service_tier".into(), Value::from(service_tier.as_str()));
-            let items = sent.full().iter().collect::<Vec<_>>();
             super::facts::sync_facts(
                 facts,
                 super::facts::FactRequest {
                     template,
                     tool_output_tokens: history_tokens,
-                    prefix: factory.profile().prefix(),
-                    sent: &items,
+                    prefix: factory.profile().shared_prefix(),
+                    sent: sent.full().clone(),
                 },
             )
             .await?;

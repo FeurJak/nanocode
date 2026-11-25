@@ -1,5 +1,5 @@
 use super::*;
-use crate::durability::{ClaudeDecision, ClaudeFacts};
+use crate::durability::{ClaudeDecision, ClaudeFacts, ClaudeFold};
 use nanocode_durability::facts::{
     Decision, EffectResult, Fact, Intent, IntentTarget, ModelOut, OwnedFact,
 };
@@ -45,6 +45,11 @@ fn common_suffix(left: &[Message], right: &[Message]) -> usize {
         .count()
 }
 
+fn result_of(id: &str) -> impl FnOnce(&ClaudeFold) -> Option<ContentBlock> + Send + 'static {
+    let id = id.to_owned();
+    move |fold| fold.result(&id).cloned()
+}
+
 impl State {
     pub(super) fn facts(&self) -> Option<&ClaudeFacts> {
         self.policy.as_deref()?.facts()
@@ -68,12 +73,19 @@ impl State {
         let template = folded_template(template);
         let (container, previous_message_id) = carried;
         let diagnosed = template.diagnostics.is_some();
-        let (stale, uncarried) = facts
-            .read(|fold| {
+        let carried = (
+            container.map(str::to_owned),
+            previous_message_id.map(str::to_owned),
+        );
+        let (stale, uncarried, template) = facts
+            .read(move |fold| {
+                let (container, previous_message_id) = carried;
                 (
                     fold.template() != Some((&template, tokens)),
-                    fold.container() != container
-                        || (diagnosed && fold.previous_message_id() != previous_message_id),
+                    fold.container() != container.as_deref()
+                        || (diagnosed
+                            && fold.previous_message_id() != previous_message_id.as_deref()),
+                    template,
                 )
             })
             .await?;
@@ -96,7 +108,7 @@ impl State {
             .iter()
             .map(HistoryMessage::wire)
             .collect::<Vec<_>>();
-        let synced = facts.take_synced();
+        let synced = facts.take_synced().await?;
         let known = synced
             .iter()
             .zip(&wires)
@@ -106,9 +118,8 @@ impl State {
             .iter()
             .map(|message| message.clone().into_message())
             .collect::<Vec<_>>();
-        self.splice_facts(facts, known, &live).await?;
-        facts.put_synced(wires);
-        Ok(())
+        self.splice_facts(facts, known, live).await?;
+        facts.put_synced(wires).await
     }
 
     async fn render_facts(&self, facts: &ClaudeFacts, messages: &[HistoryMessage]) -> Result<()> {
@@ -135,24 +146,28 @@ impl State {
         &self,
         facts: &ClaudeFacts,
         known: usize,
-        live: &[Message],
+        live: Vec<Message>,
     ) -> Result<()> {
-        let (prefix, suffix, folded, open) = facts
-            .read(|fold| {
+        let (prefix, suffix, folded, open, mut live) = facts
+            .read(move |fold| {
                 let folded = fold.messages().get(known..).unwrap_or_default();
-                let prefix = common_prefix(folded, live);
+                let prefix = common_prefix(folded, &live);
                 let suffix = common_suffix(&folded[prefix..], &live[prefix..]);
-                (prefix, suffix, folded.len(), !fold.unrendered().is_empty())
+                let open = !fold.unrendered().is_empty();
+                (prefix, suffix, folded.len(), open, live)
             })
             .await?;
         if prefix == folded && !open {
-            for message in &live[prefix..] {
-                let queued = facts
-                    .read(|fold| fold.queued().position(|queued| queued == message))
+            for message in live.into_iter().skip(prefix) {
+                let (queued, message) = facts
+                    .read(move |fold| {
+                        let queued = fold.queued().position(|queued| *queued == message);
+                        (queued, message)
+                    })
                     .await?;
                 let decision = match queued.map(u32::try_from).transpose() {
                     Ok(Some(input)) => ClaudeDecision::Admitted { input },
-                    Ok(None) => ClaudeDecision::Message(message.clone()),
+                    Ok(None) => ClaudeDecision::Message(message),
                     Err(_) => return Err(provider_error("queued inputs outgrow u32")),
                 };
                 facts.commit(decided(decision)).await?;
@@ -165,7 +180,10 @@ impl State {
         let decision = ClaudeDecision::Splice {
             from: index(prefix)?,
             to: index(folded - suffix)?,
-            messages: live[prefix..live.len() - suffix].to_vec(),
+            messages: {
+                live.truncate(live.len() - suffix);
+                live.split_off(prefix)
+            },
         };
         facts.commit(decided(decision)).await.map(drop)
     }
@@ -181,7 +199,10 @@ impl State {
         };
         if replayed
             && facts
-                .read(|fold| fold.previous_message_id() == Some(response.id.as_str()))
+                .read({
+                    let id = response.id.clone();
+                    move |fold| fold.previous_message_id() == Some(id.as_str())
+                })
                 .await?
         {
             return Ok(());
@@ -219,13 +240,16 @@ impl State {
             return Ok(None);
         };
         let open = facts
-            .read(|fold| {
-                fold.open_call(id)
-                    .is_some_and(|call| call.intended && !call.output)
+            .read({
+                let id = id.to_owned();
+                move |fold| {
+                    fold.open_call(&id)
+                        .is_some_and(|call| call.intended && !call.output)
+                }
             })
             .await?;
         if !open {
-            return facts.read(|fold| fold.result(id).cloned()).await;
+            return facts.read(result_of(id)).await;
         }
         let settled = match &self.abandon {
             Some(abandon) => abandon(id.to_owned())
@@ -235,7 +259,7 @@ impl State {
             None => false,
         };
         facts.refresh().await?;
-        let result = facts.read(|fold| fold.result(id).cloned()).await?;
+        let result = facts.read(result_of(id)).await?;
         if settled && result.is_none() {
             return Err(durable::recovery_error(
                 "a Claude call the runtime abandoned has no result in its fact log",
@@ -248,7 +272,7 @@ impl State {
         let Some(facts) = self.facts() else {
             return Ok(None);
         };
-        facts.read(|fold| fold.result(id).cloned()).await
+        facts.read(result_of(id)).await
     }
 
     pub(super) async fn fact_intent(&self, turn: Option<&str>, id: &str) -> Result<()> {
@@ -256,10 +280,13 @@ impl State {
             return Ok(());
         };
         let open = facts
-            .read(|fold| {
-                fold.open_call(id)
-                    .filter(|call| !call.intended)
-                    .map(|call| (call.block, call.name.to_owned()))
+            .read({
+                let id = id.to_owned();
+                move |fold| {
+                    fold.open_call(&id)
+                        .filter(|call| !call.intended)
+                        .map(|call| (call.block, call.name.to_owned()))
+                }
             })
             .await?;
         let Some((block, tool)) = open else {
@@ -287,9 +314,12 @@ impl State {
             return Ok(());
         };
         let open = facts
-            .read(|fold| {
-                fold.open_call(id)
-                    .is_some_and(|call| call.intended && !call.output)
+            .read({
+                let id = id.to_owned();
+                move |fold| {
+                    fold.open_call(&id)
+                        .is_some_and(|call| call.intended && !call.output)
+                }
             })
             .await?;
         if !open {

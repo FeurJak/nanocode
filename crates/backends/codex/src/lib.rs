@@ -28,6 +28,9 @@ pub mod execution {
 
 pub mod session;
 
+#[doc(hidden)]
+pub mod sim;
+
 pub mod usage;
 
 #[doc(hidden)]
