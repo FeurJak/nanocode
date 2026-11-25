@@ -33,6 +33,7 @@ mod gitremote;
 mod handauto;
 mod handrouter;
 mod hands;
+mod heldawait;
 mod holds;
 mod host;
 mod httpd;
@@ -111,6 +112,7 @@ use crate::{
     httpserver::{HttpServerMutation, HttpServerStats},
     imports::{ImportsMutation, ImportsStats},
     inboxstress::InboxStressStats,
+    heldawait::{HeldAwaitMutation, HeldAwaitStats},
     interpdrop::{InterpDropMutation, InterpDropStats},
     lease::{LeaseMutation, LeaseStats},
     live::{LiveMutation, LiveStats},
@@ -199,6 +201,7 @@ enum Scenario {
     NestedMeta,
     GcUnwind,
     InterpDrop,
+    HeldAwait,
     Holds,
     OneLogFacts,
 }
@@ -260,6 +263,7 @@ struct Args {
     nested_meta: NestedMetaMutation,
     gc_unwind: GcUnwindMutation,
     interp_drop: InterpDropMutation,
+    held_await: HeldAwaitMutation,
     holds: HoldsMutation,
     one_log_facts: OneLogFactsMutation,
     #[cfg(unix)]
@@ -276,7 +280,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|lease|durable|scale|gc_unwind|interp_drop|holds|one_log_facts] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|lease|durable|scale|gc_unwind|interp_drop|held_await|holds|one_log_facts] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -317,6 +321,7 @@ fn usage() -> ExitCode {
        nested_meta: [--mutation {}]
        gc_unwind: [--mutation {}]
        interp_drop: [--mutation {}]
+       held_await: [--mutation {}]
        holds: [--mutation {}]
        one_log_facts: [--mutation {}]",
         Mutation::names(),
@@ -361,6 +366,7 @@ fn usage() -> ExitCode {
         NestedMetaMutation::names(),
         GcUnwindMutation::names(),
         InterpDropMutation::names(),
+        HeldAwaitMutation::names(),
         HoldsMutation::names(),
         OneLogFactsMutation::names()
     );
@@ -451,6 +457,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut nested_meta = NestedMetaMutation::None;
     let mut gc_unwind = GcUnwindMutation::None;
     let mut interp_drop = InterpDropMutation::None;
+    let mut held_await = HeldAwaitMutation::None;
     let mut holds = HoldsMutation::None;
     let mut one_log_facts = OneLogFactsMutation::None;
     #[cfg(unix)]
@@ -557,6 +564,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "nested_meta" => Scenario::NestedMeta,
                     "gc_unwind" => Scenario::GcUnwind,
                     "interp_drop" => Scenario::InterpDrop,
+                    "held_await" => Scenario::HeldAwait,
                     "holds" => Scenario::Holds,
                     "one_log_facts" => Scenario::OneLogFacts,
                     #[cfg(unix)]
@@ -645,6 +653,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::NestedMeta, Some(name)) => nested_meta = NestedMetaMutation::parse(name)?,
         (Scenario::GcUnwind, Some(name)) => gc_unwind = GcUnwindMutation::parse(name)?,
         (Scenario::InterpDrop, Some(name)) => interp_drop = InterpDropMutation::parse(name)?,
+        (Scenario::HeldAwait, Some(name)) => held_await = HeldAwaitMutation::parse(name)?,
         (Scenario::Holds, Some(name)) => holds = HoldsMutation::parse(name)?,
         (Scenario::OneLogFacts, Some(name)) => {
             one_log_facts = OneLogFactsMutation::parse(name)?;
@@ -730,6 +739,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         nested_meta,
         gc_unwind,
         interp_drop,
+        held_await,
         holds,
         one_log_facts,
         #[cfg(unix)]
@@ -878,6 +888,9 @@ fn scenario_replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::InterpDrop {
         return interpdrop::replay(seed, args.interp_drop);
+    }
+    if args.scenario == Scenario::HeldAwait {
+        return heldawait::replay(seed, args.held_await);
     }
     if args.scenario == Scenario::Holds {
         return holds::replay(seed, args.holds);
@@ -1271,6 +1284,7 @@ fn mutations() -> ExitCode {
     add("nested_meta", NestedMetaMutation::names());
     add("gc_unwind", GcUnwindMutation::names());
     add("interp_drop", InterpDropMutation::names());
+    add("held_await", HeldAwaitMutation::names());
     add("holds", HoldsMutation::names());
     add("one_log_facts", OneLogFactsMutation::names());
     #[cfg(unix)]
@@ -1353,6 +1367,7 @@ struct Totals {
     nested_meta_totals: NestedMetaStats,
     gc_unwind_totals: GcUnwindStats,
     interp_drop_totals: InterpDropStats,
+    held_await_totals: HeldAwaitStats,
     holds_totals: HoldsStats,
     one_log_facts_totals: OneLogFactsStats,
     #[cfg(unix)]
@@ -1414,6 +1429,7 @@ impl Totals {
         self.nested_meta_totals.add(&other.nested_meta_totals);
         self.gc_unwind_totals.add(&other.gc_unwind_totals);
         self.interp_drop_totals.add(&other.interp_drop_totals);
+        self.held_await_totals.add(&other.held_await_totals);
         self.holds_totals.add(&other.holds_totals);
         self.one_log_facts_totals.add(&other.one_log_facts_totals);
         #[cfg(unix)]
@@ -1737,6 +1753,13 @@ fn judge_one(seed: u64, args: &Args, totals: &mut Totals, caught: &mut Caught) -
             args.options.verbose,
             &mut totals.interp_drop_totals,
         ),
+        Scenario::HeldAwait => heldawait::judge(
+            seed,
+            args.held_await,
+            args.twice,
+            args.options.verbose,
+            &mut totals.held_await_totals,
+        ),
         Scenario::Holds => holds::judge(
             seed,
             args.holds,
@@ -1961,6 +1984,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::NestedMeta && args.nested_meta != NestedMetaMutation::None)
         || (args.scenario == Scenario::GcUnwind && args.gc_unwind != GcUnwindMutation::None)
         || (args.scenario == Scenario::InterpDrop && args.interp_drop != InterpDropMutation::None)
+        || (args.scenario == Scenario::HeldAwait && args.held_await != HeldAwaitMutation::None)
         || (args.scenario == Scenario::Holds && args.holds != HoldsMutation::None)
         || (args.scenario == Scenario::OneLogFacts
             && args.one_log_facts != OneLogFactsMutation::None)
@@ -2057,6 +2081,7 @@ fn main() -> ExitCode {
         nested_meta_totals,
         gc_unwind_totals,
         interp_drop_totals,
+        held_await_totals,
         holds_totals,
         one_log_facts_totals,
         #[cfg(unix)]
@@ -2446,6 +2471,16 @@ fn main() -> ExitCode {
             args.twice,
             args.interp_drop,
             &interp_drop_totals,
+        );
+    }
+    if args.scenario == Scenario::HeldAwait {
+        return heldawait::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.held_await,
+            &held_await_totals,
         );
     }
     if args.scenario == Scenario::OneLogFacts {

@@ -478,6 +478,9 @@ default_table='
 1 canary_lease_claim_steals_live canary:64 --scenario lease --mutation claim_steals_live
 1 canary_lease_write_skips_head_cas canary:64 --scenario lease --mutation write_skips_head_cas
 1 canary_lease_commit_locks_lease canary:64 --scenario lease --mutation commit_locks_lease
+4 held_await pass --scenario held_await
+1 held_await_twice pass --scenario held_await --twice
+1 canary_held_await_held_across_await canary:64 --scenario held_await --mutation held_across_await
 4 durable pass --scenario durable
 1 durable_twice pass --scenario durable --twice
 1 canary_durable_write_skips_fence canary:64 --scenario durable --mutation write_skips_fence

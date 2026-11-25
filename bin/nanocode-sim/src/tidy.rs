@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const SIMULATED: &[&str] = &[
@@ -315,6 +316,7 @@ pub fn check(root: &Path) -> std::io::Result<Vec<String>> {
         }
     }
     problems.extend(locks(root)?);
+    problems.extend(held(root)?);
     let base = djs_base::make();
     let base_dir = root.join(BASE_DIR);
     for file in djs_base::stale(&base_dir, &base) {
@@ -358,4 +360,353 @@ pub fn locks(root: &Path) -> std::io::Result<Vec<String>> {
 
 pub fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+const HELD_ALLOWED: &str = "bin/nanocode-sim/held-across-await.txt";
+const HELD_ROOTS: &[&str] = &["crates", "bin"];
+const HELD_SKIPPED: &[&str] = &["crates/patches", "bin/nanocode-sim", "bin/nanocode-fuzz"];
+const HELD_SKIPPED_DIRS: &[&str] = &["target", "tests", "benches", "examples", "output"];
+const AWAIT: &[u8] = b".await";
+const TURN: &str = "Sequencer turn";
+const OWNED: &str = "Owned guard";
+const PERMIT: &str = "Semaphore::new(1) permit";
+const ACQUIRES: &[&str] = &["acquire_owned", "try_acquire_owned", "try_acquire", "acquire"];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldGuard {
+    pub line: usize,
+    pub name: String,
+    pub kind: &'static str,
+    pub awaited: usize,
+}
+
+const fn word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+fn literal_end(rest: &[u8]) -> usize {
+    let mut at = 1;
+    while at < rest.len() {
+        match rest[at] {
+            b'\\' => at += 2,
+            b'"' => return at + 1,
+            _ => at += 1,
+        }
+    }
+    rest.len()
+}
+
+fn raw_end(rest: &[u8], before: Option<u8>) -> Option<usize> {
+    if before.is_some_and(word_byte) || rest.first() != Some(&b'r') {
+        return None;
+    }
+    let hashes = rest[1..].iter().take_while(|byte| **byte == b'#').count();
+    if rest.get(1 + hashes) != Some(&b'"') {
+        return None;
+    }
+    let open = 2 + hashes;
+    let mut close = vec![b'"'];
+    close.extend(std::iter::repeat_n(b'#', hashes));
+    Some(find(&rest[open..], &close).map_or(rest.len(), |end| open + end + close.len()))
+}
+
+fn char_end(rest: &[u8]) -> usize {
+    match rest {
+        [_, b'\\', ..] => rest
+            .get(3..)
+            .and_then(|after| after.iter().position(|byte| *byte == b'\''))
+            .map_or(rest.len(), |end| end + 4),
+        [_, _, b'\'', ..] => 3,
+        _ => 0,
+    }
+}
+
+pub fn code_only(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut code = bytes.to_vec();
+    let mut at = 0;
+    while at < bytes.len() {
+        let rest = &bytes[at..];
+        let before = at.checked_sub(1).map(|before| bytes[before]);
+        let end = if rest.starts_with(b"//") {
+            rest.iter().position(|byte| *byte == b'\n').unwrap_or(rest.len())
+        } else if rest.starts_with(b"/*") {
+            find(&rest[2..], b"*/").map_or(rest.len(), |end| end + 4)
+        } else if let Some(end) = raw_end(rest, before) {
+            end
+        } else if rest[0] == b'"' {
+            literal_end(rest)
+        } else if rest[0] == b'\'' {
+            char_end(rest)
+        } else {
+            0
+        };
+        if end == 0 {
+            at += 1;
+            continue;
+        }
+        for byte in &mut code[at..at + end] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        at += end;
+    }
+    code
+}
+
+fn word_before(code: &[u8], end: usize) -> &[u8] {
+    let start = code[..end]
+        .iter()
+        .rposition(|byte| !word_byte(*byte))
+        .map_or(0, |at| at + 1);
+    &code[start..end]
+}
+
+fn exclusive_kind(line: &[u8]) -> Option<(&[u8], &'static str)> {
+    let declared = [
+        (&b": Sequencer"[..], TURN),
+        (b": Arc<Sequencer>", TURN),
+        (b": Owned<", OWNED),
+        (b": Arc<Owned<", OWNED),
+        (b": Semaphore::new(1)", PERMIT),
+        (b": Arc::new(Semaphore::new(1))", PERMIT),
+        (b" = Semaphore::new(1)", PERMIT),
+        (b" = Arc::new(Semaphore::new(1))", PERMIT),
+    ];
+    declared.iter().find_map(|(pattern, kind)| {
+        let at = find(line, pattern)?;
+        let name = word_before(line, at);
+        (!name.is_empty()).then_some((name, *kind))
+    })
+}
+
+pub fn exclusive_names<'a>(texts: impl Iterator<Item = &'a [u8]>) -> BTreeMap<String, &'static str> {
+    let mut names = BTreeMap::new();
+    for code in texts {
+        for line in code.split(|byte| *byte == b'\n') {
+            if let Some((name, kind)) = exclusive_kind(line) {
+                names.insert(String::from_utf8_lossy(name).into_owned(), kind);
+            }
+        }
+    }
+    names
+}
+
+fn acquired(rhs: &[u8], exclusive: &BTreeMap<String, &'static str>) -> Option<&'static str> {
+    if let Some(at) = find(rhs, b".enter()") {
+        let after = &rhs[at + b".enter()".len()..];
+        if after.trim_ascii_start().starts_with(AWAIT) {
+            return Some(TURN);
+        }
+    }
+    if find(rhs, b".try_enter()").is_some() {
+        return Some(TURN);
+    }
+    for (at, _) in rhs.iter().enumerate().filter(|(_, byte)| **byte == b'.') {
+        let method = word_before(rhs, at + 1 + rhs[at + 1..].iter().take_while(|byte| word_byte(**byte)).count());
+        if !ACQUIRES.iter().any(|name| name.as_bytes() == method) || rhs.get(at + 1 + method.len()) != Some(&b'(') {
+            continue;
+        }
+        let mut receiver_end = at;
+        if rhs[..receiver_end].ends_with(b".clone()") {
+            receiver_end -= b".clone()".len();
+        }
+        let receiver = String::from_utf8_lossy(word_before(rhs, receiver_end)).into_owned();
+        if let Some(kind) = exclusive.get(&receiver) {
+            return Some(*kind);
+        }
+    }
+    None
+}
+
+fn binding(pattern: &[u8]) -> Option<&[u8]> {
+    let mut rest = pattern.trim_ascii_start();
+    for prefix in [&b"Some("[..], b"Ok("] {
+        rest = rest.strip_prefix(prefix).unwrap_or(rest).trim_ascii_start();
+    }
+    rest = rest.strip_prefix(b"mut ").unwrap_or(rest).trim_ascii_start();
+    let length = rest.iter().take_while(|byte| word_byte(**byte)).count();
+    let name = &rest[..length];
+    (!name.is_empty() && name != b"_").then_some(name)
+}
+
+fn statement_end(code: &[u8], from: usize, block: bool) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (at, byte) in code.iter().enumerate().skip(from) {
+        match byte {
+            b'{' if depth == 0 && block => return Some(at),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.checked_sub(1)?,
+            b';' if depth == 0 => return Some(at),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn awaited_while_live(code: &[u8], from: usize, name: &[u8]) -> Option<usize> {
+    let mut dropped = b"drop(".to_vec();
+    dropped.extend_from_slice(name);
+    dropped.push(b')');
+    let mut depth = 0_usize;
+    for at in from..code.len() {
+        match code[at] {
+            b'{' => depth += 1,
+            b'}' => depth = depth.checked_sub(1)?,
+            _ => {}
+        }
+        let rest = &code[at..];
+        let starts_word = at == 0 || !word_byte(code[at - 1]);
+        if rest.starts_with(AWAIT) && !rest.get(AWAIT.len()).copied().is_some_and(word_byte) {
+            return Some(at);
+        }
+        if starts_word && rest.starts_with(&dropped) {
+            return None;
+        }
+    }
+    None
+}
+
+fn line_of(code: &[u8], at: usize) -> usize {
+    code[..at].iter().filter(|byte| **byte == b'\n').count() + 1
+}
+
+pub fn held_across_await(code: &[u8], exclusive: &BTreeMap<String, &'static str>) -> Vec<HeldGuard> {
+    let mut held = Vec::new();
+    let mut from = 0;
+    while let Some(found) = find(&code[from..], b"let ") {
+        let at = from + found;
+        from = at + b"let ".len();
+        if at > 0 && word_byte(code[at - 1]) {
+            continue;
+        }
+        let lead = code[..at].trim_ascii_end();
+        let block = [&b"if"[..], b"while", b"&&"].iter().any(|word| lead.ends_with(word));
+        let Some(end) = statement_end(code, from, block) else {
+            continue;
+        };
+        let statement = &code[from..end];
+        let Some(equals) = statement.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        let (Some(name), Some(kind)) = (binding(&statement[..equals]), acquired(&statement[equals..], exclusive)) else {
+            continue;
+        };
+        if let Some(awaited) = awaited_while_live(code, end + 1, name) {
+            held.push(HeldGuard {
+                line: line_of(code, at),
+                name: String::from_utf8_lossy(name).into_owned(),
+                kind,
+                awaited: line_of(code, awaited),
+            });
+        }
+    }
+    held
+}
+
+fn crate_of(path: &str) -> &str {
+    path.find("/src/").map_or(path, |at| &path[..at])
+}
+
+pub fn guards_held(sources: &[(String, String)]) -> Vec<(String, HeldGuard)> {
+    let code: Vec<(&str, Vec<u8>)> = sources
+        .iter()
+        .map(|(path, text)| (path.as_str(), code_only(text)))
+        .collect();
+    let mut by_crate: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (index, (path, _)) in code.iter().enumerate() {
+        by_crate.entry(crate_of(path)).or_default().push(index);
+    }
+    let mut held = Vec::new();
+    for files in by_crate.values() {
+        let exclusive = exclusive_names(files.iter().map(|index| code[*index].1.as_slice()));
+        for index in files {
+            let (path, code) = &code[*index];
+            held.extend(
+                held_across_await(code, &exclusive)
+                    .into_iter()
+                    .map(|guard| ((*path).to_owned(), guard)),
+            );
+        }
+    }
+    held
+}
+
+pub fn held_problems(sources: &[(String, String)], allowed: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for line in allowed.lines().filter(|line| !line.trim().is_empty()) {
+        match line.rsplit_once(' ').map(|(path, count)| (path, count.parse::<usize>())) {
+            Some((path, Ok(count))) if count > 0 => {
+                counts.insert(path.to_owned(), count);
+            }
+            _ => problems.push(format!("{HELD_ALLOWED}: '{line}' is not '<path> <count above zero>'")),
+        }
+    }
+    let held = guards_held(sources);
+    let mut found: BTreeMap<&str, Vec<&HeldGuard>> = BTreeMap::new();
+    for (path, guard) in &held {
+        found.entry(path.as_str()).or_default().push(guard);
+    }
+    for (path, guards) in &found {
+        let allowed = counts.get(*path).copied().unwrap_or(0);
+        if guards.len() > allowed {
+            for guard in guards {
+                problems.push(format!(
+                    "{path}:{}: {} {} lives across the .await on line {}; release it first or move the state to its owner's task ({} of {allowed} allowed in {HELD_ALLOWED})",
+                    guard.line,
+                    guard.kind,
+                    guard.name,
+                    guard.awaited,
+                    guards.len()
+                ));
+            }
+        }
+    }
+    for (path, allowed) in &counts {
+        let count = found.get(path.as_str()).map_or(0, Vec::len);
+        if count < *allowed {
+            problems.push(format!(
+                "{HELD_ALLOWED}: {path} holds {count} guards across an .await where it allows {allowed}; lower it to {count}"
+            ));
+        }
+    }
+    problems
+}
+
+fn held_sources(root: &Path, directory: &Path, found: &mut Vec<(String, String)>) -> std::io::Result<()> {
+    let mut entries = std::fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort();
+    for path in entries {
+        let relative = path
+            .strip_prefix(root)
+            .expect("a scanned file lies under the workspace root")
+            .to_string_lossy()
+            .into_owned();
+        let skipped = HELD_SKIPPED.contains(&relative.as_str())
+            || path
+                .file_name()
+                .is_some_and(|name| HELD_SKIPPED_DIRS.iter().any(|skipped| name == *skipped));
+        if path.is_dir() && !skipped {
+            held_sources(root, &path, found)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            found.push((relative, std::fs::read_to_string(&path)?));
+        }
+    }
+    Ok(())
+}
+
+pub fn held(root: &Path) -> std::io::Result<Vec<String>> {
+    let mut sources = Vec::new();
+    for directory in HELD_ROOTS {
+        held_sources(root, &root.join(directory), &mut sources)?;
+    }
+    Ok(held_problems(&sources, &std::fs::read_to_string(root.join(HELD_ALLOWED))?))
 }

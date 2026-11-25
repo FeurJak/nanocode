@@ -1,0 +1,252 @@
+use std::{
+    collections::BTreeMap,
+    fmt::Write as _,
+    ops::{Range, RangeInclusive},
+    process::ExitCode,
+};
+
+use crate::{
+    rng::{FNV_OFFSET, Rng, fnv},
+    tidy,
+};
+
+const CRATE: &str = "crates/owner/src";
+const FILES: RangeInclusive<u64> = 1..=4;
+const FUNCTIONS: RangeInclusive<u64> = 1..=6;
+const SHAPES: RangeInclusive<u64> = 1..=4;
+const OWNER: &str = "pub struct Owner {\n    order: Sequencer,\n    writer: Arc<Owned<State>>,\n    gate: Arc<Semaphore>,\n    capacity: Arc<Semaphore>,\n    store: Store,\n}\n\nimpl Owner {\n    pub fn new(store: Store, capacity: usize) -> Self {\n        Self {\n            order: Sequencer::new(),\n            writer: Arc::new(Owned::new(State::default())),\n            gate: Arc::new(Semaphore::new(1)),\n            capacity: Arc::new(Semaphore::new(capacity)),\n            store,\n        }\n    }\n}\n";
+const EXCLUSIVE: &[&str] = &[
+    "self.order.enter().await",
+    "self.order.try_enter().ok_or(Busy)?",
+    "self.writer.acquire().await",
+    "self.writer.clone().acquire_owned().await",
+    "self.gate.acquire().await.map_err(|_| Busy)?",
+    "self.gate.clone().acquire_owned().await.map_err(|_| Busy)?",
+];
+const SHARED: &[&str] = &[
+    "self.capacity.acquire().await.map_err(|_| Busy)?",
+    "self.capacity.clone().acquire_owned().await.map_err(|_| Busy)?",
+    "tracing::info_span!(\"step\").entered()",
+];
+const NAMES: &[&str] = &["turn", "held", "permit", "_turn", "_guard", "mut guard"];
+const STORE_CALL: &str = "self.store.commit(n).await?;";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeldAwaitMutation {
+    None,
+    HeldAcrossAwait,
+}
+
+impl HeldAwaitMutation {
+    const ALL: [Self; 2] = [Self::None, Self::HeldAcrossAwait];
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|mutation| mutation.name() == name)
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::HeldAcrossAwait => "held_across_await",
+        }
+    }
+
+    pub fn names() -> String {
+        Self::ALL[1..]
+            .iter()
+            .map(|mutation| mutation.name())
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeldAwaitStats {
+    pub seeds: u64,
+    pub files: u64,
+    pub functions: u64,
+    pub shapes: u64,
+    pub held: u64,
+}
+
+impl HeldAwaitStats {
+    pub const fn add(&mut self, other: &Self) {
+        self.seeds += other.seeds;
+        self.files += other.files;
+        self.functions += other.functions;
+        self.shapes += other.shapes;
+        self.held += other.held;
+    }
+}
+
+fn draw(rng: &mut Rng, range: &RangeInclusive<u64>) -> u64 {
+    rng.range(*range.start(), *range.end())
+}
+
+fn word<'a>(rng: &mut Rng, words: &[&'a str]) -> &'a str {
+    words[rng.pick(words.len())]
+}
+
+fn bound(name: &str) -> &str {
+    name.strip_prefix("mut ").unwrap_or(name)
+}
+
+fn shape(rng: &mut Rng, body: &mut String) -> u64 {
+    let name = word(rng, NAMES);
+    let guard = word(rng, EXCLUSIVE);
+    let used = bound(name);
+    let (text, held) = match rng.below(9) {
+        0 => (format!("let {name} = {guard};\n{STORE_CALL}\nself.apply(&{used});\n"), 1),
+        1 => (format!("let {name} = {guard};\nself.apply(&{used});\ndrop({used});\n{STORE_CALL}\n"), 0),
+        2 => (format!("{{\n    let {name} = {guard};\n    self.apply(&{used});\n}}\n{STORE_CALL}\n"), 0),
+        3 => (format!("let _ = {guard};\n{STORE_CALL}\n"), 0),
+        4 => (format!("{STORE_CALL}\nlet {name} = {guard};\nself.apply(&{used});\ndrop({used});\n"), 0),
+        5 => (format!("let {name} = {};\n{STORE_CALL}\nself.apply(&{used});\n", word(rng, SHARED)), 0),
+        6 => (format!("if let Some({used}) = self.order.try_enter() {{\n    {STORE_CALL}\n    self.apply(&{used});\n}}\n"), 1),
+        7 => (format!("let {name} = {guard};\nif n > 0 {{\n    {STORE_CALL}\n}}\nself.apply(&{used});\n"), 1),
+        _ => (format!("let open = '{{';\n// let {name} = {guard}; {STORE_CALL}\nlet quoted = \"let {used} = self.order.enter().await; }} {{ .await\";\nlet raw = r#\"{{ \"let {used} = self.order.enter().await;\" }}\"#;\nself.note(open, quoted, raw);\n"), 0),
+    };
+    body.push_str(&text);
+    held
+}
+
+fn function(rng: &mut Rng, index: u64, stats: &mut HeldAwaitStats) -> (String, u64) {
+    let mut source = format!("pub async fn step_{index}(&self, n: u64) -> Result<(), Busy> {{\n");
+    let mut held = 0;
+    for _ in 0..draw(rng, &SHAPES) {
+        let mut body = String::new();
+        held += shape(rng, &mut body);
+        stats.shapes += 1;
+        for line in body.lines() {
+            let _ = writeln!(source, "    {line}");
+        }
+    }
+    source.push_str("    Ok(())\n}\n");
+    (source, held)
+}
+
+fn sources(
+    rng: &mut Rng,
+    mutation: HeldAwaitMutation,
+    stats: &mut HeldAwaitStats,
+) -> (Vec<(String, String)>, BTreeMap<String, u64>) {
+    let mut files = vec![(format!("{CRATE}/owner.rs"), OWNER.to_owned())];
+    let mut truth = BTreeMap::new();
+    let mut index = 0;
+    for file in 0..draw(rng, &FILES) {
+        let path = format!("{CRATE}/step_{file}.rs");
+        let mut source = "impl Owner {\n".to_owned();
+        let mut held = 0;
+        for _ in 0..draw(rng, &FUNCTIONS) {
+            let (text, count) = function(rng, index, stats);
+            index += 1;
+            held += count;
+            source.push_str(&text);
+            stats.functions += 1;
+        }
+        source.push_str("}\n");
+        if held > 0 {
+            truth.insert(path.clone(), held);
+        }
+        files.push((path, source));
+        stats.files += 1;
+    }
+    if mutation == HeldAwaitMutation::HeldAcrossAwait {
+        let at = 1 + rng.pick(files.len() - 1);
+        let source = &mut files[at].1;
+        source.truncate(source.len() - "}\n".len());
+        let _ = write!(
+            source,
+            "pub async fn commit(&self, n: u64) -> Result<(), Busy> {{\n    let turn = self.order.enter().await;\n    {STORE_CALL}\n    drop(turn);\n    Ok(())\n}}\n}}\n"
+        );
+    }
+    (files, truth)
+}
+
+fn run_seed(seed: u64, mutation: HeldAwaitMutation) -> (u64, Option<String>, HeldAwaitStats) {
+    let mut rng = Rng::derive(seed, "held_await");
+    let mut stats = HeldAwaitStats {
+        seeds: 1,
+        ..HeldAwaitStats::default()
+    };
+    let (files, truth) = sources(&mut rng, mutation, &mut stats);
+    let allowed: String = truth
+        .iter()
+        .map(|(path, count)| format!("{path} {count}\n"))
+        .collect();
+    let mut found: BTreeMap<String, u64> = BTreeMap::new();
+    for (path, _) in tidy::guards_held(&files) {
+        *found.entry(path).or_default() += 1;
+    }
+    stats.held = found.values().sum();
+    let digest = files
+        .iter()
+        .fold(FNV_OFFSET, |hash, (_, text)| fnv(hash, text.as_bytes()));
+    if mutation == HeldAwaitMutation::None && found != truth {
+        return (digest, Some(format!("detector found {found:?}, the owners hold {truth:?}")), stats);
+    }
+    let problems = tidy::held_problems(&files, &allowed);
+    let wrong = (!problems.is_empty()).then(|| format!("I3 held across await: {}", problems.join("; ")));
+    (digest, wrong, stats)
+}
+
+pub fn judge(
+    seed: u64,
+    mutation: HeldAwaitMutation,
+    twice: bool,
+    verbose: bool,
+    totals: &mut HeldAwaitStats,
+) -> Option<String> {
+    let (digest, wrong, stats) = run_seed(seed, mutation);
+    totals.add(&stats);
+    if verbose {
+        println!("seed {seed} digest {digest:016x} stats={stats:?}");
+    }
+    if wrong.is_some() || !twice {
+        return wrong;
+    }
+    let (again, wrong, _) = run_seed(seed, mutation);
+    if again != digest {
+        return Some(format!("nondeterminism: digest {digest:016x} then {again:016x}"));
+    }
+    wrong
+}
+
+pub fn replay(seed: u64, mutation: HeldAwaitMutation) -> String {
+    let mut command = format!("nanocode-sim --scenario held_await --seed {seed}");
+    if mutation != HeldAwaitMutation::None {
+        command.push_str(" --mutation ");
+        command.push_str(mutation.name());
+    }
+    command
+}
+
+pub fn report(
+    seeds: &Range<u64>,
+    passed: u64,
+    failed: u64,
+    twice: bool,
+    mutation: HeldAwaitMutation,
+    totals: &HeldAwaitStats,
+) -> ExitCode {
+    println!(
+        "RESULT seeds={}..{} scenario=held_await mutation={} passed={passed} failed={failed} twice={twice} stats={totals:?}",
+        seeds.start,
+        seeds.end,
+        mutation.name()
+    );
+    match mutation {
+        HeldAwaitMutation::None if failed == 0 => ExitCode::SUCCESS,
+        HeldAwaitMutation::None => ExitCode::FAILURE,
+        _ if failed > 0 => {
+            println!("MUTATION {} caught by {failed} seeds", mutation.name());
+            ExitCode::SUCCESS
+        }
+        _ => {
+            println!("MUTATION {} NOT caught", mutation.name());
+            ExitCode::FAILURE
+        }
+    }
+}
