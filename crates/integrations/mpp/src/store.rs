@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use nanocode_sync::Atom;
 use nanocode_sync::{OwnedSemaphorePermit, Semaphore};
@@ -144,6 +144,21 @@ fn spent_advances(recorded: Option<u128>, spent: u128) -> bool {
     mutated(Mutation::SpentSaveRegresses) || recorded.is_none_or(|recorded| recorded <= spent)
 }
 
+pub(crate) fn live_lock(
+    locks: &mut HashMap<String, Weak<Semaphore>>,
+    key: &str,
+    fresh: &Arc<Semaphore>,
+) -> Arc<Semaphore> {
+    if !mutated(Mutation::LeasesKept) {
+        locks.retain(|_, lock| lock.strong_count() > 0);
+    }
+    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    locks.insert(key.to_owned(), Arc::downgrade(fresh));
+    Arc::clone(fresh)
+}
+
 pub fn default_channel_database_path() -> Result<PathBuf, Fault> {
     accounts::default_credentials_path()
         .map(|path| path.with_file_name(DATABASE_FILE))
@@ -225,23 +240,22 @@ impl TryFrom<JsonChannelEntry> for StoredChannelEntry {
 #[derive(Default)]
 pub struct MemoryChannelStore {
     entries: Atom<HashMap<String, StoredChannelEntry>>,
-    leases: Atom<HashMap<String, Arc<Semaphore>>>,
+    leases: Atom<HashMap<String, Weak<Semaphore>>>,
     server_spent: Atom<HashMap<String, (Hash, u128, u128)>>,
 }
 
 impl MemoryChannelStore {
     async fn acquire(&self, key: &str) -> Result<StoreLease, StoreFault> {
         let fresh = Arc::new(Semaphore::new(1));
-        let lock = self.leases.update(|leases| {
-            leases
-                .entry(key.to_owned())
-                .or_insert_with(|| fresh.clone())
-                .clone()
-        });
+        let lock = self.leases.update(|leases| live_lock(leases, key, &fresh));
         lock.acquire_owned()
             .await
             .map(|permit| StoreLease::Process { _permit: permit })
             .map_err(io_error)
+    }
+
+    pub(crate) fn lease_count(&self) -> usize {
+        self.leases.read(HashMap::len)
     }
 
     fn get(&self, key: &str) -> Option<StoredChannelEntry> {

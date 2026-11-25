@@ -17,8 +17,11 @@ use nanocode_mpp::{
     flow::{Exchange, FlowError, Policy, send_with_exchange},
     protocol::{Challenge, Credential, Receipt},
     provider::{ManagementTransport, PaymentContext, PaymentEventFuture, PaymentProvider},
-    sim::{Mutation as StoreMutation, mutate, open_channel, save_server_spent, server_spent},
-    store::ChannelStore,
+    sim::{
+        Mutation as StoreMutation, hold_lease, leases, mutate, open_channel, save_server_spent,
+        server_spent,
+    },
+    store::{ChannelStore, MemoryChannelStore},
 };
 use nanocode_sync::Atom;
 use nanocode_sys::base64::URL_SAFE_NO_PAD;
@@ -59,6 +62,9 @@ const PAYMENT_REQUIRED: u16 = 402;
 const SPENT_SAVERS_MAX: u64 = 6;
 const SPENT_STEP_MAX: u64 = 100;
 const SPENT_DELAY_US_MAX: u64 = 1000;
+const LEASE_HOLDERS_MAX: u64 = 5;
+const LEASE_ROUNDS_MAX: u64 = 5;
+const LEASE_SHARED_PPM: u64 = 300_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MppMutation {
@@ -74,10 +80,11 @@ pub enum MppMutation {
     StatusRewritten,
     SupportsAny,
     SpentSaveRegresses,
+    LeasesKept,
 }
 
 impl MppMutation {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::None,
         Self::DropAbandon,
         Self::ReceiptOnRefusal,
@@ -90,6 +97,7 @@ impl MppMutation {
         Self::StatusRewritten,
         Self::SupportsAny,
         Self::SpentSaveRegresses,
+        Self::LeasesKept,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -112,6 +120,7 @@ impl MppMutation {
             Self::StatusRewritten => "status_rewritten",
             Self::SupportsAny => "supports_any",
             Self::SpentSaveRegresses => "spent_save_regresses",
+            Self::LeasesKept => "leases_kept",
         }
     }
 
@@ -835,11 +844,66 @@ fn spent_saves(seed: u64, clock: &Arc<Clock>) -> Result<(), String> {
     Ok(())
 }
 
+fn lease_registry(seed: u64, clock: &Arc<Clock>) -> Result<(), String> {
+    let mut rng = Rng::derive(seed, "store leases");
+    let holders: Vec<Vec<(bool, u64)>> = (0..rng.range(2, LEASE_HOLDERS_MAX))
+        .map(|_| {
+            (0..rng.range(2, LEASE_ROUNDS_MAX))
+                .map(|_| (rng.chance(LEASE_SHARED_PPM), rng.below(SPENT_DELAY_US_MAX)))
+                .collect()
+        })
+        .collect();
+    let memory = Arc::new(MemoryChannelStore::default());
+    let store = ChannelStore::Memory(Arc::clone(&memory));
+    let live = Cell::new(0_usize);
+    let wrong = RefCell::new(None);
+    let tasks: Vec<Task<'_>> = holders
+        .iter()
+        .enumerate()
+        .map(|(holder, rounds)| {
+            let (store, memory, live, wrong) = (&store, &memory, &live, &wrong);
+            Box::pin(async move {
+                for (round, &(shared, hold)) in rounds.iter().enumerate() {
+                    let key = if shared {
+                        "shared".to_owned()
+                    } else {
+                        format!("{holder}-{round}")
+                    };
+                    live.set(live.get() + 1);
+                    let lease = match hold_lease(store, &key).await {
+                        Ok(lease) => lease,
+                        Err(error) => {
+                            wrong.replace(Some(format!("a store lease failed: {error}")));
+                            return;
+                        }
+                    };
+                    if !shared && leases(memory) > live.get() {
+                        wrong.replace(Some(format!(
+                            "the store keeps {} lease locks for {} live holders and waiters",
+                            leases(memory),
+                            live.get()
+                        )));
+                    }
+                    clock.sleep(Duration::from_micros(hold)).await;
+                    drop(lease);
+                    live.set(live.get() - 1);
+                }
+            }) as Task<'_>
+        })
+        .collect();
+    let ended =
+        Executor::new(Arc::clone(clock), Rng::derive(seed, "lease scheduler")).run(tasks, None);
+    if let Ended::Stuck = ended {
+        return Err("stuck: the store lease holders never finished".to_owned());
+    }
+    wrong.take().map_or(Ok(()), Err)
+}
+
 fn simulate(seed: u64, mutation: MppMutation) -> MppOutcome {
-    mutate(if mutation == MppMutation::SpentSaveRegresses {
-        StoreMutation::SpentSaveRegresses
-    } else {
-        StoreMutation::None
+    mutate(match mutation {
+        MppMutation::SpentSaveRegresses => StoreMutation::SpentSaveRegresses,
+        MppMutation::LeasesKept => StoreMutation::LeasesKept,
+        _ => StoreMutation::None,
     });
     let script = Script::of(seed);
     let shape = script.describe();
@@ -902,6 +966,7 @@ fn simulate(seed: u64, mutation: MppMutation) -> MppOutcome {
     let entries = ledger.get().as_ref().clone();
     let wrong = judge(&script, &exchange.sent, &entries, &result, mutation)
         .and_then(|()| spent_saves(seed, &clock))
+        .and_then(|()| lease_registry(seed, &clock))
         .err();
     let count = |wanted: Settled| {
         u64::try_from(

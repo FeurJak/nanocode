@@ -3,13 +3,14 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use nanocode_tempo::Address;
 
 use super::session::wire::ChannelDescriptor;
-use super::store::{ChannelStore, StoreFault, StoredChannelEntry};
+use super::store::{ChannelStore, MemoryChannelStore, StoreFault, StoreLease, StoredChannelEntry};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Mutation {
     None,
     SpentSaveRegresses,
+    LeasesKept,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
@@ -66,4 +67,19 @@ pub async fn server_spent(
     channel_id: &[u8; 32],
 ) -> Result<Option<u128>, StoreFault> {
     store.server_spent(key, channel_id).await
+}
+
+pub struct Lease {
+    _lease: StoreLease,
+}
+
+pub async fn hold_lease(store: &ChannelStore, key: &str) -> Result<Lease, StoreFault> {
+    store
+        .acquire(key)
+        .await
+        .map(|lease| Lease { _lease: lease })
+}
+
+pub fn leases(store: &MemoryChannelStore) -> usize {
+    store.lease_count()
 }

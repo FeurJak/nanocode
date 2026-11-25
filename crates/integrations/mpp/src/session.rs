@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use nanocode_http::Url;
@@ -22,7 +22,7 @@ use super::signing::{
     PrimitiveSigner, TempoSigningMode, resolve_key_authorization,
     sign_and_encode_fee_payer_envelope_primitive_async, sign_and_encode_primitive_async,
 };
-use super::store::{ChannelStore, StoreLease, StoredChannelEntry, channel_key};
+use super::store::{ChannelStore, StoreLease, StoredChannelEntry, channel_key, live_lock};
 use super::tx::{self, TempoTransactionRequest, TempoTxOptions, build_tempo_tx};
 
 pub(crate) mod channel;
@@ -180,7 +180,7 @@ struct Shared {
     pending_opens: Atom<HashMap<String, PendingOpen>>,
     last_challenge: Atom<Option<Challenge>>,
     payment_lock: Arc<Semaphore>,
-    funding_locks: Atom<HashMap<String, Arc<Semaphore>>>,
+    funding_locks: Atom<HashMap<String, Weak<Semaphore>>>,
     leases: Atom<HashMap<String, Arc<PaymentLease>>>,
     prepaid: Atom<HashMap<String, PrepaidVoucher>>,
     topping_up: Atom<HashSet<String>>,
@@ -1254,7 +1254,7 @@ impl SessionProvider {
             return Ok(true);
         }
         let _process = self.acquire_payment_lock(challenge).await?;
-        let _store = self.channel_store.acquire(&key).await?;
+        let _store = self.acquire_store_lease(&key, challenge).await?;
         if self.channel(&key).is_some() {
             return Ok(true);
         }
@@ -2188,13 +2188,27 @@ impl SessionProvider {
         challenge: &Challenge,
     ) -> Result<OwnedSemaphorePermit, Fault> {
         let fresh = Arc::new(Semaphore::new(1));
-        let lock = self.shared.funding_locks.update(|locks| {
-            locks
-                .entry(key.to_owned())
-                .or_insert_with(|| fresh.clone())
-                .clone()
-        });
+        let lock = self
+            .shared
+            .funding_locks
+            .update(|locks| live_lock(locks, key, &fresh));
         Self::lock_until_expiry(lock, challenge).await
+    }
+
+    async fn acquire_store_lease(
+        &self,
+        key: &str,
+        challenge: &Challenge,
+    ) -> Result<StoreLease, Fault> {
+        let lease = self.channel_store.acquire(key);
+        let Some(expires) = challenge.expires_at() else {
+            return Ok(lease.await?);
+        };
+        let remaining = u64::try_from(expires - protocol::now_seconds()).unwrap_or(0);
+        match nanocode_platform::timeout(Duration::from_secs(remaining), lease).await {
+            Ok(lease) => Ok(lease?),
+            Err(_) => Err(Fault::Expired(challenge.expires.clone())),
+        }
     }
 
     pub(crate) async fn pay(&self, challenge: &Challenge) -> Result<Credential, Fault> {
@@ -2209,7 +2223,7 @@ impl SessionProvider {
         validate_for_session(challenge)?;
         let process = self.acquire_payment_lock(challenge).await?;
         let (key, _) = self.expected_channel_key(challenge)?;
-        let store = self.channel_store.acquire(&key).await?;
+        let store = self.acquire_store_lease(&key, challenge).await?;
         let credential = self.payment_credential_inner(challenge, top_up).await?;
         let lease = Arc::new(PaymentLease {
             channel_id: SessionCredentialPayload::channel_id(&credential.payload),
