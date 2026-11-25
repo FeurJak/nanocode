@@ -314,12 +314,40 @@ pub fn check(root: &Path) -> std::io::Result<Vec<String>> {
             ));
         }
     }
+    problems.extend(locks(root)?);
     let base = djs_base::make();
     let base_dir = root.join(BASE_DIR);
     for file in djs_base::stale(&base_dir, &base) {
         problems.push(format!(
             "{BASE_DIR}/{file}: not what this djs-core makes; run crates/patches/djs/scripts/base.sh"
         ));
+    }
+    Ok(problems)
+}
+
+const LOCK_FREE_SQL: &[&str] = &["crates/core/turnlog/src/parted/sql.rs"];
+const ROW_LOCKS: &[&str] = &[
+    "FOR UPDATE",
+    "FOR NO KEY UPDATE",
+    "FOR SHARE",
+    "FOR KEY SHARE",
+    "pg_advisory",
+    "LOCK TABLE",
+    "SET epoch = epoch WHERE",
+];
+
+pub fn locks(root: &Path) -> std::io::Result<Vec<String>> {
+    let mut problems = Vec::new();
+    for path in LOCK_FREE_SQL {
+        let text = std::fs::read_to_string(root.join(path))?;
+        for (number, line) in text.lines().enumerate() {
+            for lock in ROW_LOCKS.iter().filter(|lock| line.contains(**lock)) {
+                problems.push(format!(
+                    "{path}:{}: {lock} takes a lock beyond the write's own compare-and-set",
+                    number + 1
+                ));
+            }
+        }
     }
     Ok(problems)
 }

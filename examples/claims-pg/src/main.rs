@@ -815,7 +815,7 @@ fn main() -> std::process::ExitCode {
         mine
     };
     let setup = runtime.block_on(async {
-        log.prepare().await?;
+        log.migrate().await?;
         for part in &fences {
             log.claim(*part, 0, u64::MAX / 4, false).await?;
         }

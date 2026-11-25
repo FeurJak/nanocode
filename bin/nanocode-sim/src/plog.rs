@@ -31,6 +31,9 @@ use crate::rng::{FNV_OFFSET, Rng, fnv};
 
 pub use parted_sim::Mutation as PlogMutation;
 
+const LEASE_TICKS_MIN: u64 = 8;
+const LEASE_TICKS_MAX: u64 = 96;
+
 pub fn names() -> String {
     PlogMutation::ALL
         .iter()
@@ -313,17 +316,16 @@ async fn worker(
         let part = node.log.partition(scope);
         match rng.below(100) {
             0..=9 => {
-                let live = rng.chance(500_000);
-                if node
-                    .log
-                    .claim(part, op as u64, 1_000_000, live)
-                    .await
-                    .is_ok()
-                {
+                let ttl = rng.range(LEASE_TICKS_MIN, LEASE_TICKS_MAX + 1);
+                if node.log.claim(part, 0, ttl, true).await.is_ok() {
                     ledger.borrow_mut().stats.claims += 1;
                 }
             }
-            10..=14 => {
+            10..=12 => {
+                let ttl = rng.range(LEASE_TICKS_MIN, LEASE_TICKS_MAX + 1);
+                let _ = node.log.renew(part, 0, ttl).await;
+            }
+            13..=14 => {
                 let _ = node.log.release(part).await;
             }
             15..=19 => snapshot(node, scope).await,
@@ -399,7 +401,7 @@ fn run(seed: u64, mutation: PlogMutation, stats: &mut PlogStats) -> Result<u64, 
     let model = Arc::new(
         ModelParts::new()
             .with_faults(Arc::new(move |op| {
-                if op != "commit" {
+                if !matches!(op, "commit" | "claim" | "release") {
                     return Fault::None;
                 }
                 faults_rng.update(|rng| {
@@ -421,6 +423,7 @@ fn run(seed: u64, mutation: PlogMutation, stats: &mut PlogStats) -> Result<u64, 
                 })
             })),
     );
+    nanocode_sync::block_on(model.migrate(count)).map_err(|error| error.to_string())?;
     nanocode_sync::block_on(model.prepare(count)).map_err(|error| error.to_string())?;
     let ledger = RefCell::new(Ledger {
         rung: vec![BTreeSet::new(); shape.nodes],
@@ -429,7 +432,9 @@ fn run(seed: u64, mutation: PlogMutation, stats: &mut PlogStats) -> Result<u64, 
     let rungs: Vec<Rung> = (0..shape.nodes).map(|_| Arc::default()).collect();
     let nodes: Vec<Node> = (0..shape.nodes)
         .map(|index| {
+            let clock = Arc::clone(&model);
             let log = PartedLog::fenced(Arc::clone(&model), count, &format!("node{index}"))
+                .with_clock(Arc::new(move || clock.now()))
                 .with_max_rows(shape.max_rows * 3);
             let rung = Arc::clone(&rungs[index]);
             log.set_ring(Arc::new(move |scope, head| {

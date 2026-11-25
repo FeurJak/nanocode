@@ -208,7 +208,7 @@ fn main() -> std::process::ExitCode {
         start_attempts_max: 3,
     };
     let result = runtime.block_on(async {
-        log.prepare().await.map_err(|error| format!("{error}"))?;
+        log.migrate().await.map_err(|error| format!("{error}"))?;
         log.claim(Partition(0), 0, u64::MAX / 4, false)
             .await
             .map_err(|error| format!("{error}"))?;

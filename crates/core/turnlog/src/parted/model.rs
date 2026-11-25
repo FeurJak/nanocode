@@ -1,4 +1,5 @@
-//! The simulator's store: Postgres semantics in memory. One fence row per partition, a batch is
+//! The simulator's store: Postgres semantics in memory. One lease row per partition, judged on
+//! the store's own clock (with_clock, else one tick per transaction), a batch is
 //! checked against the rows that existed before it (one statement snapshot), a duplicate key
 //! inside a batch aborts the whole transaction (a unique violation), and faults land before the
 //! effect (serialization failure, reconnect) or after it (lost acknowledgement).
@@ -26,6 +27,7 @@ pub enum Fault {
 
 pub type Faults = Arc<dyn Fn(&'static str) -> Fault + Send + Sync>;
 pub type Sleep = Arc<dyn Fn() -> StoreFuture<'static, ()> + Send + Sync>;
+pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stored {
@@ -93,6 +95,21 @@ impl Model {
             .unwrap_or(u64::MAX)
     }
 
+    fn committed(&self, part: Partition) -> u64 {
+        self.rows
+            .iter()
+            .filter(|((row_part, _, _), _)| *row_part == part)
+            .map(|(_, stored)| stored.pos)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn row(&mut self, part: Partition) -> Result<&mut Row<String>, StoreError> {
+        self.fences
+            .get_mut(&part)
+            .ok_or_else(|| StoreError::Backend(format!("partition {} not prepared", part.0)))
+    }
+
     fn drop_range(&mut self, part: Partition, scope: &str, from: u64, to: u64) -> u64 {
         let floor = self.floor(part);
         let scope: Arc<str> = Arc::from(scope);
@@ -114,6 +131,7 @@ pub struct ModelParts {
     model: Atom<Model>,
     faults: Option<Faults>,
     sleep: Option<Sleep>,
+    clock: Option<Clock>,
 }
 
 impl ModelParts {
@@ -132,6 +150,20 @@ impl ModelParts {
     pub fn with_sleep(mut self, sleep: Sleep) -> Self {
         self.sleep = Some(sleep);
         self
+    }
+
+    #[must_use]
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// The store's clock: with_clock's, else the count of write transactions.
+    pub fn now(&self) -> u64 {
+        self.clock.as_ref().map_or_else(
+            || self.model.read(|model| model.stats.transactions),
+            |clock| clock(),
+        )
     }
 
     pub fn stats(&self) -> ModelStats {
@@ -212,7 +244,7 @@ impl ModelParts {
 }
 
 impl PartStore for ModelParts {
-    fn prepare(&self, count: NonZeroU32) -> StoreFuture<'_, Result<(), StoreError>> {
+    fn migrate(&self, count: NonZeroU32) -> StoreFuture<'_, Result<(), StoreError>> {
         Box::pin(async move {
             self.model.update(|model| {
                 for part in 0..count.get() {
@@ -223,6 +255,20 @@ impl PartStore for ModelParts {
                 }
             });
             Ok(())
+        })
+    }
+
+    fn prepare(&self, count: NonZeroU32) -> StoreFuture<'_, Result<(), StoreError>> {
+        Box::pin(async move {
+            let missing = self.model.read(|model| {
+                (0..count.get()).find(|part| !model.fences.contains_key(&Partition(*part)))
+            });
+            match missing {
+                None => Ok(()),
+                Some(part) => Err(StoreError::Backend(format!(
+                    "partition {part} is not migrated; run migrate before serving"
+                ))),
+            }
         })
     }
 
@@ -416,22 +462,72 @@ impl PartStore for ModelParts {
         })
     }
 
-    fn swap_fence<'a>(
+    fn claim_lease<'a>(
         &'a self,
         part: Partition,
-        expected: &'a Row<String>,
-        next: &'a Row<String>,
+        node: &'a str,
+        ttl_ms: u64,
+        grace_ms: u64,
+    ) -> StoreFuture<'a, Result<Option<(u64, u64)>, StoreError>> {
+        Box::pin(async move {
+            let now = self.now();
+            let node = node.to_owned();
+            self.write("claim", move |model| {
+                let row = model.row(part)?;
+                let Ok((next, epoch)) = row.claim(&node, now, ttl_ms, grace_ms) else {
+                    return Ok(None);
+                };
+                let cursor = next.cursor();
+                *row = next;
+                Ok(Some((epoch, cursor)))
+            })
+            .await
+        })
+    }
+
+    fn renew_lease<'a>(
+        &'a self,
+        part: Partition,
+        node: &'a str,
+        epoch: u64,
+        ttl_ms: u64,
     ) -> StoreFuture<'a, Result<bool, StoreError>> {
-        Box::pin(self.write("fence", move |model| {
-            let Some(row) = model.fences.get_mut(&part) else {
-                return Ok(false);
-            };
-            if row != expected {
-                return Ok(false);
-            }
-            *row = next.clone();
-            Ok(true)
-        }))
+        Box::pin(async move {
+            let now = self.now();
+            let node = node.to_owned();
+            self.write("renew", move |model| {
+                let row = model.row(part)?;
+                let Ok(next) = row.renew(part, &node, epoch, now, ttl_ms) else {
+                    return Ok(false);
+                };
+                *row = next;
+                Ok(true)
+            })
+            .await
+        })
+    }
+
+    fn release_lease<'a>(
+        &'a self,
+        part: Partition,
+        node: &'a str,
+        epoch: u64,
+    ) -> StoreFuture<'a, Result<Option<u64>, StoreError>> {
+        Box::pin(async move {
+            let node = node.to_owned();
+            self.write("release", move |model| {
+                let committed = model.committed(part);
+                let row = model.row(part)?;
+                let cursor = committed.max(row.cursor());
+                let Ok(next) = row.release(part, &node, epoch, cursor) else {
+                    return Ok(None);
+                };
+                let released = next.cursor();
+                *row = next;
+                Ok(Some(released))
+            })
+            .await
+        })
     }
 
     fn cursor<'a>(

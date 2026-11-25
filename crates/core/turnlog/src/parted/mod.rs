@@ -1,8 +1,9 @@
 //! One fenced, partitioned, group-committed log host for every log kind.
 //!
 //! Every scope (a session's turn log, a board slice, a thread's records, a cost log) lands in one
-//! partition. A node appends to a partition only while it holds that partition's fence (one lease
-//! row per partition, nanocode_partitions::Row), and concurrent appends to one partition from any
+//! partition. A node appends to a partition only while it owns that partition's lease (one lease
+//! row per partition on the database clock, nanocode_partitions::Row, driven in process by
+//! nanocode_partitions::lease::Lease), and concurrent appends to one partition from any
 //! scope and any log kind go down as one transaction: each append is all-or-nothing, a seq that
 //! already exists rejects only its own append, and a stale fence rejects the whole batch. The
 //! store behind it is a PartStore: SqlParts for Postgres and SQLite, ModelParts for the simulator.
@@ -10,7 +11,11 @@
 use std::{collections::HashSet, num::NonZeroU32, ops::Range, sync::Arc};
 
 use nanocode_durability_core::{StoreError, StoreFuture};
-use nanocode_partitions::{Partition, Row, partition_of};
+use nanocode_partitions::{
+    Partition, Row,
+    lease::{Answer, Claim, ClaimAnswer, Drain, Lease, Policy, Unowned},
+    partition_of,
+};
 use nanocode_sync::{Atom, Map, Slot, Vector, oneshot};
 
 use crate::host::{Compaction, Extension, LogHost, Rider, StoredCheckpoint, Write};
@@ -45,13 +50,18 @@ pub struct Entry {
 }
 
 /// The storage a PartedLog runs on. The epoch is the fence token a write carries: None writes
-/// unfenced (single-writer deployments), Some(epoch) is admitted only while the partition's fence
-/// row is held at that epoch.
+/// unfenced (single-writer deployments), Some(epoch) is admitted only while the partition's head
+/// is at that epoch.
 pub trait PartStore: Send + Sync {
+    /// The one-shot schema step: creates the tables and the count partitions. The only call that
+    /// runs DDL.
+    fn migrate(&self, count: NonZeroU32) -> StoreFuture<'_, Result<(), StoreError>>;
+
+    /// Checks that migrate ran for count partitions at this release's format, without DDL.
     fn prepare(&self, count: NonZeroU32) -> StoreFuture<'_, Result<(), StoreError>>;
 
-    /// One transaction: the fence check, then every append all-or-nothing, each row given the
-    /// next position. A stale fence is Err(Fenced) for the whole batch.
+    /// One transaction: the head compare-and-set at epoch, then every append all-or-nothing,
+    /// each row given the next position. A stale epoch is Err(Fenced) for the whole batch.
     fn commit<'a>(
         &'a self,
         part: Partition,
@@ -111,15 +121,36 @@ pub trait PartStore: Send + Sync {
         limit: usize,
     ) -> StoreFuture<'_, Result<Vec<Entry>, StoreError>>;
 
+    /// The partition's lease row, read back.
     fn fence(&self, part: Partition) -> StoreFuture<'_, Result<Row<String>, StoreError>>;
 
-    /// Replaces the fence row only if it still is expected.
-    fn swap_fence<'a>(
+    /// Claims the lease for node on the store's clock: Some((epoch, cursor)) when it landed,
+    /// None when the row is held by another node and not past expiry plus grace.
+    fn claim_lease<'a>(
         &'a self,
         part: Partition,
-        expected: &'a Row<String>,
-        next: &'a Row<String>,
+        node: &'a str,
+        ttl_ms: u64,
+        grace_ms: u64,
+    ) -> StoreFuture<'a, Result<Option<(u64, u64)>, StoreError>>;
+
+    /// Extends node's lease at epoch on the store's clock; false when the epoch moved.
+    fn renew_lease<'a>(
+        &'a self,
+        part: Partition,
+        node: &'a str,
+        epoch: u64,
+        ttl_ms: u64,
     ) -> StoreFuture<'a, Result<bool, StoreError>>;
+
+    /// Hands node's lease at epoch back at the committed position: Some(cursor) when it landed,
+    /// None when the epoch moved.
+    fn release_lease<'a>(
+        &'a self,
+        part: Partition,
+        node: &'a str,
+        epoch: u64,
+    ) -> StoreFuture<'a, Result<Option<u64>, StoreError>>;
 
     /// Records that reader consumed the partition through pos (it never moves back).
     fn cursor<'a>(
@@ -160,6 +191,7 @@ pub trait PartStore: Send + Sync {
 }
 
 pub type Place = Arc<dyn Fn(&str, NonZeroU32) -> Partition + Send + Sync>;
+pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 pub type RingFn = Arc<dyn Fn(&str, u64) + Send + Sync>;
 
 /// Where a scope lives: a "/p<n>" suffix names partition n (board slices), a UUID segment hashes
@@ -276,7 +308,9 @@ pub struct PartedLog<S: ?Sized> {
     count: NonZeroU32,
     place: Place,
     node: Option<Arc<str>>,
-    held: Atom<Map<Partition, u64>>,
+    held: Atom<Map<Partition, Lease>>,
+    clock: Clock,
+    bounds: Policy,
     queues: Queues,
     ring: Atom<Option<RingFn>>,
     stats: Atom<Stats>,
@@ -296,6 +330,12 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
             place: Arc::new(place),
             node: None,
             held: Atom::default(),
+            clock: Arc::new(nanocode_platform::unix_millis),
+            bounds: Policy {
+                ttl_ms: 0,
+                grace_ms: 0,
+                margin_ms: 0,
+            },
             queues: Atom::default(),
             ring: Atom::default(),
             stats: Atom::default(),
@@ -314,6 +354,24 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
     #[must_use]
     pub fn with_place(mut self, place: Place) -> Self {
         self.place = place;
+        self
+    }
+
+    /// The local clock (ms) a fenced host self-fences on: it stops writing once now + margin_ms
+    /// reaches the send time of its last landed claim or renewal plus its ttl.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// grace_ms: how long past expiry a claim waits, at least the longest write transaction
+    /// (statement_timeout). margin_ms: how early the owner stops writing, at least twice the
+    /// clock skew between nodes and the database.
+    #[must_use]
+    pub const fn with_lease_bounds(mut self, grace_ms: u64, margin_ms: u64) -> Self {
+        self.bounds.grace_ms = grace_ms;
+        self.bounds.margin_ms = margin_ms;
         self
     }
 
@@ -345,10 +403,28 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         self.stats.read(|stats| *stats)
     }
 
+    /// The epoch this node holds the partition at, owned or draining.
     pub fn held(&self, part: Partition) -> Option<u64> {
-        self.held.read(|held| held.get(&part).copied())
+        self.held
+            .read(|held| held.get(&part).and_then(Lease::epoch))
     }
 
+    /// The cursor the partition was handed over at when this node claimed it: everything at or
+    /// before it was committed by earlier owners.
+    pub fn resume(&self, part: Partition) -> Option<u64> {
+        self.held.read(|held| match held.get(&part) {
+            Some(Lease::Owned(owned)) => Some(owned.cursor),
+            Some(Lease::Draining(draining)) => Some(draining.cursor),
+            _ => None,
+        })
+    }
+
+    /// The one-shot schema step (PartStore::migrate); run it at deploy, before anything serves.
+    pub async fn migrate(&self) -> Result<(), StoreError> {
+        self.store.migrate(self.count).await
+    }
+
+    /// Checks that migrate ran, without DDL.
     pub async fn prepare(&self) -> Result<(), StoreError> {
         self.store.prepare(self.count).await
     }
@@ -357,7 +433,33 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         if self.node.is_none() {
             return Ok(None);
         }
-        self.held(part).map(Some).ok_or(StoreError::Fenced)
+        let now = (self.clock)();
+        match self.held.read(|held| {
+            held.get(&part)
+                .and_then(|lease| lease.writable(now, self.bounds))
+        }) {
+            Some(Ok(epoch)) => Ok(Some(epoch)),
+            Some(Err(_)) | None => Err(StoreError::Fenced),
+        }
+    }
+
+    fn admit(&self, part: Partition) -> Result<(), StoreError> {
+        if self.node.is_none()
+            || self
+                .held
+                .read(|held| held.get(&part).is_some_and(Lease::admits))
+        {
+            return Ok(());
+        }
+        Err(StoreError::Fenced)
+    }
+
+    fn lose(&self, part: Partition, epoch: u64) {
+        self.held.update(|held| {
+            if held.get(&part).and_then(Lease::epoch) == Some(epoch) {
+                held.remove(&part);
+            }
+        });
     }
 
     fn node(&self) -> Result<String, StoreError> {
@@ -366,61 +468,149 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         })
     }
 
-    /// Claims the partition's fence row for this node, raising its epoch. holder_live says
-    /// whether the current holder is still a live member, so a dead holder's row is taken before
-    /// it expires.
+    /// Claims the partition's lease for this node on the store's clock, raising its epoch. It
+    /// lands only on a released row, this node's own, or one past expiry plus grace; membership
+    /// never lets it take a live lease, so holder_live and now_ms (the store judges expiry on its
+    /// own clock, the node self-fences on with_clock) are ignored. An unknown outcome is read
+    /// back from the row, and a lease read back as ours grants no time until a renewal lands.
     pub async fn claim(
         &self,
         part: Partition,
-        now_ms: u64,
+        _now_ms: u64,
         ttl_ms: u64,
         _holder_live: bool,
     ) -> Result<u64, StoreError> {
         let node = self.node()?;
-        let row = self.store.fence(part).await?;
-        let (next, epoch) = row
-            .claim(&node, now_ms, ttl_ms, 0)
-            .map_err(|_| StoreError::Fenced)?;
-        if !self.store.swap_fence(part, &row, &next).await? {
-            return Err(StoreError::Fenced);
-        }
-        self.held.update(|held| held.insert(part, epoch));
-        Ok(epoch)
-    }
-
-    pub async fn renew(&self, part: Partition, now_ms: u64, ttl_ms: u64) -> Result<(), StoreError> {
-        let node = self.node()?;
-        let epoch = self.epoch(part)?.ok_or(StoreError::Fenced)?;
-        let row = self.store.fence(part).await?;
-        let renewed = match row.renew(part, &node, epoch, now_ms, ttl_ms) {
-            Ok(next) => self.store.swap_fence(part, &row, &next).await?,
-            Err(_) => false,
+        let policy = Policy {
+            ttl_ms,
+            ..self.bounds
         };
-        if renewed {
-            Ok(())
+        let claiming = Unowned.claim((self.clock)());
+        let answer = match self
+            .store
+            .claim_lease(part, &node, ttl_ms, policy.grace_ms)
+            .await
+        {
+            Ok(Some((epoch, cursor))) => ClaimAnswer::Claimed { epoch, cursor },
+            Ok(None) => ClaimAnswer::Refused,
+            Err(StoreError::Backend(_)) => ClaimAnswer::Unknown,
+            Err(error) => return Err(error),
+        };
+        let owned = match claiming.answered(answer, policy) {
+            Claim::Owned(owned) => owned,
+            Claim::Unowned(_) => return Err(StoreError::Fenced),
+            Claim::Unknown(claiming) => {
+                let row = self.store.fence(part).await?;
+                let Claim::Owned(owned) = claiming.read_back(&row, &node) else {
+                    return Err(StoreError::Fenced);
+                };
+                self.held
+                    .update(|held| held.insert(part, Lease::Owned(owned)));
+                return match self.renew(part, 0, ttl_ms).await {
+                    Ok(()) => Ok(owned.epoch),
+                    Err(StoreError::Fenced) => Err(StoreError::Fenced),
+                    Err(_) => Ok(owned.epoch),
+                };
+            }
+        };
+        self.held
+            .update(|held| held.insert(part, Lease::Owned(owned)));
+        Ok(owned.epoch)
+    }
+
+    /// Extends the lease at the epoch this node holds; Fenced when the epoch moved (the lease is
+    /// lost). An unknown outcome keeps the lease and its old deadline.
+    pub async fn renew(
+        &self,
+        part: Partition,
+        _now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<(), StoreError> {
+        let node = self.node()?;
+        let epoch = self.held(part).ok_or(StoreError::Fenced)?;
+        let policy = Policy {
+            ttl_ms,
+            ..self.bounds
+        };
+        let sent_at = (self.clock)();
+        let answer = if self.store.renew_lease(part, &node, epoch, ttl_ms).await? {
+            Answer::Landed
         } else {
-            self.forget(part);
-            Err(StoreError::Fenced)
+            Answer::Moved { current: epoch + 1 }
+        };
+        self.held.update(|held| {
+            let next = match held.get(&part).copied() {
+                Some(Lease::Owned(owned)) if owned.epoch == epoch => {
+                    Some(owned.renewed(answer, sent_at, policy).map(Lease::Owned))
+                }
+                Some(Lease::Draining(draining)) if draining.epoch == epoch => Some(
+                    draining
+                        .renewed(answer, sent_at, policy)
+                        .map(Lease::Draining),
+                ),
+                _ => None,
+            };
+            match next {
+                Some(Ok(lease)) => {
+                    held.insert(part, lease);
+                }
+                Some(Err(_)) => {
+                    held.remove(&part);
+                }
+                None => {}
+            }
+        });
+        match answer {
+            Answer::Landed | Answer::Unknown => Ok(()),
+            Answer::Moved { .. } => Err(StoreError::Fenced),
         }
     }
 
-    /// Stops admitting appends to the partition, waits for its committer to drain (a commit in
-    /// flight lands or fails), then frees the fence row at the epoch it held.
+    /// Drains then releases: stops admitting new appends to the partition but keeps its epoch
+    /// while every append queued before the call commits, then hands the lease back at the
+    /// committed position so the gainer claims at once and resumes there.
     pub async fn release(&self, part: Partition) -> Result<(), StoreError> {
         let node = self.node()?;
-        let Some(epoch) = self.held.update(|held| held.remove(&part)) else {
+        let draining = self.held.update(|held| match held.get(&part).copied() {
+            Some(Lease::Owned(owned)) => {
+                let draining = owned.drain();
+                held.insert(part, Lease::Draining(draining));
+                Some(draining)
+            }
+            Some(Lease::Draining(draining)) => Some(draining),
+            _ => None,
+        });
+        let Some(draining) = draining else {
             return Ok(());
         };
         self.drain(part).await;
-        let row = self.store.fence(part).await?;
-        let released = match row.release(part, &node, epoch, row.cursor()) {
-            Ok(next) => self.store.swap_fence(part, &row, &next).await?,
-            Err(_) => false,
+        let drain = match self.store.release_lease(part, &node, draining.epoch).await {
+            Ok(Some(cursor)) => draining.released(Answer::Landed, cursor),
+            Ok(None) => draining.released(
+                Answer::Moved {
+                    current: draining.epoch + 1,
+                },
+                0,
+            ),
+            Err(StoreError::Backend(_)) => {
+                let row = self.store.fence(part).await?;
+                draining.read_back(&row, &node)
+            }
+            Err(error) => return Err(error),
         };
-        if released {
-            Ok(())
-        } else {
-            Err(StoreError::Fenced)
+        match drain {
+            Drain::Released(_) => {
+                self.lose(part, draining.epoch);
+                Ok(())
+            }
+            Drain::Lost(_) => {
+                self.lose(part, draining.epoch);
+                Err(StoreError::Fenced)
+            }
+            Drain::Unknown(_) => Err(StoreError::Backend(
+                "the release's outcome is unknown and the lease is still held; release again"
+                    .into(),
+            )),
         }
     }
 
@@ -547,6 +737,7 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
     async fn committed(
         &self,
         part: Partition,
+        epoch: Option<u64>,
         sent: &[Append],
         compactings: &[Option<&Compacting>],
     ) -> (
@@ -557,10 +748,6 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         if sent.is_empty() {
             return (Ok(Vec::new()), compacted);
         }
-        let epoch = match self.epoch(part) {
-            Ok(epoch) => epoch,
-            Err(error) => return (Err(error), compacted),
-        };
         let compactions: Vec<Option<Compaction<'_>>> = compactings
             .iter()
             .map(|compacting| compacting.map(Compacting::borrowed))
@@ -617,7 +804,15 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
             sent.push(append.clone());
             compactings.push(waiter.compacting.as_ref());
         }
-        let (answer, compacted) = self.committed(part, &sent, &compactings).await;
+        let local = if sent.is_empty() {
+            Ok(None)
+        } else {
+            self.epoch(part)
+        };
+        let (answer, compacted) = match &local {
+            Ok(epoch) => self.committed(part, *epoch, &sent, &compactings).await,
+            Err(error) => (Err(error.clone()), vec![Ok(()); sent.len()]),
+        };
         let answer = match answer {
             Err(StoreError::Backend(_)) if sim::mutated(sim::Mutation::LostAckRejected) => {
                 Ok(vec![Verdict::Conflict; sent.len()])
@@ -625,8 +820,8 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
             answer => answer,
         };
         let fenced = matches!(answer, Err(StoreError::Fenced));
-        if fenced {
-            self.forget(part);
+        if fenced && let Ok(Some(epoch)) = local {
+            self.lose(part, epoch);
         }
         let ring = self.ring.read(Clone::clone);
         let mut stats = Stats {
@@ -743,11 +938,13 @@ impl<S: PartStore + ?Sized> LogHost for PartedLog<S> {
             if rows.is_empty() {
                 return Ok(());
             }
+            let part = self.partition(scope);
+            self.admit(part)?;
             let append = Append {
                 scope: Arc::from(scope),
                 rows: rows.to_vec(),
             };
-            self.submit(self.partition(scope), append, None).await
+            self.submit(part, append, None).await
         })
     }
 
@@ -772,11 +969,13 @@ impl<S: PartStore + ?Sized> LogHost for PartedLog<S> {
                     .compact(part, epoch, scope, compacting.borrowed())
                     .await;
             }
+            let part = self.partition(scope);
+            self.admit(part)?;
             let append = Append {
                 scope: Arc::from(scope),
                 rows: rows.to_vec(),
             };
-            self.submit(self.partition(scope), append, compacting).await
+            self.submit(part, append, compacting).await
         })
     }
 
