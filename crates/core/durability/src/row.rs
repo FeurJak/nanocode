@@ -8,7 +8,7 @@ use std::{
 };
 
 use nanocode_platform::{MaybeSend, MaybeSync};
-use nanocode_sync::{AtomMap, Mailbox, Sequencer};
+use nanocode_sync::{AtomMap, Mailbox, SingleFlight};
 use nanocode_sys::base64::STANDARD;
 
 use crate::{
@@ -549,7 +549,7 @@ pub struct RowStore<H: ?Sized> {
     host: Arc<H>,
     ready: Arc<AtomicBool>,
     index: Mailbox<Index>,
-    loading: Sequencer,
+    loading: Arc<SingleFlight<Result<(), StoreError>>>,
     limit: Arc<AtomicUsize>,
     schema: Option<Arc<str>>,
     codec: Option<Arc<dyn PageCodec>>,
@@ -563,7 +563,7 @@ impl<H: ?Sized> Clone for RowStore<H> {
             host: Arc::clone(&self.host),
             ready: Arc::clone(&self.ready),
             index: self.index.clone(),
-            loading: self.loading.clone(),
+            loading: Arc::clone(&self.loading),
             limit: Arc::clone(&self.limit),
             schema: self.schema.clone(),
             codec: self.codec.clone(),
@@ -621,7 +621,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
             host,
             ready: Arc::new(AtomicBool::new(false)),
             index: Mailbox::default(),
-            loading: Sequencer::default(),
+            loading: Arc::default(),
             limit: Arc::new(AtomicUsize::new(usize::MAX)),
             schema: None,
             codec: None,
@@ -715,7 +715,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
             host: Arc::new(host),
             ready: Arc::clone(&self.ready),
             index: Mailbox::default(),
-            loading: Sequencer::default(),
+            loading: Arc::default(),
             limit: Arc::clone(&self.limit),
             schema: self.schema.clone(),
             codec: self.codec.clone(),
@@ -868,8 +868,11 @@ impl<H: Sql + ?Sized> RowStore<H> {
     }
 
     async fn load_all(&mut self) -> Result<(), StoreError> {
-        let loading = self.loading.clone();
-        let _turn = loading.enter().await;
+        let loading = Arc::clone(&self.loading);
+        loading.run(|| self.load_whole()).await
+    }
+
+    async fn load_whole(&mut self) -> Result<(), StoreError> {
         if self.index.call(|index| index.whole).await {
             return Ok(());
         }
@@ -1981,7 +1984,7 @@ impl<H: Sql + ?Sized> StateStore for RowStore<H> {
             host,
             ready: Arc::clone(&self.ready),
             index: self.index.clone(),
-            loading: self.loading.clone(),
+            loading: Arc::clone(&self.loading),
             limit: Arc::clone(&self.limit),
             schema: self.schema.clone(),
             codec: self.codec.clone(),
@@ -1997,7 +2000,7 @@ impl<H: Sql + ?Sized> StateStore for RowStore<H> {
             host,
             ready: Arc::clone(&self.ready),
             index: self.index.clone(),
-            loading: self.loading.clone(),
+            loading: Arc::clone(&self.loading),
             limit: Arc::clone(&self.limit),
             schema: self.schema.clone(),
             codec: self.codec.clone(),
