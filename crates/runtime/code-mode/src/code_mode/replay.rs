@@ -49,6 +49,8 @@ pub struct CellJournal {
     pub calls: Vec<JournaledCall>,
     #[serde(default)]
     pub finished: bool,
+    #[serde(skip)]
+    pub unloaded: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -120,6 +122,20 @@ pub trait CellJournalSink: Send + Sync + 'static {
         Box::pin(async { Ok(Vec::new()) })
     }
 
+    fn load_cell(
+        &self,
+        session_id: &str,
+        cell_id: u64,
+    ) -> HostFuture<'static, Result<Option<CellJournal>, String>> {
+        let loading = self.load(session_id);
+        Box::pin(async move {
+            Ok(loading
+                .await?
+                .into_iter()
+                .find(|journal| journal.cell_id == cell_id && !journal.unloaded))
+        })
+    }
+
     fn save_stored(
         &self,
         _session_id: &str,
@@ -164,6 +180,7 @@ impl CellJournal {
             entries: Vec::new(),
             calls: Vec::new(),
             finished: false,
+            unloaded: false,
         };
         let mut calls = BTreeMap::new();
         let mut seq = first.seq;
@@ -607,6 +624,29 @@ impl CellJournals {
         self.0
             .dormant
             .update(|dormant| dormant.push((Arc::clone(&journal), Arc::clone(restored))));
+    }
+
+    pub(super) async fn whole(&self, journal: Arc<CellJournal>) -> Option<CellJournal> {
+        if !journal.unloaded {
+            return Some(Arc::unwrap_or_clone(journal));
+        }
+        let sink = self.0.sink.as_ref()?;
+        match sink.load_cell(&journal.session_id, journal.cell_id).await {
+            Ok(Some(whole)) => {
+                assert!(!whole.unloaded, "a sink loads a cell it was asked for whole");
+                Some(whole)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                nanocode_trace::warn!(
+                    target: "nanocode_code_mode",
+                    cell_id = journal.cell_id,
+                    %error,
+                    "a finished Code Mode cell's journal could not be loaded to revive it"
+                );
+                None
+            }
+        }
     }
 
     pub(super) fn take_dormant(
@@ -1458,6 +1498,7 @@ impl CellRecord {
                 .map(|call| JournaledCall::clone(call))
                 .collect(),
             finished: false,
+            unloaded: false,
         })
     }
 }

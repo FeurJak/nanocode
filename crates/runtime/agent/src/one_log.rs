@@ -672,7 +672,11 @@ impl OneLog {
         Ok(CellJournals::with_sink(self.sink()))
     }
 
-    async fn cells(&self, only: &str) -> Result<BTreeMap<String, Vec<CellJournal>>, StoreError> {
+    async fn cells(
+        &self,
+        only: &str,
+        cell: Option<u64>,
+    ) -> Result<BTreeMap<String, Vec<CellJournal>>, StoreError> {
         let only = only.to_owned();
         self.log
             .write_within(move |writing| {
@@ -680,18 +684,34 @@ impl OneLog {
                     let only = only.as_str();
                     writing.load_owner(TOOLS_MARK).await?;
                     writing.load_owner(only).await?;
+                    let mut whole = BTreeSet::new();
                     let mut shared = Vec::new();
-                    for (session, _, updates) in writing.fold().cells_of(Some(only)) {
-                        shared.extend(shared::result_keys(session, updates)?);
+                    for (session, id, updates) in writing.fold().cells_of(Some(only)) {
+                        let wanted = match cell {
+                            Some(cell) => id == cell,
+                            None => !shared::finished(updates)?,
+                        };
+                        if wanted {
+                            whole.insert(id);
+                            shared.extend(shared::result_keys(session, updates)?);
+                        }
                     }
                     writing.load_owners(&shared).await?;
                     let fold = writing.fold();
                     let mut sessions: BTreeMap<String, Vec<CellJournal>> = BTreeMap::new();
                     let mut catalogs: HashMap<String, Arc<[Value]>> = HashMap::new();
-                    for (session, _, updates) in fold.cells_of(Some(only)) {
+                    for (session, id, updates) in fold.cells_of(Some(only)) {
+                        if cell.is_some_and(|cell| cell != id) {
+                            continue;
+                        }
+                        let loaded = whole.contains(&id);
                         let mut decoded = Vec::with_capacity(updates.len());
                         for update in updates {
-                            let update = shared::with_results(fold, session, update)?;
+                            let update = if loaded {
+                                shared::with_results(fold, session, update)?
+                            } else {
+                                shared::without_results(update)?
+                            };
                             let mut update = serde_json::from_str::<CellJournalUpdate>(&update)
                                 .map_err(|error| {
                                     invalid(format!("cell journal update: {error}"))
@@ -722,7 +742,8 @@ impl OneLog {
                             }
                             decoded.push(update);
                         }
-                        if let Some(journal) = CellJournal::fold(decoded) {
+                        if let Some(mut journal) = CellJournal::fold(decoded) {
+                            journal.unloaded = !loaded;
                             sessions
                                 .entry(session.to_owned())
                                 .or_default()
@@ -2189,11 +2210,28 @@ impl CellJournalSink for OneLogJournals {
         let session = session_id.to_owned();
         Box::pin(async move {
             Ok(log
-                .cells(&session)
+                .cells(&session, None)
                 .await
                 .map_err(|error| error.to_string())?
                 .remove(&session)
                 .unwrap_or_default())
+        })
+    }
+
+    fn load_cell(
+        &self,
+        session_id: &str,
+        cell_id: u64,
+    ) -> HostFuture<'static, Result<Option<CellJournal>, String>> {
+        let log = Arc::clone(&self.0);
+        let session = session_id.to_owned();
+        Box::pin(async move {
+            Ok(log
+                .cells(&session, Some(cell_id))
+                .await
+                .map_err(|error| error.to_string())?
+                .remove(&session)
+                .and_then(|journals| journals.into_iter().find(|journal| journal.cell_id == cell_id)))
         })
     }
 

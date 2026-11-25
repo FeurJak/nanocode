@@ -146,6 +146,41 @@ pub(super) fn result_keys(
     Ok(keys)
 }
 
+pub(super) fn finished(updates: &[Box<RawValue>]) -> Result<bool, StoreError> {
+    #[derive(serde::Deserialize)]
+    struct Finished {
+        #[serde(default)]
+        finished: bool,
+    }
+    for update in updates {
+        let update: Finished = serde_json::from_str(update.get())
+            .map_err(|error| invalid(format!("cell journal update: {error}")))?;
+        if update.finished {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(super) fn without_results(update: &RawValue) -> Result<Cow<'_, str>, StoreError> {
+    let Some(mut value) = shared_entries(update)? else {
+        return Ok(Cow::Borrowed(update.get()));
+    };
+    for entry in value[ENTRIES]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object_mut)
+    {
+        if entry.remove(SHARED).is_some() {
+            entry.insert(ENCODED.to_owned(), Value::String(String::new()));
+        }
+    }
+    serde_json::to_string(&value)
+        .map(Cow::Owned)
+        .map_err(|error| invalid(format!("cell journal update: {error}")))
+}
+
 pub(super) fn with_results<'a>(
     fold: &Fold,
     session: &str,

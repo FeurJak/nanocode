@@ -710,6 +710,23 @@ impl Cells {
                 return None;
             }
         };
+        let mut journals = journals;
+        for journal in &mut journals {
+            if !journal.unloaded {
+                continue;
+            }
+            match ready(live.sink.load_cell(SESSION, journal.cell_id)) {
+                Ok(Some(whole)) if !whole.unloaded => *journal = whole,
+                loaded => {
+                    let id = journal.cell_id;
+                    self.wrong(
+                        Invariant::CellResultShared,
+                        format!("cell {id} journal did not load whole: {loaded:?}"),
+                    );
+                    return None;
+                }
+            }
+        }
         let answers = [answer(ANSWERED), answer(UNANSWERED)];
         let altered = journals.iter().flat_map(|journal| &journal.entries).any(|entry| {
             matches!(entry, JournalEntry::Result { encoded, .. } if !answers.contains(encoded))

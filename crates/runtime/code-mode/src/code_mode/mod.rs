@@ -894,13 +894,14 @@ impl CodeModeRuntime {
             None => {
                 let journals = self.journals.as_ref()?;
                 let (journal, restored) = journals.take_dormant(&context.session_id, call_id)?;
+                let journal = journals.whole(journal).await?;
                 let epoch = self.cells.read(|registry| registry.admission_epoch);
                 let turn = self.current_turn.load(Ordering::Acquire);
                 match self.revive(
                     &tools,
                     &context,
                     journals,
-                    Arc::unwrap_or_clone(journal),
+                    journal,
                     &restored,
                     turn,
                     epoch,
