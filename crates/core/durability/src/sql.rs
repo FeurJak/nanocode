@@ -33,6 +33,7 @@ pub enum SqlAccess {
     Read,
     Write,
     Schema,
+    Autocommit,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -119,6 +120,13 @@ const READ_FORMAT: Dialects = [
     "SELECT CAST(version AS TEXT) FROM nanocode_formats WHERE component = ?1",
     "SELECT CAST(version AS TEXT) FROM nanocode_formats WHERE component = $1::text",
 ];
+const MIGRATE_LOCK_TIMEOUT_MS: u64 = 2_000;
+const MIGRATE_LOCK_TRIES: u32 = 3;
+const LOCK_NOT_AVAILABLE: &str = "55P03";
+const LOCK_TIMEOUT_PG: &str = "SELECT set_config('lock_timeout', $1::text, true)";
+const SESSION_LOCK_TIMEOUT_PG: &str = "SELECT set_config('lock_timeout', $1::text, false)";
+const INDEX_VALID_PG: &str =
+    "SELECT CAST(indisvalid AS TEXT) FROM pg_index WHERE indexrelid = to_regclass($1::text)";
 const WRITE_FORMAT: Dialects = [
     "INSERT INTO nanocode_formats (component, version) VALUES (?1, CAST(?2 AS INTEGER)) ON CONFLICT (component) DO UPDATE SET version = excluded.version",
     "INSERT INTO nanocode_formats (component, version) VALUES ($1::text, CAST($2::text AS BIGINT)) ON CONFLICT (component) DO UPDATE SET version = excluded.version",
@@ -154,6 +162,103 @@ fn answered(
         )));
     }
     Ok(results)
+}
+
+fn lock_timed_out(error: &StoreError) -> bool {
+    matches!(error, StoreError::Backend(message) if message.contains(LOCK_NOT_AVAILABLE))
+}
+
+async fn schema_batch<H: Sql + ?Sized>(
+    host: &H,
+    statements: &[SqlStatement<'_>],
+) -> Result<Vec<Vec<SqlRow>>, StoreError> {
+    if host.dialect() != SqlDialect::Postgres {
+        return run_checked(host, SqlAccess::Schema, "format", statements).await;
+    }
+    let timeout = MIGRATE_LOCK_TIMEOUT_MS.to_string();
+    let bounded: Vec<SqlStatement<'_>> = std::iter::once(SqlStatement {
+        sql: LOCK_TIMEOUT_PG,
+        params: vec![timeout.as_str()],
+    })
+    .chain(statements.iter().cloned())
+    .collect();
+    let mut tries = 1;
+    loop {
+        match run_checked(host, SqlAccess::Schema, "format", &bounded).await {
+            Ok(mut results) => {
+                results.remove(0);
+                return Ok(results);
+            }
+            Err(error) if tries < MIGRATE_LOCK_TRIES && lock_timed_out(&error) => {
+                tries += 1;
+                nanocode_platform::sleep(Duration::from_millis(MIGRATE_LOCK_TIMEOUT_MS)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ConcurrentIndex {
+    pub name: &'static str,
+    pub create: &'static str,
+    pub drop: &'static str,
+}
+
+pub async fn build_index_concurrently<H: Sql + ?Sized>(
+    host: &H,
+    index: &ConcurrentIndex,
+) -> Result<(), StoreError> {
+    if host.dialect() != SqlDialect::Postgres {
+        return Err(StoreError::Backend(format!(
+            "index {} is built CONCURRENTLY, which only Postgres has",
+            index.name
+        )));
+    }
+    let timeout = MIGRATE_LOCK_TIMEOUT_MS.to_string();
+    let bounded = |sql| {
+        [
+            SqlStatement {
+                sql: SESSION_LOCK_TIMEOUT_PG,
+                params: vec![timeout.as_str()],
+            },
+            SqlStatement {
+                sql,
+                params: Vec::new(),
+            },
+        ]
+    };
+    for build in 1..=MIGRATE_LOCK_TRIES {
+        match run_checked(host, SqlAccess::Autocommit, "index", &bounded(index.create)).await {
+            Ok(_) => {}
+            Err(error) if build < MIGRATE_LOCK_TRIES && lock_timed_out(&error) => {
+                nanocode_platform::sleep(Duration::from_millis(MIGRATE_LOCK_TIMEOUT_MS)).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+        let read = [SqlStatement {
+            sql: INDEX_VALID_PG,
+            params: vec![index.name],
+        }];
+        let valid = run_checked(host, SqlAccess::Schema, "index", &read).await?;
+        match single(&valid[0])?.map(|row| text(row, 0)).transpose()? {
+            Some("true") => return Ok(()),
+            Some(_) => {
+                run_checked(host, SqlAccess::Autocommit, "index", &bounded(index.drop)).await?;
+            }
+            None => {
+                return Err(StoreError::Backend(format!(
+                    "index {} is missing after its build",
+                    index.name
+                )));
+            }
+        }
+    }
+    Err(StoreError::Backend(format!(
+        "index {} is still not valid after {MIGRATE_LOCK_TRIES} builds",
+        index.name
+    )))
 }
 
 pub async fn migrate_format<H: Sql + ?Sized>(
@@ -215,7 +320,7 @@ async fn migrate_once<H: Sql + ?Sized>(
             None => 0,
         })
     };
-    let stored = current(&run_checked(host, SqlAccess::Schema, "format", &check).await?)?;
+    let stored = current(&schema_batch(host, &check).await?)?;
     if stored > u64::from(known) {
         return Err(StoreError::UnsupportedFormat {
             component,
@@ -227,7 +332,7 @@ async fn migrate_once<H: Sql + ?Sized>(
         return if then.is_empty() {
             Ok(Vec::new())
         } else {
-            run_checked(host, SqlAccess::Schema, "format", then).await
+            schema_batch(host, then).await
         };
     }
     let last = migrations.len() - 1;
@@ -246,7 +351,7 @@ async fn migrate_once<H: Sql + ?Sized>(
                 .chain([write])
                 .chain(trailing.iter().cloned())
                 .collect();
-            let mut results = run_checked(host, SqlAccess::Schema, "format", &statements).await?;
+            let mut results = schema_batch(host, &statements).await?;
             if index == last {
                 return Ok(results.split_off(statements.len() - trailing.len()));
             }
@@ -254,12 +359,12 @@ async fn migrate_once<H: Sql + ?Sized>(
         };
         let probe = || statement(dialect, &adopt.probe, Vec::new());
         let statements: Vec<_> = schema.chain([probe()]).collect();
-        let results = run_checked(host, SqlAccess::Schema, "format", &statements).await?;
+        let results = schema_batch(host, &statements).await?;
         if !column_present(&results[statements.len() - 1])? {
             let add = [statement(dialect, &adopt.add, Vec::new())];
-            if let Err(error) = run_checked(host, SqlAccess::Schema, "format", &add).await
+            if let Err(error) = schema_batch(host, &add).await
                 && !column_present(
-                    &run_checked(host, SqlAccess::Schema, "format", &[probe()]).await?[0],
+                    &schema_batch(host, &[probe()]).await?[0],
                 )?
             {
                 return Err(error);
@@ -269,7 +374,7 @@ async fn migrate_once<H: Sql + ?Sized>(
             .into_iter()
             .chain(trailing.iter().cloned())
             .collect();
-        let mut results = run_checked(host, SqlAccess::Schema, "format", &statements).await?;
+        let mut results = schema_batch(host, &statements).await?;
         if index == last {
             return Ok(results.split_off(1));
         }

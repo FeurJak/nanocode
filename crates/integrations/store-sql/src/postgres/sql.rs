@@ -5,6 +5,8 @@ use nanocode_durability_core::{
 use nanocode_sync::{Actor, Stopped};
 use std::{sync::Arc, time::Duration};
 
+const RESET_SESSION: &str = "RESET ALL";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PgTimes {
     pub waited: Duration,
@@ -60,6 +62,49 @@ impl PgSql {
     }
 }
 
+impl PgSql {
+    async fn autocommit(
+        &self,
+        operation: &'static str,
+        statements: &[SqlStatement<'_>],
+    ) -> Result<Vec<Vec<SqlRow>>, StoreError> {
+        let started = nanocode_platform::now();
+        let mut connection = self.writes.acquire().await.map_err(backend)?;
+        let acquired = nanocode_platform::now();
+        let mut results = Vec::with_capacity(statements.len());
+        let mut failed = None;
+        for statement in statements {
+            match connection.run(std::slice::from_ref(statement)).await {
+                Ok(answer) => results.extend(answer),
+                Err(error) => {
+                    failed = Some(error);
+                    break;
+                }
+            }
+        }
+        let reset = connection
+            .run(&[SqlStatement {
+                sql: RESET_SESSION,
+                params: Vec::new(),
+            }])
+            .await;
+        if let Some(timed) = self.timed {
+            timed(
+                operation,
+                PgTimes {
+                    waited: acquired - started,
+                    ran: nanocode_platform::elapsed(acquired),
+                },
+            );
+        }
+        if let Some(error) = failed {
+            return Err(backend(error));
+        }
+        reset.map_err(backend)?;
+        Ok(results)
+    }
+}
+
 impl Sql for PgSql {
     fn transaction<'a>(
         &'a self,
@@ -82,6 +127,7 @@ impl Sql for PgSql {
         let pool = match access {
             SqlAccess::Read => &self.reads,
             SqlAccess::Write | SqlAccess::Schema => &self.writes,
+            SqlAccess::Autocommit => return Box::pin(self.autocommit(operation, statements)),
         };
         Box::pin(self.transact(pool, operation, Settle::Durable, statements))
     }

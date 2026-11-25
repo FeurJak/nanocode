@@ -21,8 +21,9 @@ pub use kv::{KeyValue, KeyValueStore, Versioned};
 pub use payload::EncodedPayload;
 pub use row::{Examined, PageCodec, RowStore};
 pub use sql::{
-    Collected, Migration, MissingColumn, Sql, SqlAccess, SqlDialect, SqlRow, SqlStatement,
-    SqlStore, Unreachable, migrate_format, migrate_format_then,
+    Collected, ConcurrentIndex, Migration, MissingColumn, Sql, SqlAccess, SqlDialect, SqlRow,
+    SqlStatement, SqlStore, Unreachable, build_index_concurrently, migrate_format,
+    migrate_format_then,
 };
 pub use staged::{StagedStore, StagedWrites};
 pub use state::{
