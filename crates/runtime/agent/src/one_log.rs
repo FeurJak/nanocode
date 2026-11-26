@@ -716,11 +716,19 @@ impl OneLog {
             .write_within(move |writing| {
                 Box::pin(async move {
                     let only = only.as_str();
-                    writing.load_owner(TOOLS_MARK).await?;
-                    writing.load_owner(only).await?;
+                    writing.load_owners(&[only.to_owned()]).await?;
                     let mut whole = BTreeSet::new();
                     let mut shared = Vec::new();
+                    let mut catalogs = BTreeSet::new();
                     for (session, id, updates) in writing.fold().cells_of(Some(only)) {
+                        if cell.is_some_and(|cell| cell != id) {
+                            continue;
+                        }
+                        for update in updates {
+                            if let Some(digest) = shared::catalog(update, TOOLS_MARK)? {
+                                catalogs.insert(stored_key(TOOLS_MARK, &digest));
+                            }
+                        }
                         let wanted = match cell {
                             Some(cell) => id == cell,
                             None => !shared::finished(updates)?,
@@ -730,7 +738,9 @@ impl OneLog {
                             shared.extend(shared::result_keys(session, updates)?);
                         }
                     }
-                    writing.load_owners(&shared).await?;
+                    let mut wanted = shared.clone();
+                    wanted.extend(catalogs);
+                    writing.load_owners(&wanted).await?;
                     let fold = writing.fold();
                     restored(fold, only, &whole, &shared);
                     let mut sessions: BTreeMap<String, Vec<CellJournal>> = BTreeMap::new();

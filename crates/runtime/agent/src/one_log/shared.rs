@@ -146,6 +146,30 @@ pub(super) fn result_keys(
     Ok(keys)
 }
 
+pub(super) fn catalog(update: &RawValue, mark: &str) -> Result<Option<String>, StoreError> {
+    #[derive(serde::Deserialize)]
+    struct Update {
+        #[serde(default)]
+        header: Option<Header>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Header {
+        #[serde(default)]
+        tools: Vec<Value>,
+    }
+    if !update.get().contains(mark) {
+        return Ok(None);
+    }
+    let update: Update = serde_json::from_str(update.get())
+        .map_err(|error| invalid(format!("cell journal update: {error}")))?;
+    Ok(update
+        .header
+        .and_then(|header| match header.tools.as_slice() {
+            [Value::Object(held)] => held.get(mark).and_then(Value::as_str).map(str::to_owned),
+            _ => None,
+        }))
+}
+
 pub(super) fn finished(updates: &[Box<RawValue>]) -> Result<bool, StoreError> {
     #[derive(serde::Deserialize)]
     struct Finished {
