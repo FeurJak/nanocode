@@ -11,19 +11,20 @@ use nanocode_agent_core::{
         LifecycleBackend, ParkedCall,
     },
     events::{AgentEventKind, AgentEventPublisher, AgentEvents},
-    input::{PromptInput, UserInput},
+    input::{Prompt, PromptInput, UserInput},
 };
 use nanocode_backend_antigravity_client::{Client, Content, ExplicitCache, Part, Reply};
 use nanocode_backend_antigravity_tools::{
     Engine, NAMES, Outcome, REMINDER, local_timestamp, system_message, with_header,
 };
-use nanocode_sync::{Atom, Signal};
+use nanocode_durability::{Admission, DurableOwner, EncodedPayload, agent_error};
 use nanocode_sync::future::{Either, select};
+use nanocode_sync::{Atom, Signal};
 use nanocode_tool_host::ToolContext;
 use serde_json::{Value, json, value::RawValue};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const USAGE_LOG: &str = "usage.jsonl";
 
@@ -40,7 +41,10 @@ pub struct Config {
     pub cache: Option<Arc<ExplicitCache>>,
     pub logs: PathBuf,
     pub notice: Option<String>,
+    pub durable: Option<DurableOwner>,
 }
+
+const MOVED: &str = "The session moved to another server while this call ran, so its outcome is unknown. Check what it changed before you run it again.";
 
 #[derive(Clone, Default)]
 pub struct State {
@@ -54,6 +58,7 @@ pub struct State {
     transcript: Vec<Content>,
     last_execution: Option<String>,
     executions: u64,
+    operation: Option<String>,
 }
 
 struct Inner {
@@ -467,11 +472,84 @@ impl Inner {
 
     async fn run(
         self: Arc<Self>,
-        input: PromptInput,
+        prompt: Prompt,
         events: AgentEventPublisher,
         request_id: String,
     ) -> Result<TurnResult> {
+        let Some(owner) = &self.config.durable else {
+            return self
+                .turn(self.load(), &prompt.instruction, events, request_id)
+                .await;
+        };
+        let admission = owner
+            .admit_typed::<_, Value, Value>(request_id.clone(), &prompt)
+            .await
+            .map_err(agent_error)?;
+        let pending = match admission {
+            Admission::Accepted => false,
+            Admission::Pending => true,
+            Admission::Completed { output, .. } => {
+                return Ok(TurnResult {
+                    request_id: Some(request_id),
+                    turn_id: None,
+                    final_message: output
+                        .get("final_message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    usage: None,
+                    boundary: None,
+                });
+            }
+            Admission::Failed { error, .. } => {
+                return Err(NanocodeError::ReplayedExecutionFailed(error));
+            }
+            Admission::Cancelled => return Err(NanocodeError::TurnCancelled),
+        };
+        owner
+            .begin_attempt(request_id.clone())
+            .await
+            .map_err(agent_error)?;
         let mut state = self.load();
+        if pending
+            && let Some(continuation) = owner
+                .continuation(request_id.clone())
+                .await
+                .map_err(agent_error)?
+        {
+            state = State::restored(&continuation.decode::<Value>().map_err(agent_error)?)?;
+        }
+        let result = self
+            .turn(state, &prompt.instruction, events, request_id.clone())
+            .await;
+        match &result {
+            Err(error) if error.execution_policy_disposition().is_some() => {}
+            Ok(done) => {
+                let output = json!({"final_message": done.final_message});
+                owner
+                    .complete(request_id, self.settled()?, &output)
+                    .await
+                    .map_err(agent_error)?;
+            }
+            Err(NanocodeError::TurnCancelled) => owner
+                .cancel(request_id, Some(self.settled()?))
+                .await
+                .map_err(agent_error)?,
+            Err(error) => owner
+                .fail(request_id, self.settled()?, error.to_string())
+                .await
+                .map_err(agent_error)?,
+        }
+        result
+    }
+
+    async fn turn(
+        &self,
+        mut state: State,
+        input: &PromptInput,
+        events: AgentEventPublisher,
+        request_id: String,
+    ) -> Result<TurnResult> {
         if let Some(notice) = &self.config.notice
             && !self.noticed.swap(true, Ordering::SeqCst)
         {
@@ -481,18 +559,38 @@ impl Inner {
                 json!({"error": notice, "source": "antigravity", "observational": true}),
             );
         }
-        let text = prompt_text(&input);
-        if !state.contents.is_empty() {
-            state.step += 1;
+        if state.operation.as_deref() == Some(request_id.as_str()) {
+            let moved = state
+                .contents
+                .last()
+                .filter(|content| content.role == "model")
+                .map(|content| {
+                    content
+                        .calls()
+                        .map(|call| Part::response(call.name.clone(), "error", MOVED))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !moved.is_empty() {
+                state.step += 1;
+                state.push(Content::user(moved));
+            }
+        } else {
+            let text = prompt_text(input);
+            if !state.contents.is_empty() {
+                state.step += 1;
+            }
+            let settings = (!state.settings_sent).then(|| self.config.profile.display.clone());
+            state.settings_sent = true;
+            state.requests.push(text.clone());
+            state.push(Content::user(vec![Part::text(prompts::user_request(
+                &text,
+                &local_timestamp(Self::now()),
+                settings.as_deref(),
+            ))]));
+            state.operation = self.config.durable.as_ref().map(|_| request_id.clone());
         }
-        let settings = (!state.settings_sent).then(|| self.config.profile.display.clone());
-        state.settings_sent = true;
-        state.requests.push(text.clone());
-        state.push(Content::user(vec![Part::text(prompts::user_request(
-            &text,
-            &local_timestamp(Self::now()),
-            settings.as_deref(),
-        ))]));
+        self.persist(&state).await?;
         let mut final_message = String::new();
         let mut totals = ReportedTurnUsage {
             input_tokens: 0,
@@ -507,7 +605,7 @@ impl Inner {
         loop {
             if state.prompt_tokens >= self.config.profile.compaction_limit {
                 self.compact(&mut state, &events).await?;
-                self.save(&state);
+                self.persist(&state).await?;
             }
             let call_index = state.calls;
             let reply = self
@@ -545,7 +643,7 @@ impl Inner {
             state.push(Content::model(parts));
             if calls.is_empty() {
                 state.streak += 1;
-                self.save(&state);
+                self.persist(&state).await?;
                 let engine = &self.config.engine;
                 if !engine.has_urgent() && !engine.blocking() {
                     break;
@@ -560,9 +658,10 @@ impl Inner {
                     state.step += 1;
                     state.push(Content::user(vec![Part::text(system_message(REMINDER))]));
                 }
-                self.save(&state);
+                self.persist(&state).await?;
                 continue;
             }
+            self.persist(&state).await?;
             let mut responses = Vec::with_capacity(calls.len());
             let mut effective = 0;
             for (index, call) in calls.iter().enumerate() {
@@ -615,7 +714,7 @@ impl Inner {
                 }
             }
             state.push(Content::user(responses));
-            self.save(&state);
+            self.persist(&state).await?;
         }
         self.finish_execution(&mut state);
         self.save(&state);
@@ -629,9 +728,8 @@ impl Inner {
         })
     }
 
-    fn checkpoint(&self) -> SessionCheckpoint {
-        let state = self.load();
-        let payload = json!({
+    fn payload(&self, state: &State) -> Value {
+        json!({
             "format": crate::durability::FORMAT,
             "model": self.config.model.as_str(),
             "thinking": self.config.thinking,
@@ -639,7 +737,31 @@ impl Inner {
             "step": state.step,
             "calls": state.calls,
             "requests": state.requests,
-        });
+            "operation": state.operation,
+        })
+    }
+
+    async fn persist(&self, state: &State) -> Result<()> {
+        self.save(state);
+        let (Some(durable), Some(operation)) = (&self.config.durable, &state.operation) else {
+            return Ok(());
+        };
+        let continuation = EncodedPayload::encode(&self.payload(state)).map_err(agent_error)?;
+        durable
+            .advance(operation.clone(), continuation)
+            .await
+            .map_err(agent_error)
+    }
+
+    fn settled(&self) -> Result<EncodedPayload> {
+        let mut state = self.load();
+        state.operation = None;
+        self.save(&state);
+        EncodedPayload::encode(&self.payload(&state)).map_err(agent_error)
+    }
+
+    fn checkpoint(&self) -> SessionCheckpoint {
+        let payload = self.payload(&self.load());
         SessionCheckpoint::native(
             self.config.session.clone(),
             self.config.model.clone(),
@@ -679,6 +801,18 @@ impl Driver {
             .payload()
             .decode()
             .map_err(|error| NanocodeError::InvalidCheckpoint(error.to_string()))?;
+        self.restore_payload(&payload)
+    }
+
+    pub fn restore_payload(self, payload: &Value) -> Result<Self> {
+        let state = State::restored(payload)?;
+        self.inner.state.set(state);
+        Ok(self)
+    }
+}
+
+impl State {
+    fn restored(payload: &Value) -> Result<Self> {
         let contents: Vec<Content> = payload
             .get("contents")
             .cloned()
@@ -698,32 +832,40 @@ impl Driver {
                     .collect()
             })
             .unwrap_or_default();
-        let (step, calls) = (number("step"), number("calls"));
-        self.inner.state.update(|state| {
-            state.settings_sent = !contents.is_empty();
-            state.transcript.clone_from(&contents);
-            state.contents.clone_from(&contents);
-            state.step = step;
-            state.calls = calls;
-            state.requests.clone_from(&requests);
-        });
-        Ok(self)
+        let operation = payload
+            .get("operation")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        Ok(Self {
+            settings_sent: !contents.is_empty(),
+            transcript: contents.clone(),
+            contents,
+            step: number("step"),
+            calls: number("calls"),
+            requests,
+            operation,
+            ..Self::default()
+        })
     }
+}
 
+impl Driver {
     fn start(&self, prompt: BackendPrompt) -> BackendTurn {
         let inner = Arc::clone(&self.inner);
         let request_id = prompt
             .request_id
             .clone()
-            .unwrap_or_else(|| format!("{}-{}", inner.config.session, prompt.key.0));
+            .unwrap_or_else(|| match inner.config.durable {
+                Some(_) => nanocode_platform::uuid_v7().to_string(),
+                None => format!("{}-{}", inner.config.session, prompt.key.0),
+            });
         let cancel = Arc::new(Signal::new());
         inner.cancel.set(Some(Arc::clone(&cancel)));
         let events = prompt.events.clone();
         let id = request_id.clone();
         let (sender, receiver) = nanocode_sync::oneshot::channel();
         nanocode_platform::spawn(async move {
-            let run =
-                Box::pin(Arc::clone(&inner).run(prompt.prompt.instruction.clone(), events, id));
+            let run = Box::pin(Arc::clone(&inner).run(prompt.prompt, events, id));
             let stop = Box::pin(async move { cancel.wait().await });
             let result = match select(run, stop).await {
                 Either::Left((result, _)) => result,
@@ -734,8 +876,19 @@ impl Driver {
                     }) {
                         state.contents.pop();
                     }
+                    let operation = state.operation.clone();
                     inner.save(&state);
-                    Err(NanocodeError::TurnCancelled)
+                    match (&inner.config.durable, operation) {
+                        (Some(owner), Some(operation)) => match inner.settled() {
+                            Ok(checkpoint) => owner
+                                .cancel(operation, Some(checkpoint))
+                                .await
+                                .map_err(agent_error)
+                                .and(Err(NanocodeError::TurnCancelled)),
+                            Err(error) => Err(error),
+                        },
+                        _ => Err(NanocodeError::TurnCancelled),
+                    }
                 }
             };
             drop(sender.send(result));
@@ -864,7 +1017,10 @@ impl LifecycleBackend for Driver {
         }
         Box::pin(async move {
             inner.config.engine.shutdown().await;
-            Ok(())
+            match &inner.config.durable {
+                Some(owner) => owner.shutdown().await.map_err(agent_error),
+                None => Ok(()),
+            }
         })
     }
 

@@ -164,6 +164,7 @@ impl AntigravityHarness {
         use nanocode_agent_core::{AgentHandle, backend::BackendRuntime};
         use nanocode_backend_antigravity_client::{Client, ExplicitCache};
         use nanocode_backend_antigravity_tools::{DECLARATIONS, Engine};
+        use nanocode_durability::agent_error;
         use nanocode_tool_contracts::ToolCollection as _;
         use nanocode_tool_host::{Tools, runtime::ToolRuntime};
         let invalid = |error: String| NanocodeError::InvalidRequest(error);
@@ -318,6 +319,17 @@ impl AntigravityHarness {
             trajectory: new_id(&format!("trajectory{session}")),
         };
         let checkpoint = spec.checkpoint.clone();
+        let (durable, stored) = match spec.durable_state {
+            Some(state) => {
+                let (owner, stored) = state.acquire_agent().await.map_err(agent_error)?;
+                let stored = stored
+                    .map(|payload| payload.decode::<serde_json::Value>())
+                    .transpose()
+                    .map_err(agent_error)?;
+                (Some(owner), stored)
+            }
+            None => (None, None),
+        };
         let (runtime, events) = BackendRuntime::new(session.clone());
         let driver = Driver::new(Config {
             client,
@@ -332,10 +344,12 @@ impl AntigravityHarness {
             cache,
             logs: brain.join(".system_generated").join("logs"),
             notice,
+            durable,
         });
-        let driver = match checkpoint {
-            Some(checkpoint) => driver.restore(&checkpoint)?,
-            None => driver,
+        let driver = match (stored, checkpoint) {
+            (Some(stored), _) => driver.restore_payload(&stored)?,
+            (None, Some(checkpoint)) => driver.restore(&checkpoint)?,
+            (None, None) => driver,
         };
         Ok((runtime.bind(driver), events))
     }
