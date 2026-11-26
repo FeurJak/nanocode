@@ -114,8 +114,23 @@ impl ThreadStore {
     }
 
     #[must_use]
+    pub fn rebound(&self, log: Arc<ThreadLog>) -> Self {
+        Self(Arc::new(Inner {
+            log,
+            owners: Atom::new(self.0.owners.read(Clone::clone)),
+            durable: Atom::new(*self.0.durable.get()),
+            deferred: Atom::new(*self.0.deferred.get()),
+            owed: Atom::new(false),
+        }))
+    }
+
+    #[must_use]
     pub fn log(&self) -> &Arc<ThreadLog> {
         &self.0.log
+    }
+
+    pub(super) fn owned(&self, state_id: &str) -> bool {
+        self.0.owners.read(|owners| owners.contains_key(state_id))
     }
 
     pub fn settle_durably(&self) {

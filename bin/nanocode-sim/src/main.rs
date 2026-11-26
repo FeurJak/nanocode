@@ -55,6 +55,7 @@ mod threadscope;
 mod threadholds;
 mod threadstore;
 mod threadturns;
+mod threadimport;
 mod threadover;
 mod threadwakes;
 mod migrated;

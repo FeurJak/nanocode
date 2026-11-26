@@ -456,6 +456,7 @@ default_table='
 1 canary_thread_scope_lost_unretried canary:16 --scenario thread_scope --mutation lost_unretried
 1 canary_thread_scope_keep_all_events canary:16 --scenario thread_scope --mutation keep_all_events
 1 canary_thread_scope_reservation_skipped canary:16 --scenario thread_scope --mutation reservation_skipped
+1 canary_thread_scope_reimport_advances canary:16 --scenario thread_scope --mutation reimport_advances
 1 canary_thread_scope_store_skips_fence canary:16 --scenario thread_scope --mutation store_skips_fence
 1 canary_thread_scope_journal_loads_finished canary:16 --scenario thread_scope --mutation journal_loads_finished
 8 repo_cache pass --scenario repo_cache

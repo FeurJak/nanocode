@@ -135,6 +135,7 @@ pub struct ThreadScopeStats {
     pub claim_bytes_max: u64,
     pub claim_rows_max: u64,
     pub history_bytes_max: u64,
+    pub import_ops: u64,
     pub store_ops: u64,
     pub store_reopens: u64,
     pub journal_ops: u64,
@@ -186,6 +187,7 @@ impl ThreadScopeStats {
         self.claim_bytes_max = self.claim_bytes_max.max(other.claim_bytes_max);
         self.claim_rows_max = self.claim_rows_max.max(other.claim_rows_max);
         self.history_bytes_max = self.history_bytes_max.max(other.history_bytes_max);
+        self.import_ops += other.import_ops;
         self.store_ops += other.store_ops;
         self.store_reopens += other.store_reopens;
         self.journal_ops += other.journal_ops;
@@ -1392,6 +1394,14 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
         crate::threadover::run(&mut rng, &over, &mut stats);
         over.net.nodes.set(Vec::new());
         if let Some(wrong) = over.wrong.read(Clone::clone) {
+            flag(&world.wrong, wrong);
+        }
+    }
+    if world.wrong.read(Option::is_none) {
+        let imports = self::world(&mut rng, time);
+        crate::threadimport::run(&mut rng, &imports, &mut stats);
+        imports.net.nodes.set(Vec::new());
+        if let Some(wrong) = imports.wrong.read(Clone::clone) {
             flag(&world.wrong, wrong);
         }
     }

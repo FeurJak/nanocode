@@ -14,12 +14,13 @@ use nanocode_tool_host::{
 use nanocode_turnlog::{Answer, ArmedWake, EffectClass, Resumption, Wake, WakeRider};
 use serde_json::{Map, Value, value::RawValue};
 
-use super::{Fire, Heard, OneLog, Policy, WakeError};
+use super::{Exported, Fire, Heard, Imported, OneLog, Policy, WakeError};
 use crate::{
-    durability::StoreError,
+    durability::{StoreError, StoreRecord},
     session_log::{LogEntry, LoggedEvent, Started, Submission, Submitted, TurnRecord, TurnState},
     thread_scope::{
-        ThreadHolds, ThreadLog, ThreadLogs, ThreadState, ThreadTurns, ThreadWakes, sim, wakes,
+        ThreadHolds, ThreadJournals, ThreadLog, ThreadLogs, ThreadState, ThreadStore, ThreadTurns,
+        ThreadWakes, sim, wakes,
     },
 };
 
@@ -38,6 +39,8 @@ struct Bound {
     turns: ThreadTurns,
     holds: ThreadHolds,
     wakes: ThreadWakes,
+    store: ThreadStore,
+    journals: ThreadJournals,
 }
 
 trait Refusal: Sized {
@@ -110,10 +113,13 @@ impl OneLog {
         policy: &Policy,
     ) -> Result<Arc<OneLogOver>, StoreError> {
         let log = Arc::new(logs.get(thread).await.map_err(refused)?);
+        let holds = ThreadHolds::new(Arc::clone(&log), policy.effects.clone())?;
         let bound = Bound {
             turns: ThreadTurns::new(Arc::clone(&log), policy.restarts)?,
-            holds: ThreadHolds::new(Arc::clone(&log), policy.effects.clone())?,
             wakes: ThreadWakes::new(Arc::clone(&log), thread, policy.wakes_max)?,
+            store: ThreadStore::new(Arc::clone(&log)),
+            journals: ThreadJournals::new(Arc::clone(&log), holds.effects()),
+            holds,
             log,
         };
         Ok(Arc::new_cyclic(|this| OneLogOver {
@@ -142,6 +148,8 @@ impl OneLogOver {
             turns: stale.turns.rebound(Arc::clone(&log))?,
             holds: stale.holds.rebound(Arc::clone(&log))?,
             wakes: stale.wakes.rebound(Arc::clone(&log))?,
+            store: stale.store.rebound(Arc::clone(&log)),
+            journals: stale.journals.rebound(Arc::clone(&log)),
             log,
         });
         if let Some(index) = self.index.read(Clone::clone) {
@@ -258,6 +266,41 @@ impl OneLogOver {
             bound.turns.retry(request_id, error, kind, retry_at).await
         })
         .await
+    }
+
+    #[must_use]
+    pub fn store(&self) -> ThreadStore {
+        self.current().store.clone()
+    }
+
+    #[must_use]
+    pub fn journals(&self) -> ThreadJournals {
+        self.current().journals.clone()
+    }
+
+    pub fn settle_durably(&self) {
+        self.current().store.settle_durably();
+    }
+
+    pub async fn import_state(
+        &self,
+        state_id: &str,
+        revision: u64,
+        payload: &str,
+        records: &[StoreRecord],
+    ) -> Result<Imported, StoreError> {
+        self.retried(|bound| async move {
+            bound
+                .store
+                .import_state(state_id, revision, payload, records)
+                .await
+        })
+        .await
+    }
+
+    pub async fn export_state(&self, state_id: &str) -> Result<Option<Exported>, StoreError> {
+        self.retried(|bound| async move { bound.store.export_state(state_id).await })
+            .await
     }
 
     pub fn declare(&self, tool: impl Into<String>, class: EffectClass) {

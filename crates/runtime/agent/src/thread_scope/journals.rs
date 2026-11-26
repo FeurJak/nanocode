@@ -48,6 +48,18 @@ impl ThreadJournals {
     }
 
     #[must_use]
+    pub fn rebound(&self, log: Arc<ThreadLog>) -> Self {
+        Self(Arc::new(Inner {
+            log,
+            effects: Arc::clone(&self.0.effects),
+            live: Atom::new(self.0.live.read(Clone::clone)),
+            unsaved: Atom::new(self.0.unsaved.read(Clone::clone)),
+            answered: Atom::new(self.0.answered.read(Clone::clone)),
+            dispatched: Atom::new(self.0.dispatched.read(Clone::clone)),
+        }))
+    }
+
+    #[must_use]
     pub fn log(&self) -> &Arc<ThreadLog> {
         &self.0.log
     }
