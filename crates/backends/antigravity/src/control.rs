@@ -291,13 +291,15 @@ impl Inner {
         let inner = Arc::clone(self);
         let job_turn = Arc::clone(&turn);
         let prompt = request.prompt;
-        let job: crate::driver::Job = Box::pin(async move {
-            let result = inner.run_turn(&job_turn, &prompt).await;
-            inner.turns.update(|turns| {
-                turns.remove(&job_turn.key);
-            });
-            job_turn.settled.fire();
-            drop(sender.send(result));
+        let job: crate::driver::Job = Box::new(move || {
+            Box::pin(async move {
+                let result = inner.run_turn(&job_turn, &prompt).await;
+                inner.turns.update(|turns| {
+                    turns.remove(&job_turn.key);
+                });
+                job_turn.settled.fire();
+                drop(sender.send(result));
+            })
         });
         if self.jobs.send(job).is_err() {
             self.turns.update(|turns| {
@@ -865,8 +867,10 @@ impl Inner {
             turn.stop.fire();
         }
         let (sender, receiver) = nanocode_sync::oneshot::channel();
-        let job: crate::driver::Job = Box::pin(async move {
-            let _ = sender.send(());
+        let job: crate::driver::Job = Box::new(move || {
+            Box::pin(async move {
+                let _ = sender.send(());
+            })
         });
         if self.jobs.send(job).is_ok() {
             let _ = receiver.await;
@@ -907,7 +911,7 @@ impl Inner {
         let (sender, receiver) = nanocode_sync::oneshot::channel();
         let inner = Arc::clone(self);
         let job: crate::driver::Job =
-            Box::pin(async move { drop(sender.send(inner.compaction().await)) });
+            Box::new(move || Box::pin(async move { drop(sender.send(inner.compaction().await)) }));
         if self.jobs.send(job).is_err() {
             return Err(stopped());
         }
@@ -990,8 +994,9 @@ impl Inner {
         }
         let (sender, receiver) = nanocode_sync::oneshot::channel();
         let inner = Arc::clone(self);
-        let job: crate::driver::Job =
-            Box::pin(async move { drop(sender.send(inner.commit_notice(notice, prefix).await)) });
+        let job: crate::driver::Job = Box::new(move || {
+            Box::pin(async move { drop(sender.send(inner.commit_notice(notice, prefix).await)) })
+        });
         if self.jobs.send(job).is_err() {
             return Err(stopped());
         }

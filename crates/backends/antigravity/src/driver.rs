@@ -91,7 +91,7 @@ pub(crate) const OPEN: u8 = 0;
 pub(crate) const CLOSING: u8 = 1;
 pub(crate) const STOPPED: u8 = 2;
 
-pub(crate) type Job = BackendFuture<()>;
+pub(crate) type Job = Box<dyn FnOnce() -> BackendFuture<()> + Send>;
 
 #[derive(Clone)]
 pub(crate) struct Steer {
@@ -397,7 +397,7 @@ impl Driver {
         let (jobs, mut queue) = nanocode_sync::mpsc::unbounded_channel::<Job>();
         nanocode_platform::spawn(async move {
             while let Some(job) = queue.recv().await {
-                job.await;
+                job().await;
             }
         });
         let profile = config.profile.clone();
