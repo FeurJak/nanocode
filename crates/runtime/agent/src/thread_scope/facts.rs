@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use nanocode_scope::ScopeError;
+use nanocode_sync::Slot;
 use nanocode_turnlog::{CachedAt, Record, cache_key};
 use serde_json::value::RawValue;
 
@@ -85,6 +86,11 @@ fn wanted(
         named?;
     }
     Ok(blobs)
+}
+
+fn behind(state: &ThreadState, older: Option<&(u64, Vec<(u64, StoredFact)>)>, after: u64) -> bool {
+    let through = older.map_or(after, |(through, _)| *through);
+    state.fact_base() > through
 }
 
 fn replayed(
@@ -227,24 +233,48 @@ impl FactLog for Scoped {
     }
 
     fn append(&self, after: u64, write: Append) -> StoreFuture<'_, Result<u64, StoreError>> {
-        let scope = self.scope.clone();
+        let write = Arc::new(Slot::new(Some(write)));
         Box::pin(async move {
-            let older = self.older(after).await?;
-            self.log
-                .job_once(move |staged| {
-                    let mut unseen = replayed(staged.state(), &scope, older.as_ref(), after)?;
-                    if after > 0 && sim::mutated(sim::Mutation::FactsUnseenSkipped) {
-                        unseen.facts.clear();
-                        unseen.blobs.clear();
+            let mut passed: Option<u64> = None;
+            loop {
+                let older = self.older(after).await?;
+                let scope = self.scope.clone();
+                let pending = Arc::clone(&write);
+                let landed = self
+                    .log
+                    .job(move |staged| {
+                        if behind(staged.state(), older.as_ref(), after) {
+                            return Ok(Err(staged.state().fact_base()));
+                        }
+                        let Some(write) = pending.take() else {
+                            return Err(StoreError::NotCommitted(
+                                "a fact append already ran in a batch its owner could not commit; nothing was written".to_owned(),
+                            ));
+                        };
+                        let mut unseen = replayed(staged.state(), &scope, older.as_ref(), after)?;
+                        if after > 0 && sim::mutated(sim::Mutation::FactsUnseenSkipped) {
+                            unseen.facts.clear();
+                            unseen.blobs.clear();
+                        }
+                        let mut sink = Sink {
+                            staged,
+                            state: &scope.state,
+                        };
+                        write(unseen, &mut sink).map(Ok).map_err(StoreError::from)
+                    })
+                    .await
+                    .map_err(refused)?;
+                match landed {
+                    Ok(seq) => return Ok(seq),
+                    Err(base) => {
+                        assert!(
+                            passed.is_none_or(|before| base > before),
+                            "a fact append runs again only after the thread's window moved past what it read"
+                        );
+                        passed = Some(base);
                     }
-                    let mut sink = Sink {
-                        staged,
-                        state: &scope.state,
-                    };
-                    write(unseen, &mut sink).map_err(StoreError::from)
-                })
-                .await
-                .map_err(refused)
+                }
+            }
         })
     }
 }
