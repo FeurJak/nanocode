@@ -1384,6 +1384,7 @@ impl TurnDurability for TurnLogPolicy {
             let stored = self.disk.with(|rows| rows.view(scope));
             crate::stall::bounded(scope, &stored, seq);
             crate::resident::probe(scope, &stored, seq, self.limit, self.ratio);
+            crate::scans::probe(scope, &stored, seq);
             let referenced = referenced(&stored);
             for (row, body) in &stored {
                 assert!(

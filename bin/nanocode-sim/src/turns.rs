@@ -94,10 +94,11 @@ pub enum TurnMutation {
     TailRowsAppended,
     TakeoverOpens,
     TickNotAtomic,
+    ScansUnbatched,
 }
 
 impl TurnMutation {
-    const ALL: [Self; 40] = [
+    const ALL: [Self; 41] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
@@ -138,6 +139,7 @@ impl TurnMutation {
         Self::TailRowsAppended,
         Self::TakeoverOpens,
         Self::TickNotAtomic,
+        Self::ScansUnbatched,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -188,6 +190,7 @@ impl TurnMutation {
             Self::TailRowsAppended => "tail_rows_appended",
             Self::TakeoverOpens => "takeover_opens",
             Self::TickNotAtomic => "tick_not_atomic",
+            Self::ScansUnbatched => "scans_unbatched",
         }
     }
 
@@ -1276,6 +1279,7 @@ impl Sim {
             TurnMutation::UnindexedPinsPages => nanocode_turnlog::sim::Mutation::UnindexedPinsPages,
             TurnMutation::PlacedStayResident => nanocode_turnlog::sim::Mutation::PlacedStayResident,
             TurnMutation::FinishedKeepsPrompt => nanocode_turnlog::sim::Mutation::FinishedKeepsPrompt,
+            TurnMutation::ScansUnbatched => nanocode_turnlog::sim::Mutation::ScansUnbatched,
             _ => nanocode_turnlog::sim::Mutation::None,
         });
         let policy: Box<dyn TurnDurability> = match self.options.policy {

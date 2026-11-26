@@ -79,6 +79,19 @@ impl LogHost for Bounded {
         Box::pin(within(self.within, "scans", scope, self.host.scans(scans)))
     }
 
+    fn scan_ranges<'a>(
+        &'a self,
+        scope: &'a str,
+        ranges: &'a [std::ops::Range<u64>],
+    ) -> StoreFuture<'a, Result<Vec<ScopeRows>, StoreError>> {
+        Box::pin(within(
+            self.within,
+            "scan_ranges",
+            scope,
+            self.host.scan_ranges(scope, ranges),
+        ))
+    }
+
     fn load<'a>(
         &'a self,
         scope: &'a str,

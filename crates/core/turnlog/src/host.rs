@@ -73,6 +73,20 @@ pub trait LogHost: Send + Sync {
         })
     }
 
+    fn scan_ranges<'a>(
+        &'a self,
+        scope: &'a str,
+        ranges: &'a [Range<u64>],
+    ) -> StoreFuture<'a, Result<Vec<ScopeRows>, StoreError>> {
+        Box::pin(async move {
+            let mut rows = Vec::with_capacity(ranges.len());
+            for range in ranges {
+                rows.push(self.scan(scope, range.start, range.end).await?);
+            }
+            Ok(rows)
+        })
+    }
+
     fn load<'a>(
         &'a self,
         scope: &'a str,
@@ -488,6 +502,45 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
                 return Err(invalid(format!(
                     "{} scans returned {} results",
                     scans.len(),
+                    results.len()
+                )));
+            }
+            results
+                .into_iter()
+                .map(|rows| rows.into_iter().map(row).collect())
+                .collect()
+        })
+    }
+
+    fn scan_ranges<'a>(
+        &'a self,
+        scope: &'a str,
+        ranges: &'a [Range<u64>],
+    ) -> StoreFuture<'a, Result<Vec<ScopeRows>, StoreError>> {
+        Box::pin(async move {
+            if ranges.is_empty() {
+                return Ok(Vec::new());
+            }
+            self.prepare().await?;
+            let bounds: Vec<(String, String)> = ranges
+                .iter()
+                .map(|range| (range.start.to_string(), range.end.to_string()))
+                .collect();
+            let statements: Vec<SqlStatement<'_>> = bounds
+                .iter()
+                .map(|(from, to)| SqlStatement {
+                    sql: self.pick(&SCAN),
+                    params: vec![scope, from.as_str(), to.as_str()],
+                })
+                .collect();
+            let results = self
+                .host
+                .run(SqlAccess::Read, "turn_log_ranges", &statements)
+                .await?;
+            if results.len() != ranges.len() {
+                return Err(invalid(format!(
+                    "{} range scans returned {} results",
+                    ranges.len(),
                     results.len()
                 )));
             }

@@ -1364,6 +1364,10 @@ impl Fold {
         }
     }
 
+    pub(crate) fn keyframe(&self, row: u64) -> Option<u64> {
+        self.chains.get(&row).copied()
+    }
+
     pub(crate) fn chains_of(&self, groups: &BTreeMap<u64, (u64, u64)>) -> Vec<(u64, u64)> {
         self.chains
             .iter()

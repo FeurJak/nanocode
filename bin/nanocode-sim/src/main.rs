@@ -72,6 +72,7 @@ mod repocache;
 mod requestclose;
 mod resident;
 mod rng;
+mod scans;
 mod scale;
 mod scripted;
 mod secrets;
