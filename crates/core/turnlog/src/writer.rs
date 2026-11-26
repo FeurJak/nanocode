@@ -32,6 +32,7 @@ use crate::{
 
 pub const EVENT_GAP: u64 = 1 << 14;
 pub const SNAPSHOT_RATIO: usize = 2;
+pub const FIRST_ROW: u64 = 1;
 const CLAIM: &str = "writer";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1715,7 +1716,7 @@ impl TurnLog {
             held: Vec::new(),
             history: History::default(),
             host,
-            next: 1,
+            next: FIRST_ROW,
             previous: None,
             raw,
             scope,

@@ -15,7 +15,7 @@ mod wake;
 mod wake_index;
 mod writer;
 
-pub use codec::extensible;
+pub use codec::{extensible, standalone, standalone_plain, standalone_row};
 pub use effect::{EffectClass, Effects};
 #[cfg(not(target_family = "wasm"))]
 pub use file::{FileLog, FileOptions};
@@ -34,4 +34,4 @@ pub use record::{Outcome, Record, Status, decode, encode};
 pub use wake::{ArmedWake, Trigger, Unfit, Wake, Wakes, sim as wake_sim};
 pub use wake_index::{Statements, WakeIndex, WakeRider, WakeSummary};
 pub const CHAIN_WINDOW_BYTES: usize = codec::WINDOW;
-pub use writer::{EVENT_GAP, Follower, Point, Row, SNAPSHOT_RATIO, Stats, TurnLog, Writing, rows};
+pub use writer::{EVENT_GAP, FIRST_ROW, Follower, Point, Row, SNAPSHOT_RATIO, Stats, TurnLog, Writing, rows};

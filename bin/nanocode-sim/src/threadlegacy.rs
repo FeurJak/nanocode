@@ -284,6 +284,7 @@ fn prompt(rng: &mut Rng) -> Box<RawValue> {
 }
 
 struct Script {
+    prefix: String,
     ids: Vec<String>,
     phases: BTreeMap<String, u8>,
     calls: Vec<String>,
@@ -324,7 +325,7 @@ fn op(rng: &mut Rng, script: &mut Script) -> Op {
         72..76 => {
             script.holds += 1;
             Some(Op::Hold {
-                key: format!("hold{}", script.holds),
+                key: format!("{}hold{}", script.prefix, script.holds),
             })
         }
         76..80 => Some(Op::Host {
@@ -345,14 +346,14 @@ fn op(rng: &mut Rng, script: &mut Script) -> Op {
             payload: rng.below(10_000),
         }),
         94..97 => {
-            let call_id = format!("c{}", script.calls.len());
+            let call_id = format!("{}c{}", script.prefix, script.calls.len());
             script.calls.push(call_id.clone());
             Some(Op::Call { call_id })
         }
         _ => script.calls.pop().map(|call_id| Op::Result { call_id }),
     };
     picked.unwrap_or_else(|| {
-        let id = format!("old{}", script.ids.len());
+        let id = format!("{}{}", script.prefix, script.ids.len());
         script.ids.push(id.clone());
         script.phases.insert(id.clone(), 0);
         Op::Submit {
@@ -374,6 +375,15 @@ fn stored_key(at: u64) -> String {
 }
 
 pub async fn write(rng: &mut Rng, host: Arc<dyn LogHost>, thread: &str) -> Result<Legacy, String> {
+    write_named(rng, host, thread, "old").await
+}
+
+pub async fn write_named(
+    rng: &mut Rng,
+    host: Arc<dyn LogHost>,
+    thread: &str,
+    prefix: &str,
+) -> Result<Legacy, String> {
     let log = TurnLog::open(host, thread)
         .await
         .map_err(failed("open a legacy turn log"))?
@@ -388,6 +398,7 @@ pub async fn write(rng: &mut Rng, host: Arc<dyn LogHost>, thread: &str) -> Resul
             usize::try_from(rng.range(ROW_BYTES.start, ROW_BYTES.end)).expect("a byte count fits"),
         ));
     let mut script = Script {
+        prefix: prefix.to_owned(),
         ids: Vec::new(),
         phases: BTreeMap::new(),
         calls: Vec::new(),
@@ -406,19 +417,7 @@ pub async fn write(rng: &mut Rng, host: Arc<dyn LogHost>, thread: &str) -> Resul
         .await
         .map_err(failed("write a legacy turn log"))?;
     }
-    let mut owners: Vec<String> = SESSIONS
-        .iter()
-        .chain(&STATES)
-        .map(|owner| (*owner).to_owned())
-        .collect();
-    owners.extend((KEYS..2 * KEYS).map(stored_key));
-    Ok(Legacy {
-        next: 0,
-        ids: script.ids,
-        owners,
-        stored: (0..2 * KEYS).map(stored_key).collect(),
-        hosts: (0..HOSTS).map(|at| format!("h{at}")).collect(),
-    })
+    Ok(Legacy::named(script.ids))
 }
 
 type Facts = Vec<(u64, Option<String>, StoredFact)>;
@@ -714,6 +713,26 @@ pub fn differs(theirs: &View, ours: &View) -> Option<String> {
 }
 
 impl Legacy {
+    pub fn named(ids: Vec<String>) -> Self {
+        let mut owners: Vec<String> = SESSIONS
+            .iter()
+            .chain(&STATES)
+            .map(|owner| (*owner).to_owned())
+            .collect();
+        owners.extend((KEYS..2 * KEYS).map(stored_key));
+        Self {
+            next: 0,
+            ids,
+            owners,
+            stored: (0..2 * KEYS).map(stored_key).collect(),
+            hosts: (0..HOSTS).map(|at| format!("h{at}")).collect(),
+        }
+    }
+
+    pub fn ids(&self) -> &[String] {
+        &self.ids
+    }
+
     pub fn at(mut self, next: u64) -> Self {
         self.next = next;
         self

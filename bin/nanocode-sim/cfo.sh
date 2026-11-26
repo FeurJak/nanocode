@@ -459,6 +459,8 @@ default_table='
 1 canary_thread_scope_keep_all_events canary:16 --scenario thread_scope --mutation keep_all_events
 1 canary_thread_scope_keep_finished_turns canary:16 --scenario thread_scope --mutation keep_finished_turns
 1 canary_thread_scope_admission_skips_history canary:16 --scenario thread_scope --mutation admission_skips_history
+1 canary_thread_scope_scope_writes_untagged canary:16 --scenario thread_scope --mutation scope_writes_untagged
+1 canary_thread_scope_scope_starts_at_row_zero canary:16 --scenario thread_scope --mutation scope_starts_at_row_zero
 1 canary_thread_scope_reservation_skipped canary:16 --scenario thread_scope --mutation reservation_skipped
 1 canary_thread_scope_reimport_advances canary:16 --scenario thread_scope --mutation reimport_advances
 1 canary_thread_scope_store_skips_fence canary:16 --scenario thread_scope --mutation store_skips_fence

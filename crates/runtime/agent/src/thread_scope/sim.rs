@@ -26,10 +26,12 @@ pub enum Mutation {
     AdmissionSkipsHistory,
     StoreLostUnretried,
     JournalLostUnretried,
+    ScopeWritesUntagged,
+    ScopeStartsAtRowZero,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 24] = [
         Self::PartDropped,
         Self::AdoptionSkipsRetired,
         Self::AdoptionSkipsBlobs,
@@ -52,6 +54,8 @@ impl Mutation {
         Self::AdmissionSkipsHistory,
         Self::StoreLostUnretried,
         Self::JournalLostUnretried,
+        Self::ScopeWritesUntagged,
+        Self::ScopeStartsAtRowZero,
     ];
 
     #[must_use]
@@ -80,6 +84,8 @@ impl Mutation {
             Self::AdmissionSkipsHistory => "admission_skips_history",
             Self::StoreLostUnretried => "store_lost_unretried",
             Self::JournalLostUnretried => "journal_lost_unretried",
+            Self::ScopeWritesUntagged => "scope_writes_untagged",
+            Self::ScopeStartsAtRowZero => "scope_starts_at_row_zero",
         }
     }
 

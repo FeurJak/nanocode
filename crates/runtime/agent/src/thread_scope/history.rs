@@ -86,8 +86,8 @@ pub async fn events(
         } else {
             Vec::new()
         };
-        for (_, body) in rows {
-            for record in nanocode_turnlog::decode(&body)? {
+        for (row, body) in rows {
+            for record in super::state::records(row, &body)? {
                 if let Record::Event {
                     at,
                     event,
@@ -128,7 +128,7 @@ pub async fn probe(
     };
     let mut traced = ThreadState::default();
     for (seq, body) in rows {
-        for record in nanocode_turnlog::decode(&body)? {
+        for record in super::state::records(seq, &body)? {
             traced.traced(&record, seq, &probing.request_id)?;
         }
     }
@@ -166,8 +166,8 @@ pub async fn facts(
         } else {
             Vec::new()
         };
-        for (_, body) in rows {
-            for record in nanocode_turnlog::decode(&body)? {
+        for (row, body) in rows {
+            for record in super::state::records(row, &body)? {
                 if let Record::Fact { fact, seq, state } = record
                     && seq > skipped
                     && seq <= base

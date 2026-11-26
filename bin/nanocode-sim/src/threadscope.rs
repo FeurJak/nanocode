@@ -75,6 +75,7 @@ const EVENTS_AHEAD: Range<u64> = 0..6;
 const FILTER_BYTES: Range<u64> = 1..64;
 const FILTER_HASHES: Range<u64> = 1..4;
 const RESUBMIT_PPM: u64 = 80_000;
+const COMPAT_RECENT_ROWS: usize = 1 << 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadScopeMutation(Mutation, ScopeMutation, TurnLogMutation);
@@ -175,6 +176,9 @@ pub struct ThreadScopeStats {
     pub fact_logs: u64,
     pub fact_logs_routed: u64,
     pub fact_commits: u64,
+    pub compat_flips: u64,
+    pub compat_adoptions: u64,
+    pub compat_commands: u64,
 }
 
 impl ThreadScopeStats {
@@ -229,6 +233,9 @@ impl ThreadScopeStats {
         self.fact_logs += other.fact_logs;
         self.fact_logs_routed += other.fact_logs_routed;
         self.fact_commits += other.fact_commits;
+        self.compat_flips += other.compat_flips;
+        self.compat_adoptions += other.compat_adoptions;
+        self.compat_commands += other.compat_commands;
     }
 }
 
@@ -336,7 +343,21 @@ impl World {
         note
     }
 
-    fn rows(&self, thread: &str) -> Vec<(u64, String)> {
+    pub(crate) fn host(&self) -> Arc<dyn LogHost> {
+        Arc::clone(&self.host)
+    }
+
+    pub(crate) fn checkpointed(&self, thread: &str) -> bool {
+        !self.witness.manifests(thread).is_empty()
+    }
+
+    pub(crate) fn keeping(mut self, rows: usize) -> Self {
+        self.thread.recent_rows = rows;
+        self.fold = ThreadFold::new(self.thread);
+        self
+    }
+
+    pub(crate) fn rows(&self, thread: &str) -> Vec<(u64, String)> {
         block_on(self.reader.scan(thread, 0, SCAN_END)).expect("the model store answers every scan")
     }
 
@@ -415,7 +436,7 @@ fn wake_command(rng: &mut Rng, state: &ThreadState) -> ThreadCommand {
     ThreadCommand::Write { records }
 }
 
-fn command(rng: &mut Rng, turns: &mut u64, state: Option<&ThreadState>) -> ThreadCommand {
+pub(crate) fn command(rng: &mut Rng, turns: &mut u64, state: Option<&ThreadState>) -> ThreadCommand {
     let at = rng.below(1_000_000);
     let pick = rng.below(100);
     match pick {
@@ -890,7 +911,7 @@ fn finished_turn(record: &Record) -> Option<&str> {
 fn moved(world: &World, thread: &str, manifest: &Manifest, state: &ThreadState, from: u64) -> bool {
     let mut ends: BTreeMap<String, u64> = BTreeMap::new();
     for (seq, body) in world.rows(thread).iter().filter(|(seq, _)| *seq < manifest.seq) {
-        for record in nanocode_turnlog::decode(body).unwrap_or_default() {
+        for record in scope_records(body) {
             if let Some(turn) = finished_turn(&record) {
                 ends.insert(turn.to_owned(), *seq);
             }
@@ -1031,8 +1052,15 @@ fn adopted(world: &World, thread: &str, stats: &mut ThreadScopeStats) {
 fn records(rows: &[(u64, String)], from: u64, to: u64) -> Vec<Record> {
     rows.iter()
         .filter(|(seq, _)| (from..to).contains(seq))
-        .flat_map(|(_, body)| nanocode_turnlog::decode(body).unwrap_or_default())
+        .flat_map(|(_, body)| scope_records(body))
         .collect()
+}
+
+fn scope_records(body: &str) -> Vec<Record> {
+    match nanocode_turnlog::standalone_plain(body) {
+        Ok(Some(plain)) => nanocode_turnlog::decode(&plain).unwrap_or_default(),
+        _ => nanocode_turnlog::decode(body).unwrap_or_default(),
+    }
 }
 
 fn bounded(world: &World, thread: &str, manifest: &Manifest, state: &ThreadState, stats: &mut ThreadScopeStats) {
@@ -1190,12 +1218,22 @@ fn legacy(world: &World, stats: &mut ThreadScopeStats) {
             continue;
         }
         let rows = world.rows(thread);
-        let mut fold = Fold::default();
-        for (seq, row) in &rows {
-            if let Err(error) = fold.load(seq + 1, row) {
+        let decoded = match nanocode_turnlog::rows(&rows) {
+            Ok(decoded) => decoded,
+            Err(error) => {
                 flag(
                     &world.wrong,
-                    format!("the turn log fold refuses row {seq} of {thread}: {error}"),
+                    format!("the turn log reader refuses the rows of {thread}: {error}"),
+                );
+                return;
+            }
+        };
+        let mut fold = Fold::default();
+        for row in &decoded {
+            if let Err(error) = fold.load(row.seq + 1, &row.plain) {
+                flag(
+                    &world.wrong,
+                    format!("the turn log fold refuses row {} of {thread}: {error}", row.seq),
                 );
                 return;
             }
@@ -1547,6 +1585,14 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
         crate::threadimport::run(&mut rng, &imports, &mut stats);
         imports.net.nodes.set(Vec::new());
         if let Some(wrong) = imports.wrong.read(Clone::clone) {
+            flag(&world.wrong, wrong);
+        }
+    }
+    if world.wrong.read(Option::is_none) {
+        let compat = self::world(&mut rng, time).keeping(COMPAT_RECENT_ROWS);
+        crate::threadcompat::run(&mut rng, &compat, &mut stats);
+        compat.net.nodes.set(Vec::new());
+        if let Some(wrong) = compat.wrong.read(Clone::clone) {
             flag(&world.wrong, wrong);
         }
     }

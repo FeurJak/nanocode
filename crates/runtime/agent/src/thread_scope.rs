@@ -686,7 +686,12 @@ impl Resident for ThreadFold {
         if records.is_empty() {
             return (Vec::new(), reply);
         }
-        let body = match nanocode_turnlog::encode(&records) {
+        let encoded = if sim::mutated(sim::Mutation::ScopeWritesUntagged) {
+            nanocode_turnlog::encode(&records)
+        } else {
+            nanocode_turnlog::standalone_row(&records)
+        };
+        let body = match encoded {
             Ok(body) => body,
             Err(error) => return (Vec::new(), ThreadReply::Refused(error.to_string())),
         };
@@ -704,6 +709,18 @@ impl Resident for ThreadFold {
             filter: self.policy.finished_filter,
         };
         state.load(seq, row, window)
+    }
+
+    fn first_row(&self) -> u64 {
+        if sim::mutated(sim::Mutation::ScopeStartsAtRowZero) {
+            0
+        } else {
+            nanocode_turnlog::FIRST_ROW
+        }
+    }
+
+    fn foreign(&self, row: &str) -> bool {
+        !row.starts_with(state::UNTAGGED) && !nanocode_turnlog::standalone(row)
     }
 
     fn encode(&self, state: &ThreadState) -> Vec<Part> {

@@ -19,6 +19,7 @@ use crate::durability::{
 };
 
 pub(crate) const RESERVED_KEY: &str = "$thread_reserved";
+pub(crate) const UNTAGGED: char = '{';
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct KeptFact {
@@ -166,6 +167,16 @@ struct CellHeader {
 #[derive(serde::Deserialize)]
 struct CellOrigin {
     header: Option<CellHeader>,
+}
+
+pub(crate) fn records(seq: u64, body: &str) -> Result<Vec<Record>, StoreError> {
+    match nanocode_turnlog::standalone_plain(body)? {
+        Some(plain) => nanocode_turnlog::decode(&plain),
+        None if body.starts_with(UNTAGGED) => nanocode_turnlog::decode(body),
+        None => Err(invalid(format!(
+            "row {seq} was written by the turn log, not by a resident thread"
+        ))),
+    }
 }
 
 pub(crate) fn invalid(detail: impl std::fmt::Display) -> StoreError {
@@ -560,7 +571,7 @@ impl ThreadState {
     }
 
     pub fn load(&mut self, seq: u64, body: &str, window: Window) -> Result<(), StoreError> {
-        for record in nanocode_turnlog::decode(body)? {
+        for record in records(seq, body)? {
             self.take(&record, Some(seq))?;
         }
         self.row = seq;
@@ -1001,6 +1012,11 @@ impl ThreadState {
         let Some(turn) = self.turns.get(id) else {
             return Err(invalid(format!("recovery of unknown turn {id}")));
         };
+        if turn.digest.starts_with(super::adopt::RETIRED_DIGEST) {
+            return Err(invalid(format!(
+                "recovery of turn {id}, which the turn log retired"
+            )));
+        }
         let mut turn = turn.as_ref().clone();
         turn.recovered = Some(Recovered { at, attempt });
         self.turns.insert(Arc::from(id), Arc::new(turn));

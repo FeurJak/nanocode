@@ -61,6 +61,8 @@ pub(crate) const SNAPSHOT: char = 's';
 pub(crate) const PART: char = '+';
 pub(crate) const BOUNDARY: char = 'b';
 pub(crate) const LINKED: char = 'P';
+const EMPTY_STORED_BLOCK: [u8; 5] = [0x00, 0x00, 0x00, 0xFF, 0xFF];
+const STANDALONE_BLOCKS_MAX: usize = BASE85_GROUP * BASE64_GROUP;
 const VARINT_BITS: u32 = 7;
 const VARINT_MORE: u8 = 1 << VARINT_BITS;
 
@@ -524,7 +526,16 @@ impl Packer {
         Ok(())
     }
 
-    pub(crate) fn finish(mut self, tag: char, spare: &mut Spare) -> Result<Packed, StoreError> {
+    pub(crate) fn finish(self, tag: char, spare: &mut Spare) -> Result<Packed, StoreError> {
+        let plain = self.plain;
+        let compressed = self.finished(spare)?;
+        Ok(Packed {
+            packed: encode(tag, &compressed),
+            plain,
+        })
+    }
+
+    fn finished(mut self, spare: &mut Spare) -> Result<Vec<u8>, StoreError> {
         loop {
             let before = self.deflate.total_out();
             let status = self
@@ -541,13 +552,9 @@ impl Packer {
                 DeflateStatus::BufError => return Err(failed("compression", "no progress")),
             }
         }
-        let packed = Packed {
-            packed: encode(tag, &self.compressed),
-            plain: self.plain,
-        };
         spare.chunk = self.chunk;
         spare.deflate = Some(self.deflate);
-        Ok(packed)
+        Ok(self.compressed)
     }
 }
 
@@ -609,6 +616,56 @@ pub(crate) fn link(
     let (packed, state) = lzma_encode(window, state, plain)?;
     compressed.extend_from_slice(&packed);
     Ok((encode(LINKED, &compressed), state))
+}
+
+pub fn standalone_row(records: &[crate::Record]) -> Result<String, StoreError> {
+    let plain = crate::record::encode_all(records)?;
+    let mut spare = Spare::default();
+    let mut packer = Packer::new(&mut spare, DEFAULT_LEVEL, &[])?;
+    packer.write(&plain)?;
+    let stream = packer.finished(&mut spare)?;
+    let mut bytes =
+        Vec::with_capacity(STANDALONE_BLOCKS_MAX * EMPTY_STORED_BLOCK.len() + stream.len());
+    for _ in 0..STANDALONE_BLOCKS_MAX {
+        bytes.extend_from_slice(&EMPTY_STORED_BLOCK);
+        let blocks = bytes.len();
+        bytes.extend_from_slice(&stream);
+        let body = encode(RECORDS, &bytes);
+        let binary = format!("{RECORDS}{}", STANDARD_NO_PAD.encode(&bytes));
+        if !extensible(&body) && !extensible(&binary) {
+            assert!(standalone(&body), "a standalone row is read as one");
+            assert!(
+                standalone(&binary),
+                "a standalone row read back from binary storage is read as one"
+            );
+            return Ok(body);
+        }
+        bytes.truncate(blocks);
+    }
+    panic!(
+        "one of {STANDALONE_BLOCKS_MAX} empty stored block prefixes leaves a row unextensible in both of its encodings"
+    )
+}
+
+#[must_use]
+pub fn standalone(body: &str) -> bool {
+    body.strip_prefix(RECORDS)
+        .and_then(|text| decoded(text).ok())
+        .is_some_and(|bytes| bytes.starts_with(&EMPTY_STORED_BLOCK))
+}
+
+pub fn standalone_plain(body: &str) -> Result<Option<String>, StoreError> {
+    let Some(text) = body.strip_prefix(RECORDS) else {
+        return Ok(None);
+    };
+    let bytes = decoded(text)?;
+    if !bytes.starts_with(&EMPTY_STORED_BLOCK) {
+        return Ok(None);
+    }
+    let plain = inflate(&bytes, &[])?;
+    String::from_utf8(plain)
+        .map(Some)
+        .map_err(|error| failed("decoding", &error.to_string()))
 }
 
 #[must_use]

@@ -69,6 +69,15 @@ pub struct Wiring<F: Resident> {
 
 type Waiter<V> = Arc<Slot<oneshot::Sender<Result<V, ScopeError>>>>;
 
+struct Loaded<S> {
+    state: S,
+    next: u64,
+    checkpointed: Checkpointed,
+    parts: u64,
+    tail: Vec<(u64, String)>,
+    adopted: Option<(u64, u64)>,
+}
+
 struct Flights<V>(Atom<OrdMap<Arc<str>, Vector<Waiter<V>>>>);
 
 enum Flight<V> {
@@ -567,27 +576,31 @@ impl<F: Resident> Inner<F> {
             self.checkpoints.latest(scope).await?
         };
         let now = (self.clock)();
-        let mut adopted = None;
-        let (mut state, next, checkpointed, parts) = match manifest {
-            None => {
-                let fresh = Checkpointed::empty(now);
-                match self.fold.adopt(&self.log, scope).await? {
-                    None => (self.fold.empty(), 0, fresh, 0),
-                    Some(Adopted {
+        let Loaded {
+            mut state,
+            next,
+            checkpointed,
+            parts,
+            tail,
+            adopted,
+        } = match manifest {
+            Some(manifest) => {
+                let (state, next, checkpointed, parts) = self.restore(scope, manifest, now).await?;
+                let tail = self.log.scan(scope, next, SCAN_END).await?;
+                match tail.iter().find(|(_, row)| self.fold.foreign(row)) {
+                    None => Loaded {
                         state,
                         next,
-                        rows,
-                        bytes,
-                    }) => {
-                        assert!(next > 0, "an adopted history of {scope} ends past row 0");
-                        adopted = Some((rows, bytes));
-                        (state, next, fresh, 0)
-                    }
+                        checkpointed,
+                        parts,
+                        tail,
+                        adopted: None,
+                    },
+                    Some((seq, _)) => self.adopted(scope, now, Some(*seq)).await?,
                 }
             }
-            Some(manifest) => self.restore(scope, manifest, now).await?,
+            None => self.adopted(scope, now, None).await?,
         };
-        let tail = self.log.scan(scope, next, SCAN_END).await?;
         let mut at = next;
         for (seq, row) in &tail {
             if *seq < at {
@@ -633,6 +646,44 @@ impl<F: Resident> Inner<F> {
         self.residents
             .update(|residents| residents.insert(Arc::clone(&owner.scope), Arc::clone(&owner)));
         Ok(owner)
+    }
+
+    async fn adopted(
+        &self,
+        scope: &str,
+        now: u64,
+        foreign: Option<u64>,
+    ) -> Result<Loaded<F::State>, ScopeError> {
+        let fresh = Checkpointed::empty(now);
+        let (state, next, adopted) = match (self.fold.adopt(&self.log, scope).await?, foreign) {
+            (None, None) => (self.fold.empty(), self.fold.first_row(), None),
+            (None, Some(seq)) => {
+                return Err(ScopeError::Store(StoreError::Backend(format!(
+                    "row {seq} of {scope} past its checkpoint was written outside the scope, and its log adopts nothing"
+                ))));
+            }
+            (
+                Some(Adopted {
+                    state,
+                    next,
+                    rows,
+                    bytes,
+                }),
+                _,
+            ) => {
+                assert!(next > 0, "an adopted history of {scope} ends past row 0");
+                (state, next, Some((rows, bytes)))
+            }
+        };
+        let tail = self.log.scan(scope, next, SCAN_END).await?;
+        Ok(Loaded {
+            state,
+            next,
+            checkpointed: fresh,
+            parts: 0,
+            tail,
+            adopted,
+        })
     }
 
     async fn restore(

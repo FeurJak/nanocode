@@ -76,6 +76,14 @@ pub trait Resident: Send + Sync + 'static {
 
     fn weight(&self, state: &Self::State) -> usize;
 
+    fn first_row(&self) -> u64 {
+        0
+    }
+
+    fn foreign(&self, _row: &str) -> bool {
+        false
+    }
+
     fn routable(&self, _command: &Self::Command) -> bool {
         true
     }
