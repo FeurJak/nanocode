@@ -1,30 +1,27 @@
 use crate::nanotools::NanoTools;
-use crate::profile::{Profile, SKIP_SIGNATURE, Thinking as ProfileThinking};
-use crate::prompts;
-use crate::request::{Ids, Prefix, Request};
+use crate::profile::Profile;
+use crate::request::{Ids, Prefix};
 use nanocode_agent_core::{
-    Agent, AgentSessionContext, Capabilities, CostStatus, ForkRequest, HarnessFamily, Lineage,
-    ModelSelection, NanocodeError, ReportedTurnUsage, Result, SessionCheckpoint, SpawnOptions,
-    Thinking, TurnResult, TurnUsage,
+    Agent, AgentSessionContext, Capabilities, ForkRequest, HarnessFamily, Lineage, ModelSelection,
+    ModelTransport, NanocodeError, Persistence, Result, SessionCheckpoint, SideAnswer,
+    SpawnOptions, SteerReceiptStatus, Thinking,
     backend::{
         BackendFuture, BackendPrompt, BackendPromptRoute, BackendTurn, BackendTurnKey,
-        LifecycleBackend, ParkedCall,
+        LifecycleBackend, ParkedCall, TurnBoundary,
     },
     events::{AgentEventKind, AgentEventPublisher, AgentEvents},
     input::{Prompt, PromptInput, UserInput},
 };
-use nanocode_backend_antigravity_client::{Client, Content, ExplicitCache, Part, Reply};
-use nanocode_backend_antigravity_tools::{
-    Engine, NAMES, Outcome, REMINDER, local_timestamp, system_message, with_header,
-};
-use nanocode_durability::{Admission, DurableOwner, EncodedPayload, agent_error};
-use nanocode_sync::future::{Either, select};
+use nanocode_backend_antigravity_client::{Client, Content, ExplicitCache, FunctionCall, Part};
+use nanocode_backend_antigravity_tools::Engine;
+use nanocode_durability::{DurableOwner, EncodedPayload, agent_error};
 use nanocode_sync::{Atom, Signal};
-use nanocode_tool_host::ToolContext;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json, value::RawValue};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 pub const USAGE_LOG: &str = "usage.jsonl";
 
@@ -39,47 +36,116 @@ pub struct Config {
     pub thinking: Thinking,
     pub session: String,
     pub cache: Option<Arc<ExplicitCache>>,
-    pub logs: PathBuf,
+    pub logs: Option<PathBuf>,
     pub notice: Option<String>,
     pub durable: Option<DurableOwner>,
+    pub lineage: Lineage,
+    pub workspace: String,
+    pub events: AgentEventPublisher,
+    pub keep: Option<nanocode_durability::DurableSession>,
+    pub handle: nanocode_agent_core::AgentHandle,
 }
 
-const MOVED: &str = "The session moved to another server while this call ran, so its outcome is unknown. Check what it changed before you run it again.";
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct Usage {
+    pub(crate) input: u64,
+    pub(crate) cached: u64,
+    pub(crate) output: u64,
+    pub(crate) reasoning: u64,
+    pub(crate) total: u64,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(crate) struct Progress {
+    #[serde(default)]
+    pub(crate) usage: Usage,
+    #[serde(default)]
+    pub(crate) calls: u32,
+    #[serde(default)]
+    pub(crate) steers: Vec<(u32, u32)>,
+    #[serde(default)]
+    pub(crate) responses: Vec<Part>,
+    #[serde(default)]
+    pub(crate) message: String,
+}
 
 #[derive(Clone, Default)]
 pub struct State {
-    contents: Vec<Content>,
-    step: u64,
-    calls: u64,
-    streak: u32,
-    requests: Vec<String>,
-    settings_sent: bool,
-    prompt_tokens: u64,
-    transcript: Vec<Content>,
-    last_execution: Option<String>,
-    executions: u64,
-    operation: Option<String>,
+    pub(crate) contents: Vec<Content>,
+    pub(crate) step: u64,
+    pub(crate) calls: u64,
+    pub(crate) streak: u32,
+    pub(crate) requests: Vec<String>,
+    pub(crate) settings_sent: bool,
+    pub(crate) prompt_tokens: u64,
+    pub(crate) last_execution: Option<String>,
+    pub(crate) executions: u64,
+    pub(crate) operation: Option<String>,
+    pub(crate) progress: Progress,
+    pub(crate) transcript: Vec<Content>,
 }
 
-struct Inner {
-    config: Config,
-    state: Atom<State>,
-    cancel: Atom<Option<Arc<Signal>>>,
-    stopped: AtomicBool,
-    noticed: AtomicBool,
+pub(crate) const OPEN: u8 = 0;
+pub(crate) const CLOSING: u8 = 1;
+pub(crate) const STOPPED: u8 = 2;
+
+pub(crate) type Job = BackendFuture<()>;
+
+#[derive(Clone)]
+pub(crate) struct Steer {
+    pub(crate) index: Option<u32>,
+    pub(crate) id: Option<String>,
+    pub(crate) prompt: Prompt,
+}
+
+pub(crate) struct Turn {
+    pub(crate) key: u64,
+    pub(crate) id: String,
+    pub(crate) pending: bool,
+    pub(crate) automatic: bool,
+    pub(crate) cancel_on_admission: bool,
+    pub(crate) cancel: Signal,
+    pub(crate) stop: Signal,
+    pub(crate) started: AtomicBool,
+    pub(crate) accepting: AtomicBool,
+    pub(crate) calls: AtomicU32,
+    pub(crate) steers: Atom<Vec<Steer>>,
+    pub(crate) settled: Signal,
+    pub(crate) events: AgentEventPublisher,
+}
+
+pub(crate) struct Inner {
+    pub(crate) config: Config,
+    pub(crate) state: Atom<State>,
+    pub(crate) settled: Atom<State>,
+    pub(crate) profile: Atom<Profile>,
+    pub(crate) thinking: Atom<Thinking>,
+    pub(crate) turns: Atom<BTreeMap<u64, Arc<Turn>>>,
+    pub(crate) jobs: nanocode_sync::mpsc::UnboundedSender<Job>,
+    pub(crate) life: AtomicU8,
+    pub(crate) noticed: AtomicBool,
+    pub(crate) notices: Atom<Vec<String>>,
 }
 
 pub struct Driver {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
-fn emit(events: &AgentEventPublisher, kind: AgentEventKind, value: Value) {
+pub(crate) fn emit(events: &AgentEventPublisher, kind: AgentEventKind, mut value: Value) {
+    if let Some(map) = value.as_object_mut()
+        && !map.contains_key("turn_id")
+    {
+        map.insert(
+            "turn_id".to_owned(),
+            Value::String(events.turn_id().unwrap_or(events.request_id()).to_owned()),
+        );
+    }
     if let Ok(raw) = RawValue::from_string(value.to_string()) {
         drop(events.publish_next(kind, Arc::from(raw)));
     }
 }
 
-fn prompt_text(input: &PromptInput) -> String {
+pub(crate) fn prompt_text(input: &PromptInput) -> String {
     match input {
         PromptInput::Text(text) => text.clone(),
         PromptInput::Content(items) => items
@@ -93,685 +159,237 @@ fn prompt_text(input: &PromptInput) -> String {
     }
 }
 
-fn normalize(parts: Vec<Part>, skip: bool) -> Vec<Part> {
-    let mut carry = None;
-    let mut first_call = true;
-    let mut out = Vec::with_capacity(parts.len());
-    for mut part in parts {
-        if part.is_thought() {
-            if part.thought_signature.is_some() {
-                carry = part.thought_signature.take();
-            }
-            out.push(part);
-            continue;
-        }
-        if part.thought_signature.is_none() {
-            part.thought_signature = carry.take();
-        }
-        if part.function_call.is_some() {
-            if first_call && skip && part.thought_signature.is_none() {
-                part.thought_signature = Some(SKIP_SIGNATURE.to_owned());
-            }
-            first_call = false;
-        }
-        out.push(part);
+pub(crate) fn response(call: &FunctionCall, key: &str, body: String) -> Part {
+    let mut part = Part::response(call.name.clone(), key, body);
+    if let Some(response) = part.function_response.as_mut() {
+        response.id.clone_from(&call.id);
     }
-    out
-}
-
-fn visible(parts: &[Part]) -> String {
-    parts
-        .iter()
-        .filter(|part| !part.is_thought())
-        .filter_map(|part| part.text.as_deref())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn append(part: &mut Part, text: &str) {
-    if let Some(response) = part.function_response.as_mut()
-        && let Some(map) = response.response.as_object_mut()
-        && let Some((_, Value::String(body))) = map.iter_mut().next()
-    {
-        body.push_str("\n\n");
-        body.push_str(text);
-    }
+    part
 }
 
 impl State {
-    fn push(&mut self, content: Content) {
+    pub(crate) fn push(&mut self, content: Content) {
         self.transcript.push(content.clone());
         self.contents.push(content);
+    }
+
+    pub(crate) fn settle(&mut self) {
+        self.operation = None;
+        self.progress = Progress::default();
+    }
+
+    pub(crate) fn restored(payload: &Value) -> Result<Self> {
+        let invalid =
+            |error: serde_json::Error| NanocodeError::InvalidCheckpoint(error.to_string());
+        let contents: Vec<Content> = payload
+            .get("contents")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(invalid)?
+            .unwrap_or_default();
+        let number = |field: &str| payload.get(field).and_then(Value::as_u64).unwrap_or(0);
+        let text = |field: &str| {
+            payload
+                .get(field)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        let requests = payload
+            .get("requests")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(invalid)?
+            .unwrap_or_default();
+        let progress = payload
+            .get("progress")
+            .filter(|progress| !progress.is_null())
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(invalid)?
+            .unwrap_or_default();
+        let streak = u32::try_from(number("streak")).map_err(|_| {
+            NanocodeError::InvalidCheckpoint("antigravity streak exceeds u32".into())
+        })?;
+        Ok(Self {
+            settings_sent: !contents.is_empty(),
+            transcript: contents.clone(),
+            contents,
+            step: number("step"),
+            calls: number("calls"),
+            streak,
+            requests,
+            prompt_tokens: number("prompt_tokens"),
+            last_execution: text("last_execution"),
+            executions: number("executions"),
+            operation: text("operation"),
+            progress,
+        })
+    }
+}
+
+pub(crate) fn payload_model(payload: &Value) -> Option<ModelSelection> {
+    match payload.get("model")? {
+        Value::String(model) if !model.trim().is_empty() => {
+            Some(crate::harness::AntigravityHarness::selection(model.clone()))
+        }
+        model @ Value::Object(_) => serde_json::from_value(model.clone()).ok(),
+        _ => None,
     }
 }
 
 impl Inner {
-    fn now() -> std::time::SystemTime {
+    pub(crate) fn now() -> std::time::SystemTime {
         nanocode_platform::system_time()
     }
 
-    fn load(&self) -> State {
+    pub(crate) fn load(&self) -> State {
         State::clone(&self.state.get())
     }
 
-    fn save(&self, state: &State) {
+    pub(crate) fn save(&self, state: &State) {
         self.state.set(state.clone());
     }
 
-    async fn request(
-        &self,
-        state: &State,
-        extra: Option<&Content>,
-        max_output_tokens: u32,
-        call: u64,
-        events: &AgentEventPublisher,
-    ) -> Result<Reply> {
-        let config = &self.config;
-        let cached = match &config.cache {
-            Some(cache) => {
-                cache
-                    .resolve(
-                        &config.client,
-                        &config.profile.model,
-                        &config.prefix.system,
-                        &config.prefix.tools,
-                    )
-                    .await
-            }
-            None => None,
-        };
-        let body = Request {
-            contents: &state.contents,
-            extra,
-            prefix: &config.prefix,
-            cached: cached.as_deref(),
-            profile: &config.profile,
-            ids: &config.ids,
-            step: state.step,
-            call,
-            max_output_tokens,
-            execution: state.last_execution.as_deref(),
-            labels: !config.client.endpoint().route.is_vertex(),
-        }
-        .encode();
-        emit(
-            events,
-            AgentEventKind::ModelCallStarted,
-            json!({
-                "call_index": call,
-                "model_call_index": call,
-                "model": config.profile.model,
-                "reasoning_mode": "standard",
-                "effort": match config.profile.thinking {
-                    ProfileThinking::Level(level) => level.to_ascii_lowercase(),
-                    ProfileThinking::Budget(budget) => budget.to_string(),
-                },
-            }),
-        );
-        let started = nanocode_platform::now();
-        let nanos = |since: nanocode_platform::Instant| {
-            u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX)
-        };
-        let mut first_event = None;
-        let mut first_output = None;
-        let mut on_part = |part: &Part| {
-            first_event.get_or_insert_with(|| nanos(started));
-            if let Some(text) = part.text.as_deref().filter(|_| !part.is_thought()) {
-                first_output.get_or_insert_with(|| nanos(started));
-                emit(
-                    events,
-                    AgentEventKind::AssistantDelta,
-                    json!({"model_call_index": call, "item_id": format!("call-{call}"), "text": text}),
-                );
-            }
-        };
-        let reply = config
-            .client
-            .stream(&config.profile.model, &body, &mut on_part)
-            .await;
-        let reply = match reply {
-            Ok(reply) => reply,
-            Err(error) => {
-                emit(
-                    events,
-                    AgentEventKind::ModelCallFailed,
-                    json!({
-                        "call_index": call,
-                        "model_call_index": call,
-                        "model": config.profile.model,
-                        "duration_ns": nanos(started),
-                        "error": error.to_string(),
-                    }),
-                );
-                return Err(NanocodeError::InvalidRequest(error.to_string()));
-            }
-        };
-        let usage = reply.usage;
-        let output_tokens = usage.candidates_token_count + usage.thoughts_token_count;
-        emit(
-            events,
-            AgentEventKind::ModelCallCompleted,
-            json!({
-                "call_index": call,
-                "model_call_index": call,
-                "model": config.profile.model,
-                "attempt": 1,
-                "connection_generation": 0,
-                "status": reply
-                    .finish_reason
-                    .as_deref()
-                    .unwrap_or("STOP")
-                    .to_ascii_lowercase(),
-                "duration_ns": nanos(started),
-                "time_to_first_event_ns": first_event.unwrap_or_else(|| nanos(started)),
-                "time_to_first_output_ns": first_output,
-                "tool_calls": reply.parts.iter().filter(|part| part.function_call.is_some()).count(),
-                "usage": {
-                    "input_tokens": usage.prompt_token_count,
-                    "input_tokens_details": {
-                        "cached_tokens": usage.cached_content_token_count,
-                        "cache_write_tokens": 0,
-                    },
-                    "output_tokens": output_tokens,
-                    "output_tokens_details": {"reasoning_tokens": usage.thoughts_token_count},
-                    "total_tokens": usage.total_token_count.max(usage.prompt_token_count + output_tokens),
-                },
-            }),
-        );
-        self.log_usage(call, &config.profile.model, usage);
-        Ok(reply)
+    pub(crate) fn life(&self) -> u8 {
+        self.life.load(Ordering::SeqCst)
     }
 
-    fn log_usage(&self, call: u64, model: &str, usage: nanocode_backend_antigravity_client::Usage) {
-        use std::io::Write as _;
-        let line = json!({
-            "call_index": call,
-            "model": model,
-            "prompt_tokens": usage.prompt_token_count,
-            "cache_read_tokens": usage.cached_content_token_count,
-            "output_tokens": usage.candidates_token_count,
-            "thoughts_tokens": usage.thoughts_token_count,
-            "total_tokens": usage.total_token_count,
-        });
-        let _ = std::fs::create_dir_all(&self.config.logs);
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.config.logs.join(USAGE_LOG))
-        {
-            let _ = writeln!(file, "{line}");
-        }
+    pub(crate) fn stop(&self) {
+        self.life.store(STOPPED, Ordering::SeqCst);
     }
 
-    fn write_transcript(&self, state: &State) {
-        let _ = std::fs::create_dir_all(&self.config.logs);
-        let mut full = String::new();
-        let mut compact = String::new();
-        for (index, content) in state.transcript.iter().enumerate() {
-            let line = content.to_json().encode();
-            full.push_str(&line);
-            full.push('\n');
-            let mut truncated = Vec::new();
-            let mut short = content.clone();
-            for part in &mut short.parts {
-                if let Some(text) = part.text.as_mut()
-                    && text.len() > 2_000
-                {
-                    let mut cut = 2_000;
-                    while !text.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
-                    text.truncate(cut);
-                    truncated.push("text");
-                }
-                if let Some(response) = part.function_response.as_mut()
-                    && let Some(map) = response.response.as_object_mut()
-                {
-                    for (key, value) in map.iter_mut() {
-                        if let Value::String(body) = value
-                            && body.len() > 2_000
-                        {
-                            let mut cut = 2_000;
-                            while !body.is_char_boundary(cut) {
-                                cut -= 1;
-                            }
-                            body.truncate(cut);
-                            truncated.push(if key == "error" { "error" } else { "output" });
-                        }
-                    }
-                }
-            }
-            let mut value: Value =
-                serde_json::from_str(&short.to_json().encode()).unwrap_or(Value::Null);
-            if let Some(map) = value.as_object_mut() {
-                map.insert("step".into(), json!(index));
-                if !truncated.is_empty() {
-                    map.insert("truncated_fields".into(), json!(truncated));
-                }
-            }
-            compact.push_str(&value.to_string());
-            compact.push('\n');
-        }
-        let _ = std::fs::write(self.config.logs.join("transcript_full.jsonl"), full);
-        let _ = std::fs::write(self.config.logs.join("transcript.jsonl"), compact);
+    pub(crate) fn thinking(&self) -> Thinking {
+        *self.thinking.get()
     }
 
-    async fn compact(&self, state: &mut State, events: &AgentEventPublisher) -> Result<()> {
-        emit(events, AgentEventKind::ModelCompactionStarted, json!({}));
-        self.write_transcript(state);
-        let extra = Content::user(vec![Part::text(prompts::COMPACTION)]);
-        let reply = self
-            .request(
-                state,
-                Some(&extra),
-                self.config.profile.compaction_output_tokens,
-                state.calls,
-                events,
-            )
-            .await;
-        let reply = match reply {
-            Ok(reply) => reply,
-            Err(error) => {
-                emit(
-                    events,
-                    AgentEventKind::ModelCompactionFailed,
-                    json!({"error": error.to_string()}),
-                );
-                return Err(error);
-            }
-        };
-        let summary = visible(&reply.parts);
-        let keep = self.config.profile.max_user_requests;
-        let requests = state.requests[state.requests.len().saturating_sub(keep)..].to_vec();
-        let text = prompts::context_summary(
-            &local_timestamp(Self::now()),
-            &requests,
-            summary.trim(),
-            &self.config.engine.snapshots(),
-            &self.config.logs,
-        );
-        state.contents = vec![Content::user(vec![Part::text(text.clone())])];
-        state.transcript.push(Content::user(vec![Part::text(text)]));
-        state.step += 1;
-        state.prompt_tokens = 0;
-        state.streak = 0;
-        emit(events, AgentEventKind::ModelCompactionCompleted, json!({}));
-        Ok(())
+    pub(crate) fn set_thinking(&self, thinking: Thinking) {
+        self.thinking.set(thinking);
+        self.profile
+            .set(Profile::clone(&self.profile.get()).with_level(crate::harness::level(thinking)));
     }
 
-    async fn execute(
-        &self,
-        name: &str,
-        args: &Value,
-        step: u64,
-        call_id: &str,
-        turn: &str,
-    ) -> (&'static str, String) {
-        let created = Self::now();
-        let engine = &self.config.engine;
-        if NAMES.contains(&name) {
-            return match engine.call(name, args, step).await {
-                Outcome::Output(body) => {
-                    let full = with_header(created, Self::now(), &body);
-                    ("output", engine.finish_output(name, step, &full).await)
-                }
-                Outcome::Background(text) => {
-                    let _ = engine.finish_output("read_file", step, &text).await;
-                    ("output", text)
-                }
-                Outcome::Error(error) => ("error", error),
-            };
-        }
-        if !self.config.nano.handles(name) {
-            return (
-                "error",
-                format!("Encountered error in tool validation: tool {name:?} not found"),
-            );
-        }
-        let context = ToolContext::new(
-            self.config.model.as_str(),
-            &self.config.session,
-            call_id,
-            &[],
-            usize::MAX,
-        )
-        .with_turn_id(Some(turn));
-        match self.config.nano.call(name, args, context).await {
-            Ok(body) => {
-                let full = with_header(created, Self::now(), &body);
-                ("output", engine.finish_output(name, step, &full).await)
-            }
-            Err(error) => (
-                "error",
-                format!("Encountered error in tool execution: {error}"),
-            ),
-        }
-    }
-
-    fn finish_execution(&self, state: &mut State) {
-        state.executions += 1;
-        state.last_execution = Some(crate::harness::new_id(&format!(
-            "{}-execution-{}-{:?}",
-            self.config.session,
-            state.executions,
-            Self::now()
-        )));
-    }
-
-    async fn deliver_idle(&self, state: &mut State) -> bool {
-        let messages = self.config.engine.take_messages();
-        let delivered = !messages.is_empty();
-        for message in messages {
-            state.step += 1;
-            state.push(Content::user(vec![Part::text(system_message(
-                &message.render(),
-            ))]));
-        }
-        delivered
-    }
-
-    async fn run(
-        self: Arc<Self>,
-        prompt: Prompt,
-        events: AgentEventPublisher,
-        request_id: String,
-    ) -> Result<TurnResult> {
-        let Some(owner) = &self.config.durable else {
-            return self
-                .turn(self.load(), &prompt.instruction, events, request_id)
-                .await;
-        };
-        let admission = owner
-            .admit_typed::<_, Value, Value>(request_id.clone(), &prompt)
-            .await
-            .map_err(agent_error)?;
-        let pending = match admission {
-            Admission::Accepted => false,
-            Admission::Pending => true,
-            Admission::Completed { output, .. } => {
-                return Ok(TurnResult {
-                    request_id: Some(request_id),
-                    turn_id: None,
-                    final_message: output
-                        .get("final_message")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                    usage: None,
-                    boundary: None,
-                });
-            }
-            Admission::Failed { error, .. } => {
-                return Err(NanocodeError::ReplayedExecutionFailed(error));
-            }
-            Admission::Cancelled => return Err(NanocodeError::TurnCancelled),
-        };
-        owner
-            .begin_attempt(request_id.clone())
-            .await
-            .map_err(agent_error)?;
-        let mut state = self.load();
-        if pending
-            && let Some(continuation) = owner
-                .continuation(request_id.clone())
-                .await
-                .map_err(agent_error)?
-        {
-            state = State::restored(&continuation.decode::<Value>().map_err(agent_error)?)?;
-        }
-        let result = self
-            .turn(state, &prompt.instruction, events, request_id.clone())
-            .await;
-        match &result {
-            Err(error) if error.execution_policy_disposition().is_some() => {}
-            Ok(done) => {
-                let output = json!({"final_message": done.final_message});
-                owner
-                    .complete(request_id, self.settled()?, &output)
-                    .await
-                    .map_err(agent_error)?;
-            }
-            Err(NanocodeError::TurnCancelled) => owner
-                .cancel(request_id, Some(self.settled()?))
-                .await
-                .map_err(agent_error)?,
-            Err(error) => owner
-                .fail(request_id, self.settled()?, error.to_string())
-                .await
-                .map_err(agent_error)?,
-        }
-        result
-    }
-
-    async fn turn(
-        &self,
-        mut state: State,
-        input: &PromptInput,
-        events: AgentEventPublisher,
-        request_id: String,
-    ) -> Result<TurnResult> {
-        if let Some(notice) = &self.config.notice
-            && !self.noticed.swap(true, Ordering::SeqCst)
-        {
-            emit(
-                &events,
-                AgentEventKind::RunError,
-                json!({"error": notice, "source": "antigravity", "observational": true}),
-            );
-        }
-        if state.operation.as_deref() == Some(request_id.as_str()) {
-            let moved = state
-                .contents
-                .last()
-                .filter(|content| content.role == "model")
-                .map(|content| {
-                    content
-                        .calls()
-                        .map(|call| Part::response(call.name.clone(), "error", MOVED))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if !moved.is_empty() {
-                state.step += 1;
-                state.push(Content::user(moved));
-            }
-        } else {
-            let text = prompt_text(input);
-            if !state.contents.is_empty() {
-                state.step += 1;
-            }
-            let settings = (!state.settings_sent).then(|| self.config.profile.display.clone());
-            state.settings_sent = true;
-            state.requests.push(text.clone());
-            state.push(Content::user(vec![Part::text(prompts::user_request(
-                &text,
-                &local_timestamp(Self::now()),
-                settings.as_deref(),
-            ))]));
-            state.operation = self.config.durable.as_ref().map(|_| request_id.clone());
-        }
-        self.persist(&state).await?;
-        let mut final_message = String::new();
-        let mut totals = ReportedTurnUsage {
-            input_tokens: 0,
-            cached_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 0,
-            reasoning_output_tokens: 0,
-            total_tokens: 0,
-            estimated_cost: None,
-            cost_status: CostStatus::UsageNotReported,
-        };
-        loop {
-            if state.prompt_tokens >= self.config.profile.compaction_limit {
-                self.compact(&mut state, &events).await?;
-                self.persist(&state).await?;
-            }
-            let call_index = state.calls;
-            let reply = self
-                .request(
-                    &state,
-                    None,
-                    self.config.profile.max_output_tokens,
-                    call_index,
-                    &events,
-                )
-                .await?;
-            state.calls += 1;
-            totals.input_tokens += reply.usage.prompt_token_count;
-            totals.cached_input_tokens += reply.usage.cached_content_token_count;
-            totals.output_tokens +=
-                reply.usage.candidates_token_count + reply.usage.thoughts_token_count;
-            totals.reasoning_output_tokens += reply.usage.thoughts_token_count;
-            totals.total_tokens += reply.usage.total_token_count;
-            state.prompt_tokens = reply.usage.prompt_token_count;
-            state.step += 1;
-            let parts = normalize(reply.parts, self.config.profile.skip_signature);
-            let message = visible(&parts);
-            if !message.is_empty() {
-                final_message = message.clone();
-                emit(
-                    &events,
-                    AgentEventKind::AssistantMessage,
-                    json!({"model_call_index": call_index, "item_id": format!("call-{call_index}"), "text": message}),
-                );
-            }
-            let calls = parts
-                .iter()
-                .filter_map(|part| part.function_call.clone())
-                .collect::<Vec<_>>();
-            state.push(Content::model(parts));
-            if calls.is_empty() {
-                state.streak += 1;
-                self.persist(&state).await?;
-                let engine = &self.config.engine;
-                if !engine.has_urgent() && !engine.blocking() {
-                    break;
-                }
-                engine.wait().await;
-                self.finish_execution(&mut state);
-                if !self.deliver_idle(&mut state).await {
-                    break;
-                }
-                if state.streak >= 2 {
-                    state.streak = 0;
-                    state.step += 1;
-                    state.push(Content::user(vec![Part::text(system_message(REMINDER))]));
-                }
-                self.persist(&state).await?;
-                continue;
-            }
-            self.persist(&state).await?;
-            let mut responses = Vec::with_capacity(calls.len());
-            let mut effective = 0;
-            for (index, call) in calls.iter().enumerate() {
-                state.step += 1;
-                let call_id = call
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| format!("{request_id}-{call_index}-{index}"));
-                emit(
-                    &events,
-                    AgentEventKind::ToolCall,
-                    json!({"call_id": call_id, "tool": call.name, "arguments": call.args, "model_call_index": call_index}),
-                );
-                let (key, body) = self
-                    .execute(&call.name, &call.args, state.step, &call_id, &request_id)
-                    .await;
-                emit(
-                    &events,
-                    AgentEventKind::ToolResult,
-                    json!({"call_id": call_id, "tool": call.name, "result": body, "status": if key == "error" { "failed" } else { "completed" }}),
-                );
-                let passive = match call.name.as_str() {
-                    "schedule" => true,
-                    "manage_task" => {
-                        call.args.get("Action").and_then(Value::as_str) != Some("list")
-                    }
-                    _ => false,
-                };
-                if !passive {
-                    effective += 1;
-                }
-                responses.push(Part::response(call.name.clone(), key, body));
-            }
-            for message in self.config.engine.take_messages() {
-                state.step += 1;
-                if let Some(last) = responses.last_mut() {
-                    append(last, &system_message(&message.render()));
-                }
-            }
-            state.streak = match effective {
-                0 => state.streak,
-                1 => state.streak + 1,
-                _ => 0,
-            };
-            if state.streak >= 2 {
-                state.streak = 0;
-                state.step += 1;
-                if let Some(last) = responses.last_mut() {
-                    append(last, &system_message(REMINDER));
-                }
-            }
-            state.push(Content::user(responses));
-            self.persist(&state).await?;
-        }
-        self.finish_execution(&mut state);
-        self.save(&state);
-        self.write_transcript(&state);
-        Ok(TurnResult {
-            request_id: Some(request_id),
-            turn_id: None,
-            final_message,
-            usage: Some(TurnUsage::from_reported(totals)),
-            boundary: None,
-        })
-    }
-
-    fn payload(&self, state: &State) -> Value {
+    pub(crate) fn payload(&self, state: &State) -> Value {
         json!({
             "format": crate::durability::FORMAT,
-            "model": self.config.model.as_str(),
-            "thinking": self.config.thinking,
+            "provider": crate::harness::FAMILY,
+            "model": self.config.model,
+            "thinking": self.thinking(),
+            "workspace": self.config.workspace,
             "contents": state.contents.iter().map(|content| serde_json::to_value(content).unwrap_or(Value::Null)).collect::<Vec<_>>(),
             "step": state.step,
             "calls": state.calls,
+            "streak": state.streak,
             "requests": state.requests,
+            "prompt_tokens": state.prompt_tokens,
+            "executions": state.executions,
+            "last_execution": state.last_execution,
             "operation": state.operation,
+            "progress": state.operation.as_ref().map(|_| &state.progress),
         })
     }
 
-    async fn persist(&self, state: &State) -> Result<()> {
+    pub(crate) fn encode(&self, state: &State) -> Result<EncodedPayload> {
+        EncodedPayload::encode(&self.payload(state)).map_err(agent_error)
+    }
+
+    pub(crate) async fn persist(&self, state: &State) -> Result<()> {
         self.save(state);
         let (Some(durable), Some(operation)) = (&self.config.durable, &state.operation) else {
             return Ok(());
         };
-        let continuation = EncodedPayload::encode(&self.payload(state)).map_err(agent_error)?;
         durable
-            .advance(operation.clone(), continuation)
+            .advance(operation.clone(), self.encode(state)?)
             .await
             .map_err(agent_error)
     }
 
-    fn settled(&self) -> Result<EncodedPayload> {
-        let mut state = self.load();
-        state.operation = None;
-        self.save(&state);
-        EncodedPayload::encode(&self.payload(&state)).map_err(agent_error)
-    }
-
-    fn checkpoint(&self) -> SessionCheckpoint {
-        let payload = self.payload(&self.load());
+    pub(crate) fn checkpoint_of(&self, state: &State) -> SessionCheckpoint {
         SessionCheckpoint::native(
             self.config.session.clone(),
             self.config.model.clone(),
-            self.config.thinking,
-            Lineage::root(self.config.session.clone()),
+            self.thinking(),
+            self.config.lineage.clone(),
             self.config.session.clone(),
             None,
             true,
-            payload,
+            self.payload(state),
         )
+    }
+
+    pub(crate) fn checkpoint(&self) -> SessionCheckpoint {
+        self.checkpoint_of(&self.settled.get())
+    }
+
+    pub(crate) fn boundary(&self) -> TurnBoundary {
+        TurnBoundary::portable(self.checkpoint())
+    }
+}
+
+impl Driver {
+    pub fn new(config: Config) -> Self {
+        let (jobs, mut queue) = nanocode_sync::mpsc::unbounded_channel::<Job>();
+        nanocode_platform::spawn(async move {
+            while let Some(job) = queue.recv().await {
+                job.await;
+            }
+        });
+        let profile = config.profile.clone();
+        let thinking = config.thinking;
+        Self {
+            inner: Arc::new(Inner {
+                config,
+                state: Atom::default(),
+                settled: Atom::default(),
+                profile: Atom::new(profile),
+                thinking: Atom::new(thinking),
+                turns: Atom::default(),
+                jobs,
+                life: AtomicU8::new(OPEN),
+                noticed: AtomicBool::new(false),
+                notices: Atom::default(),
+            }),
+        }
+    }
+
+    pub fn restore_payload(self, payload: &Value) -> Result<Self> {
+        let mut state = State::restored(payload)?;
+        state.settle();
+        if let Some(thinking) = payload
+            .get("thinking")
+            .filter(|thinking| !thinking.is_null())
+            .cloned()
+            .map(serde_json::from_value::<Thinking>)
+            .transpose()
+            .map_err(|error| NanocodeError::InvalidCheckpoint(error.to_string()))?
+        {
+            self.inner.set_thinking(thinking);
+        }
+        self.inner.state.set(state.clone());
+        self.inner.settled.set(state);
+        Ok(self)
+    }
+
+    pub async fn import(&self) -> Result<()> {
+        let (Some(owner), Some(session)) = (&self.inner.config.durable, &self.inner.config.keep)
+        else {
+            return Ok(());
+        };
+        if !session
+            .state()
+            .await
+            .map_err(agent_error)?
+            .pending_operations()
+            .is_empty()
+        {
+            return Ok(());
+        }
+        owner
+            .commit_checkpoint(self.inner.encode(&self.inner.settled.get())?)
+            .await
+            .map_err(agent_error)
     }
 }
 
@@ -783,132 +401,6 @@ fn done() -> BackendFuture<Result<()>> {
     Box::pin(async { Ok(()) })
 }
 
-impl Driver {
-    pub fn new(config: Config) -> Self {
-        Self {
-            inner: Arc::new(Inner {
-                config,
-                state: Atom::default(),
-                cancel: Atom::new(None),
-                stopped: AtomicBool::new(false),
-                noticed: AtomicBool::new(false),
-            }),
-        }
-    }
-
-    pub fn restore(self, checkpoint: &SessionCheckpoint) -> Result<Self> {
-        let payload: Value = checkpoint
-            .payload()
-            .decode()
-            .map_err(|error| NanocodeError::InvalidCheckpoint(error.to_string()))?;
-        self.restore_payload(&payload)
-    }
-
-    pub fn restore_payload(self, payload: &Value) -> Result<Self> {
-        let state = State::restored(payload)?;
-        self.inner.state.set(state);
-        Ok(self)
-    }
-}
-
-impl State {
-    fn restored(payload: &Value) -> Result<Self> {
-        let contents: Vec<Content> = payload
-            .get("contents")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| NanocodeError::InvalidCheckpoint(error.to_string()))?
-            .unwrap_or_default();
-        let number = |field: &str| payload.get(field).and_then(Value::as_u64).unwrap_or(0);
-        let requests = payload
-            .get("requests")
-            .and_then(Value::as_array)
-            .map(|requests| {
-                requests
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let operation = payload
-            .get("operation")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        Ok(Self {
-            settings_sent: !contents.is_empty(),
-            transcript: contents.clone(),
-            contents,
-            step: number("step"),
-            calls: number("calls"),
-            requests,
-            operation,
-            ..Self::default()
-        })
-    }
-}
-
-impl Driver {
-    fn start(&self, prompt: BackendPrompt) -> BackendTurn {
-        let inner = Arc::clone(&self.inner);
-        let request_id = prompt
-            .request_id
-            .clone()
-            .unwrap_or_else(|| match inner.config.durable {
-                Some(_) => nanocode_platform::uuid_v7().to_string(),
-                None => format!("{}-{}", inner.config.session, prompt.key.0),
-            });
-        let cancel = Arc::new(Signal::new());
-        inner.cancel.set(Some(Arc::clone(&cancel)));
-        let events = prompt.events.clone();
-        let id = request_id.clone();
-        let (sender, receiver) = nanocode_sync::oneshot::channel();
-        nanocode_platform::spawn(async move {
-            let run = Box::pin(Arc::clone(&inner).run(prompt.prompt, events, id));
-            let stop = Box::pin(async move { cancel.wait().await });
-            let result = match select(run, stop).await {
-                Either::Left((result, _)) => result,
-                Either::Right(_) => {
-                    let mut state = inner.load();
-                    if state.contents.last().is_some_and(|content| {
-                        content.role == "model" && content.calls().next().is_some()
-                    }) {
-                        state.contents.pop();
-                    }
-                    let operation = state.operation.clone();
-                    inner.save(&state);
-                    match (&inner.config.durable, operation) {
-                        (Some(owner), Some(operation)) => match inner.settled() {
-                            Ok(checkpoint) => owner
-                                .cancel(operation, Some(checkpoint))
-                                .await
-                                .map_err(agent_error)
-                                .and(Err(NanocodeError::TurnCancelled)),
-                            Err(error) => Err(error),
-                        },
-                        _ => Err(NanocodeError::TurnCancelled),
-                    }
-                }
-            };
-            drop(sender.send(result));
-        });
-        let result =
-            Box::pin(async move { receiver.await.unwrap_or(Err(NanocodeError::TurnStopped)) });
-        BackendTurn {
-            request_id: Some(request_id),
-            result,
-        }
-    }
-
-    fn cancel_turn(&self) -> BackendFuture<Result<()>> {
-        if let Some(cancel) = self.inner.cancel.get().as_ref() {
-            cancel.fire();
-        }
-        done()
-    }
-}
-
 impl LifecycleBackend for Driver {
     fn harness_family(&self) -> HarnessFamily {
         HarnessFamily::new(crate::harness::FAMILY)
@@ -918,48 +410,115 @@ impl LifecycleBackend for Driver {
         let mut capabilities = Capabilities::NONE;
         capabilities.checkpoint = true;
         capabilities.compaction = true;
+        capabilities.resume = self.inner.config.durable.is_some();
+        capabilities.steering = true;
+        capabilities.identified_steering = true;
+        capabilities.side_question = true;
+        capabilities.fork = true;
+        capabilities.fork_at = true;
+        capabilities.side_conversation = true;
+        capabilities.spawn = true;
+        capabilities.developer_messages = true;
+        capabilities.thinking = nanocode_agent_core::Mutability::BetweenTurns;
         capabilities
     }
 
+    fn persistence(&self) -> Option<Persistence> {
+        self.inner
+            .config
+            .durable
+            .as_ref()
+            .map(|_| Persistence::durable(self.inner.config.session.clone()))
+    }
+
     fn submit(&self, prompt: BackendPrompt) -> BackendFuture<Result<BackendTurn>> {
-        if !prompt.carried_steers.is_empty() {
-            return Box::pin(async {
-                Err(NanocodeError::UnsupportedCapability {
-                    capability: "carried_steers",
-                })
-            });
-        }
-        let turn = self.start(prompt);
-        Box::pin(async move { Ok(turn) })
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.admit(prompt).await })
     }
 
     fn route(&self, prompt: BackendPrompt) -> BackendFuture<Result<BackendPromptRoute>> {
-        let turn = self.start(prompt);
-        Box::pin(async move { Ok(BackendPromptRoute::Started(turn)) })
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.route(prompt).await })
     }
 
-    fn steer(
+    fn steer(&self, key: BackendTurnKey, prompt: Prompt) -> BackendFuture<Result<()>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.steer(key.0, None, prompt).await })
+    }
+
+    fn steer_with_id(
         &self,
-        _key: BackendTurnKey,
-        _prompt: nanocode_agent_core::input::Prompt,
+        key: BackendTurnKey,
+        id: String,
+        prompt: Prompt,
     ) -> BackendFuture<Result<()>> {
-        unsupported("steering")
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.steer(key.0, Some(id), prompt).await })
     }
 
-    fn cancel(&self, _key: BackendTurnKey) -> BackendFuture<Result<()>> {
-        self.cancel_turn()
+    fn withdraw_steer(&self, key: BackendTurnKey, id: String) -> BackendFuture<Result<bool>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.withdraw_steer(key.0, &id).await })
+    }
+
+    fn steer_receipt(
+        &self,
+        id: String,
+        prompt: Prompt,
+    ) -> BackendFuture<Result<SteerReceiptStatus>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            match &inner.config.durable {
+                Some(owner) => owner.steer_receipt(id, &prompt).await.map_err(agent_error),
+                None => Ok(SteerReceiptStatus::Unknown),
+            }
+        })
+    }
+
+    fn unfinished_request(&self, id: String) -> BackendFuture<Result<bool>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            match &inner.config.durable {
+                Some(owner) => owner.unfinished_operation(id).await.map_err(agent_error),
+                None => Ok(false),
+            }
+        })
+    }
+
+    fn cancel(&self, key: BackendTurnKey) -> BackendFuture<Result<()>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.cancel(key.0).await })
     }
 
     fn cancel_active(&self) -> BackendFuture<Result<()>> {
-        self.cancel_turn()
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.cancel_active().await })
     }
 
-    fn set_harness_model(&self, _model: ModelSelection) -> BackendFuture<Result<()>> {
-        unsupported("model_switch")
+    fn set_harness_model(&self, model: ModelSelection) -> BackendFuture<Result<()>> {
+        let same = model == self.inner.config.model;
+        Box::pin(async move {
+            match same {
+                true => Ok(()),
+                false => Err(NanocodeError::InvalidRequest(
+                    "the model is fixed for this thread; start a new thread to use another model"
+                        .into(),
+                )),
+            }
+        })
     }
 
-    fn set_thinking(&self, _thinking: Thinking) -> BackendFuture<Result<()>> {
-        unsupported("thinking_switch")
+    fn set_thinking(&self, thinking: Thinking) -> BackendFuture<Result<()>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            inner
+                .config
+                .model
+                .capabilities(ModelTransport::Native)
+                .check_thinking(thinking)?;
+            inner.set_thinking(thinking);
+            Ok(())
+        })
     }
 
     fn set_fast_mode(&self, _enabled: bool) -> BackendFuture<Result<()>> {
@@ -968,25 +527,37 @@ impl LifecycleBackend for Driver {
 
     fn compact(&self) -> BackendFuture<Result<()>> {
         let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.queue_compaction().await })
+    }
+
+    fn side_question(&self, question: String) -> BackendFuture<Result<SideAnswer>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.side_question(question).await })
+    }
+
+    fn transcript(&self) -> BackendFuture<Result<Vec<nanocode_agent_core::input::PromptMessage>>> {
+        let settled = self.inner.settled.get();
+        Box::pin(async move { Ok(crate::durability::prompt_messages(&settled.contents)) })
+    }
+
+    fn append_developer_message(&self, text: String) -> BackendFuture<Result<AgentSessionContext>> {
+        let inner = Arc::clone(&self.inner);
         Box::pin(async move {
-            let (events, _receiver) =
-                nanocode_agent_core::backend::BackendRuntime::new(inner.config.session.clone());
-            let publisher = events.events();
-            let mut state = inner.load();
-            if state.contents.is_empty() {
-                return Ok(());
-            }
-            inner.compact(&mut state, &publisher).await?;
-            inner.save(&state);
-            Ok(())
+            inner.append_notice(text, None).await?;
+            Ok(AgentSessionContext::from_backend(
+                inner.config.workspace.clone(),
+                Vec::new(),
+            ))
         })
     }
 
-    fn append_developer_message(
+    fn append_developer_notice(
         &self,
-        _text: String,
-    ) -> BackendFuture<Result<AgentSessionContext>> {
-        unsupported("developer_messages")
+        text: String,
+        prefix: Option<String>,
+    ) -> BackendFuture<Result<bool>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.append_notice(text, prefix).await })
     }
 
     fn context(&self) -> BackendFuture<Result<AgentSessionContext>> {
@@ -998,12 +569,14 @@ impl LifecycleBackend for Driver {
         Box::pin(async move { Ok(checkpoint) })
     }
 
-    fn spawn(&self, _options: SpawnOptions) -> BackendFuture<Result<(Agent, AgentEvents)>> {
-        unsupported("spawn")
+    fn spawn(&self, options: SpawnOptions) -> BackendFuture<Result<(Agent, AgentEvents)>> {
+        let handle = self.inner.config.handle.clone();
+        Box::pin(async move { handle.spawn_with(options).await })
     }
 
-    fn fork(&self, _request: ForkRequest) -> BackendFuture<Result<(Agent, AgentEvents)>> {
-        unsupported("fork")
+    fn fork(&self, request: ForkRequest) -> BackendFuture<Result<(Agent, AgentEvents)>> {
+        let handle = self.inner.config.handle.clone();
+        Box::pin(async move { handle.fork(request).await })
     }
 
     fn flush(&self) -> BackendFuture<Result<()>> {
@@ -1012,16 +585,7 @@ impl LifecycleBackend for Driver {
 
     fn shutdown(&self) -> BackendFuture<Result<()>> {
         let inner = Arc::clone(&self.inner);
-        if inner.stopped.swap(true, Ordering::SeqCst) {
-            return done();
-        }
-        Box::pin(async move {
-            inner.config.engine.shutdown().await;
-            match &inner.config.durable {
-                Some(owner) => owner.shutdown().await.map_err(agent_error),
-                None => Ok(()),
-            }
-        })
+        Box::pin(async move { inner.shutdown().await })
     }
 
     fn set_parking(&self, _parking: bool) {}
@@ -1037,6 +601,6 @@ impl LifecycleBackend for Driver {
     fn unpark(&self, _call: Arc<dyn ParkedCall>) {}
 
     fn is_stopped(&self) -> bool {
-        self.inner.stopped.load(Ordering::SeqCst)
+        self.inner.life() != OPEN
     }
 }

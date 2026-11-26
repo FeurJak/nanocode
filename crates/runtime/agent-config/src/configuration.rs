@@ -208,3 +208,13 @@ pub trait DefaultRuntimeBackend: RuntimeBackend + Clone {
     fn native_default() -> Option<Self>;
     fn builtin_format() -> Arc<dyn CheckpointFormat>;
 }
+
+pub trait BuiltinFormats {
+    fn builtin_formats() -> Vec<Arc<dyn CheckpointFormat>>;
+}
+
+impl BuiltinFormats for () {
+    fn builtin_formats() -> Vec<Arc<dyn CheckpointFormat>> {
+        Vec::new()
+    }
+}

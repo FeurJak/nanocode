@@ -61,7 +61,7 @@ pub fn context_summary(
     requests: &[String],
     summary: &str,
     tasks: &[String],
-    _logs: &Path,
+    logs: bool,
 ) -> String {
     let requests = requests
         .iter()
@@ -77,6 +77,10 @@ pub fn context_summary(
             "\n# Running Background Tasks\nThe following background tasks were still running when this summary was generated:\n{}\n",
             tasks.join("\n")
         ));
+    }
+    if !logs {
+        out.push_str("</CONTEXT_SUMMARY>");
+        return out;
     }
     out.push_str(&format!(
         "\n# Conversation Logs\nStart with the compact transcript; if a step has `truncated_fields`, read only that specific line in `transcript_full.jsonl`:\n- `{}/transcript.jsonl`\n- `{}/transcript_full.jsonl`\n</CONTEXT_SUMMARY>",

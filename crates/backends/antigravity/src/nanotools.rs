@@ -162,6 +162,33 @@ impl NanoTools {
     }
 }
 
+impl NanoTools {
+    pub async fn recover(
+        &self,
+        name: &str,
+        context: ToolContext<'_>,
+    ) -> Option<std::result::Result<String, String>> {
+        match self.routes.get(name)? {
+            Route::Exec | Route::Wait => {
+                let execution = self.runtime.recover_code(context).await.ok()??;
+                let text = body_text(&execution.output);
+                Some(match execution.success {
+                    true => Ok(text),
+                    false => Err(text),
+                })
+            }
+            Route::Function(target) => {
+                let output = self.runtime.recover_tool(target, context).await?;
+                let text = body_text(&output.output);
+                Some(match output.success {
+                    true => Ok(text),
+                    false => Err(text),
+                })
+            }
+        }
+    }
+}
+
 fn flatten(definitions: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
     let mut flat = Vec::new();
     for definition in definitions {

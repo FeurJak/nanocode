@@ -1,6 +1,6 @@
 use nanocode_agent_config::configuration::{AgentResult, RuntimeBackend, RuntimeRequest};
 use nanocode_agent_core::{
-    BackendId, HarnessFamily, ModelSelection, NanocodeError, Result, Thinking,
+    BackendId, HarnessFamily, Lineage, ModelSelection, NanocodeError, Result, Thinking,
     backend::BackendFuture,
 };
 use nanocode_backend_antigravity_client::{
@@ -113,6 +113,12 @@ pub const fn level(thinking: Thinking) -> Option<&'static str> {
     }
 }
 
+impl nanocode_agent_config::configuration::BuiltinFormats for AntigravityHarness {
+    fn builtin_formats() -> Vec<Arc<dyn CheckpointFormat>> {
+        vec![Arc::new(crate::durability::AntigravityCheckpointFormat)]
+    }
+}
+
 impl RuntimeBackend for AntigravityHarness {
     fn id(&self) -> BackendId {
         BackendId::new(FAMILY)
@@ -156,6 +162,14 @@ impl RuntimeBackend for AntigravityHarness {
 
 impl AntigravityHarness {
     async fn assemble(&self, request: RuntimeRequest) -> AgentResult {
+        self.assemble_child(request, None).await
+    }
+
+    pub(crate) async fn assemble_child(
+        &self,
+        request: RuntimeRequest,
+        explicit: Option<Lineage>,
+    ) -> AgentResult {
         use crate::driver::{Config, Driver};
         use crate::nanotools::NanoTools;
         use crate::profile::Profile;
@@ -164,18 +178,20 @@ impl AntigravityHarness {
         use nanocode_agent_core::{AgentHandle, backend::BackendRuntime};
         use nanocode_backend_antigravity_client::{Client, ExplicitCache};
         use nanocode_backend_antigravity_tools::{DECLARATIONS, Engine};
-        use nanocode_durability::agent_error;
         use nanocode_tool_contracts::ToolCollection as _;
         use nanocode_tool_host::{Tools, runtime::ToolRuntime};
         let invalid = |error: String| NanocodeError::InvalidRequest(error);
         let RuntimeRequest {
-            request: spec,
+            request: mut spec,
             settings,
             defaults,
             workspace,
             subagents,
             services,
         } = request;
+        let recipe_settings = settings.clone();
+        let recipe_defaults = defaults.clone();
+        let recipe_subagents = subagents.clone();
         let settings = settings.or(&defaults);
         let model = spec.model.clone();
         let session = spec
@@ -230,25 +246,94 @@ impl AntigravityHarness {
         if let Some(retry) = self.retry {
             client = client.with_retry(retry);
         }
-        let profile = Profile::for_model(model.as_str()).with_level(level(spec.thinking));
+        let durable = match spec.durable_state.take() {
+            Some(state) => Some(acquire(state, spec.thinking).await?),
+            None => None,
+        };
+        let stored = durable.as_ref().and_then(|durable| durable.stored.clone());
+        let imported = match (&stored, &spec.checkpoint) {
+            (None, Some(checkpoint)) => Some(
+                checkpoint
+                    .payload()
+                    .decode::<serde_json::Value>()
+                    .map_err(|error| NanocodeError::InvalidCheckpoint(error.to_string()))?,
+            ),
+            _ => None,
+        };
+        let model = stored
+            .as_ref()
+            .or(imported.as_ref())
+            .and_then(crate::driver::payload_model)
+            .filter(|stored| stored.family() == model.family())
+            .unwrap_or(model);
+        let thinking = durable
+            .as_ref()
+            .and_then(|durable| durable.initial)
+            .unwrap_or(spec.thinking);
+        let lineage = explicit
+            .or_else(|| {
+                durable
+                    .as_ref()
+                    .and_then(|durable| durable.record.as_ref())
+                    .map(|record| record.lineage.clone())
+            })
+            .or_else(|| {
+                spec.checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.lineage().clone())
+            })
+            .or_else(|| {
+                spec.parent.as_ref().map(|parent| {
+                    Lineage::new(
+                        parent.root_session_id(),
+                        Some(parent.session_id().to_owned()),
+                        nanocode_agent_core::Origin::Subagent,
+                        1,
+                    )
+                })
+            })
+            .unwrap_or_else(|| Lineage::root(session.clone()));
+        let profile = Profile::for_model(model.as_str()).with_level(level(thinking));
         let root = spec.parent.as_ref().map_or_else(
             || session.clone(),
             |parent| parent.root_session_id().to_owned(),
         );
+        let factory = Arc::new(crate::factory::AntigravityFactory::new(
+            crate::factory::Recipe {
+                harness: self.clone(),
+                settings: recipe_settings,
+                defaults: recipe_defaults,
+                workspace: Arc::clone(&workspace),
+                subagents: recipe_subagents,
+                services: Arc::clone(&services),
+                routed: spec.spawn_factory.clone(),
+                branches: durable.as_ref().and_then(|durable| {
+                    durable
+                        .record
+                        .clone()
+                        .map(|record| (durable.store.clone(), record))
+                }),
+            },
+        ));
         let handle = AgentHandle::new(
             session.clone(),
             model.clone(),
-            Arc::new(nanocode_agent_core::backend::CrossHarnessOnly),
+            Arc::clone(&factory) as Arc<dyn nanocode_agent_core::backend::AgentFactory>,
         )
         .with_root_session_id(root)
-        .with_spawn_factory(spec.spawn_factory.clone());
+        .with_spawn_factory(spec.spawn_factory.clone())
+        .with_child_journal(durable.as_ref().map(|durable| durable.journal.clone()));
         let selected = match &settings.tools {
             Some(tools) => tools.materialize(handle.clone()),
             None => Tools::builder().without_defaults().build(),
         }
         .map_err(|error| invalid(error.to_string()))?;
         let selected = services
-            .prepare_tools(&handle, selected, None)
+            .prepare_tools(
+                &handle,
+                selected,
+                durable.as_ref().map(|durable| durable.store.clone()),
+            )
             .map_err(|error| invalid(error.to_string()))?;
         let mut additive = services.shared_tools(false).await?;
         if let Some(subagents) = &subagents {
@@ -282,6 +367,7 @@ impl AntigravityHarness {
             session.clone(),
             Some(Arc::new(search)),
         );
+        engine.keep_step_files(durable.is_none());
         let skills = skills(&workspace);
         let system = crate::prompts::system(&crate::prompts::Environment {
             os: OS,
@@ -318,19 +404,15 @@ impl AntigravityHarness {
             cascade: session.clone(),
             trajectory: new_id(&format!("trajectory{session}")),
         };
-        let checkpoint = spec.checkpoint.clone();
-        let (durable, stored) = match spec.durable_state {
-            Some(state) => {
-                let (owner, stored) = state.acquire_agent().await.map_err(agent_error)?;
-                let stored = stored
-                    .map(|payload| payload.decode::<serde_json::Value>())
-                    .transpose()
-                    .map_err(agent_error)?;
-                (Some(owner), stored)
-            }
+        let (runtime, events) = BackendRuntime::new(session.clone());
+        let runtime = runtime.with_lineage(lineage.clone());
+        let logs = durable
+            .is_none()
+            .then(|| brain.join(".system_generated").join("logs"));
+        let (owner, keep) = match durable {
+            Some(durable) => (Some(durable.owner), Some(durable.session)),
             None => (None, None),
         };
-        let (runtime, events) = BackendRuntime::new(session.clone());
         let driver = Driver::new(Config {
             client,
             profile,
@@ -339,20 +421,90 @@ impl AntigravityHarness {
             engine,
             nano,
             model,
-            thinking: spec.thinking,
+            thinking,
             session,
             cache,
-            logs: brain.join(".system_generated").join("logs"),
+            logs,
             notice,
-            durable,
+            durable: owner,
+            lineage,
+            workspace: workspace.to_string_lossy().into_owned(),
+            events: runtime.events(),
+            keep,
+            handle,
         });
-        let driver = match (stored, checkpoint) {
+        factory.bind(&driver.inner);
+        let driver = match (stored, imported) {
             (Some(stored), _) => driver.restore_payload(&stored)?,
-            (None, Some(checkpoint)) => driver.restore(&checkpoint)?,
+            (None, Some(imported)) => {
+                let driver = driver.restore_payload(&imported)?;
+                driver.import().await?;
+                driver
+            }
             (None, None) => driver,
         };
         Ok((runtime.bind(driver), events))
     }
+}
+
+const MAINTENANCE_KINDS: &[&str] = &["compact"];
+
+struct Acquired {
+    owner: nanocode_durability::DurableOwner,
+    session: nanocode_durability::DurableSession,
+    journal: nanocode_agent_core::backend::ChildJournal,
+    store: nanocode_durability::SharedStore,
+    stored: Option<serde_json::Value>,
+    initial: Option<Thinking>,
+    record: Option<nanocode_durability::SessionRecord>,
+}
+
+async fn acquire(
+    state: nanocode_durability::DurableSession,
+    thinking: Thinking,
+) -> Result<Acquired> {
+    use nanocode_durability::agent_error;
+    let journal = state.child_journal();
+    let store = state.shared_store();
+    let (owner, stored) = state
+        .acquire_agent_with_initial(nanocode_durability::InitialSettings {
+            thinking,
+            service_tier: nanocode_agent_core::ServiceTier::Standard,
+        })
+        .await
+        .map_err(agent_error)?;
+    owner
+        .abandon_stale_kinds(MAINTENANCE_KINDS)
+        .await
+        .map_err(agent_error)?;
+    let record = state.record().await.map_err(agent_error)?;
+    let stored = match stored {
+        Some(payload) => Some(
+            owner
+                .load_payload(payload)
+                .await
+                .map_err(agent_error)?
+                .decode::<serde_json::Value>()
+                .map_err(agent_error)?,
+        ),
+        None => None,
+    };
+    let initial = match &stored {
+        Some(_) => None,
+        None => record
+            .as_ref()
+            .and_then(|record| record.initial)
+            .map(|initial| initial.thinking),
+    };
+    Ok(Acquired {
+        owner,
+        session: state,
+        journal,
+        store,
+        stored,
+        initial,
+        record,
+    })
 }
 
 #[cfg(not(target_family = "wasm"))]
