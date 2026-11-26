@@ -260,6 +260,11 @@ default_table='
 1 canary_steer_carry_codex_fact_dropped canary:20 --scenario steer_carry --mutation codex_fact_dropped
 1 canary_steer_carry_gate_dropped canary:8 --scenario steer_carry --mutation carry_gate_dropped
 1 canary_steer_waits_round canary:8 --scenario steer_carry --mutation steer_waits_round
+4 antigravity_durable pass --scenario antigravity_durable
+2 antigravity_durable_twice pass --scenario antigravity_durable --twice
+1 canary_antigravity_moved_forgets_results canary:8 --scenario antigravity_durable --mutation antigravity_moved_forgets_results
+1 canary_antigravity_replay_reruns canary:8 --scenario antigravity_durable --mutation antigravity_replay_reruns
+1 canary_antigravity_fact_sync_skipped canary:8 --scenario antigravity_durable --mutation antigravity_fact_sync_skipped
 8 board_brief pass --scenario board_brief
 2 board_brief_twice pass --scenario board_brief --twice
 1 canary_board_brief_over_budget canary:40 --scenario board_brief --mutation brief_over_budget

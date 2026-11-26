@@ -1,6 +1,7 @@
 mod agents;
 #[cfg(unix)]
 mod alloc;
+mod antigravitydurable;
 mod backendfacts;
 mod board;
 mod board_brief;
@@ -108,6 +109,7 @@ use std::{collections::BTreeMap, ops::Range, process::ExitCode};
 
 use crate::{
     agents::{AgentStats, AgentsMutation},
+    antigravitydurable::{AntigravityMutation, AntigravityStats},
     backendfacts::BackendFactsMutation,
     board::{BoardMutation, BoardStats},
     board_brief::{BriefMutation as BoardBriefMutation, BriefStats as BoardBriefStats},
@@ -193,6 +195,7 @@ enum Scenario {
     LongThread,
     RequestClose,
     SteerCarry,
+    AntigravityDurable,
     InboxStress,
     Capture,
     Executor,
@@ -281,6 +284,7 @@ struct Args {
     dispatcher: DispatcherMutation,
     board_steer: BoardSteerMutation,
     steer_carry: CarryMutation,
+    antigravity_durable: AntigravityMutation,
     board_brief: BoardBriefMutation,
     workspace_fs: WorkspaceFsMutation,
     repo_cache: RepoCacheMutation,
@@ -320,7 +324,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|lease|durable|scale|gc_unwind|interp_drop|held_await|holds|slog|append|one_log_facts|migrated|kv_lease|scope|thread_scope|pg_pool] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--chain-bytes BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|antigravity_durable|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|lease|durable|scale|gc_unwind|interp_drop|held_await|holds|slog|append|one_log_facts|migrated|kv_lease|scope|thread_scope|pg_pool] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--chain-bytes BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -497,6 +501,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut dispatcher = DispatcherMutation::NONE;
     let mut board_steer = BoardSteerMutation::None;
     let mut steer_carry = CarryMutation::None;
+    let mut antigravity_durable = AntigravityMutation::None;
     let mut board_brief = BoardBriefMutation::None;
     let mut workspace_fs = WorkspaceFsMutation::None;
     let mut repo_cache = RepoCacheMutation::None;
@@ -595,6 +600,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "long_thread" => Scenario::LongThread,
                     "request_close" => Scenario::RequestClose,
                     "steer_carry" => Scenario::SteerCarry,
+                    "antigravity_durable" => Scenario::AntigravityDurable,
                     "inbox_stress" => Scenario::InboxStress,
                     "executor" => Scenario::Executor,
                     "board" => Scenario::Board,
@@ -682,6 +688,9 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::Executor, Some(name)) => tasks = TasksMutation::parse(name)?,
         (Scenario::RequestClose, Some(_)) => return None,
         (Scenario::SteerCarry, Some(name)) => steer_carry = CarryMutation::parse(name)?,
+        (Scenario::AntigravityDurable, Some(name)) => {
+            antigravity_durable = AntigravityMutation::parse(name)?;
+        }
         (Scenario::InboxStress, Some(_)) => return None,
         (Scenario::Board, Some(name)) => board = BoardMutation::parse(name)?,
         (Scenario::Controlplane, Some(name)) => {
@@ -803,6 +812,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         dispatcher,
         board_steer,
         steer_carry,
+        antigravity_durable,
         board_brief,
         workspace_fs,
         repo_cache,
@@ -891,6 +901,9 @@ fn scenario_replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::SteerCarry {
         return steercarry::replay(seed, args.steer_carry);
+    }
+    if args.scenario == Scenario::AntigravityDurable {
+        return antigravitydurable::replay(seed, args.antigravity_durable);
     }
     if args.scenario == Scenario::InboxStress {
         return inboxstress::replay(seed);
@@ -1379,6 +1392,7 @@ fn mutations() -> ExitCode {
     add("dispatcher", DispatcherMutation::names());
     add("board_steer", BoardSteerMutation::names());
     add("steer_carry", CarryMutation::names());
+    add("antigravity_durable", AntigravityMutation::names());
     add("board_brief", BoardBriefMutation::names());
     add("workspace_fs", WorkspaceFsMutation::names());
     add("repo_cache", RepoCacheMutation::names());
@@ -1454,6 +1468,7 @@ struct Totals {
     long_thread_totals: LongThreadStats,
     request_close_totals: RequestCloseStats,
     steer_carry_totals: CarryStats,
+    antigravity_durable_totals: AntigravityStats,
     inbox_stress_totals: InboxStressStats,
     tasks_totals: TasksStats,
     board_totals: BoardStats,
@@ -1521,6 +1536,8 @@ impl Totals {
         self.long_thread_totals.add(&other.long_thread_totals);
         self.request_close_totals.add(&other.request_close_totals);
         self.steer_carry_totals.add(&other.steer_carry_totals);
+        self.antigravity_durable_totals
+            .add(&other.antigravity_durable_totals);
         self.inbox_stress_totals.add(&other.inbox_stress_totals);
         self.tasks_totals.add(&other.tasks_totals);
         self.board_totals.add(&other.board_totals);
@@ -1652,6 +1669,13 @@ fn judge_one(seed: u64, args: &Args, totals: &mut Totals, caught: &mut Caught) -
             args.twice,
             args.options.verbose,
             &mut totals.steer_carry_totals,
+        ),
+        Scenario::AntigravityDurable => antigravitydurable::judge(
+            seed,
+            args.antigravity_durable,
+            args.twice,
+            args.options.verbose,
+            &mut totals.antigravity_durable_totals,
         ),
         Scenario::InboxStress => inboxstress::judge(
             seed,
@@ -2149,6 +2173,8 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::Dispatcher && args.dispatcher != DispatcherMutation::NONE)
         || (args.scenario == Scenario::BoardSteer && args.board_steer != BoardSteerMutation::None)
         || (args.scenario == Scenario::SteerCarry && args.steer_carry != CarryMutation::None)
+        || (args.scenario == Scenario::AntigravityDurable
+            && args.antigravity_durable != AntigravityMutation::None)
         || (args.scenario == Scenario::BoardBrief && args.board_brief != BoardBriefMutation::None)
         || (args.scenario == Scenario::WorkspaceFs
             && args.workspace_fs != WorkspaceFsMutation::None)
@@ -2239,6 +2265,7 @@ fn main() -> ExitCode {
         long_thread_totals,
         request_close_totals,
         steer_carry_totals,
+        antigravity_durable_totals,
         inbox_stress_totals,
         tasks_totals,
         board_totals,
@@ -2371,6 +2398,16 @@ fn main() -> ExitCode {
             args.twice,
             args.steer_carry,
             &steer_carry_totals,
+        );
+    }
+    if args.scenario == Scenario::AntigravityDurable {
+        return antigravitydurable::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.antigravity_durable,
+            &antigravity_durable_totals,
         );
     }
     if args.scenario == Scenario::InboxStress {
