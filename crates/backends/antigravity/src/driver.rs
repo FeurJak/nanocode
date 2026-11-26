@@ -129,6 +129,7 @@ pub(crate) struct Inner {
     pub(crate) notices: Atom<Vec<String>>,
     pub(crate) initialized: AtomicBool,
     pub(crate) pages: nanocode_sync::Slot<crate::pages::Pages>,
+    pub(crate) auto_compact: Atom<Option<u64>>,
 }
 
 pub struct Driver {
@@ -274,6 +275,11 @@ impl Inner {
         self.life.store(STOPPED, Ordering::SeqCst);
     }
 
+    pub(crate) fn compaction_limit(&self) -> u64 {
+        let limit = self.profile.get().compaction_limit;
+        self.auto_compact.get().map_or(limit, |set| set.min(limit))
+    }
+
     pub(crate) fn thinking(&self) -> Thinking {
         *self.thinking.get()
     }
@@ -410,6 +416,7 @@ impl Driver {
                 notices: Atom::default(),
                 initialized: AtomicBool::new(false),
                 pages: nanocode_sync::Slot::new(Some(crate::pages::Pages::default())),
+                auto_compact: Atom::default(),
             }),
         }
     }
@@ -599,6 +606,33 @@ impl LifecycleBackend for Driver {
                 .check_thinking(thinking)?;
             inner.set_thinking(thinking);
             Ok(())
+        })
+    }
+
+    fn set_auto_compact_token_limit(&self, limit: Option<u64>) -> BackendFuture<Result<()>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            if inner.life() != OPEN {
+                return Err(NanocodeError::AgentStopped);
+            }
+            inner.auto_compact.set(limit);
+            Ok(())
+        })
+    }
+
+    fn settings(
+        &self,
+    ) -> BackendFuture<Result<(ModelSelection, Thinking, nanocode_agent_core::ReasoningMode)>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            if inner.life() != OPEN {
+                return Err(NanocodeError::AgentStopped);
+            }
+            Ok((
+                inner.config.model.clone(),
+                inner.thinking(),
+                nanocode_agent_core::ReasoningMode::Standard,
+            ))
         })
     }
 

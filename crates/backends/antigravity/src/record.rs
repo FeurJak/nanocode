@@ -106,6 +106,9 @@ impl Inner {
         let Some(facts) = &self.config.facts else {
             return Ok(());
         };
+        if crate::sim::mutated(crate::sim::Mutation::FactSyncSkipped) {
+            return Ok(());
+        }
         let sent = contents.to_vec();
         let decided_now = facts
             .read(move |fold| decision(fold.contents(), &sent, fold.ready()))

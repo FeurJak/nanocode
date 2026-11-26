@@ -12,6 +12,8 @@ mod prompts;
 mod record;
 mod request;
 mod search;
+#[doc(hidden)]
+pub mod sim;
 mod turn;
 
 pub use durability::AntigravityCheckpointFormat;

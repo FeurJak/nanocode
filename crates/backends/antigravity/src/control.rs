@@ -209,6 +209,11 @@ impl Inner {
                     Admission::Pending => {
                         return self.enqueue(request, id, true, automatic, events).await;
                     }
+                    Admission::Completed { .. }
+                        if crate::sim::mutated(crate::sim::Mutation::ReplayReruns) =>
+                    {
+                        None
+                    }
                     Admission::Completed { output, checkpoint } => {
                         Some(self.replay(owner, &id, output, checkpoint).await)
                     }

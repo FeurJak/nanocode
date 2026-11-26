@@ -608,7 +608,7 @@ impl Inner {
                 Phase::Answered | Phase::Request => {}
             }
             recovering = false;
-            if state.prompt_tokens >= self.profile.get().compaction_limit {
+            if state.prompt_tokens >= self.compaction_limit() {
                 self.compact(state, events).await?;
                 self.persist(state).await?;
             }
@@ -824,7 +824,9 @@ impl Inner {
                 json!({"call_id": call_id, "tool": call.name, "result": body, "status": if key == "error" { "failed" } else { "completed" }}),
             );
             state.progress.responses.push(response(call, key, body));
-            if index + 1 < calls.len() {
+            if index + 1 < calls.len()
+                && !crate::sim::mutated(crate::sim::Mutation::MovedForgetsResults)
+            {
                 self.persist(state).await?;
             }
         }
