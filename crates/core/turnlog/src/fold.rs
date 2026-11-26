@@ -793,6 +793,14 @@ impl Fold {
         self.owners.len()
     }
 
+    pub(crate) fn cold_owners(&self) -> Vec<String> {
+        self.owners
+            .iter()
+            .filter(|(_, state)| matches!(state, Owner::Cold { .. }))
+            .map(|(owner, _)| owner.clone())
+            .collect()
+    }
+
     pub(crate) fn cold(&self, owner: &str) -> Option<&[Section]> {
         match self.owners.get(owner) {
             Some(Owner::Cold { entry, .. }) => Some(&entry.sections),
@@ -2193,6 +2201,29 @@ impl Fold {
     #[must_use]
     pub fn host(&self, key: &str) -> Option<&RawValue> {
         self.hosts.get(key).map(AsRef::as_ref)
+    }
+
+    pub fn hosts(&self) -> impl Iterator<Item = (&str, &RawValue)> {
+        self.hosts
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_ref()))
+    }
+
+    pub fn stored_all(&self) -> impl Iterator<Item = (&str, &str)> {
+        let dead = self
+            .dead
+            .iter()
+            .filter(|(key, _)| !self.stored.contains_key(*key));
+        self.stored
+            .iter()
+            .chain(dead)
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
+    pub fn models_all(&self) -> impl Iterator<Item = (&str, &[Box<RawValue>])> {
+        self.models
+            .iter()
+            .map(|(turn, responses)| (turn.as_str(), responses.as_slice()))
     }
 
     pub fn cells(&self) -> impl Iterator<Item = (&str, u64, &[Box<RawValue>])> {

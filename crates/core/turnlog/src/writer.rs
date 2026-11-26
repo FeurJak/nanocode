@@ -1688,6 +1688,11 @@ impl TurnLog {
             .await?
     }
 
+    pub async fn load_all(&self) -> Result<u64, StoreError> {
+        self.bounded(true, |writing| Box::pin(writing.load_all()))
+            .await?
+    }
+
     pub async fn read_owners<R>(
         &self,
         owners: &[String],
@@ -1841,6 +1846,24 @@ impl Writing {
         }
         writer.fold.unshelve_all();
         Ok(())
+    }
+
+    async fn load_all(&mut self) -> Result<u64, StoreError> {
+        self.load_index().await?;
+        let mut cold = self.writer.fold.cold_owners();
+        while !cold.is_empty() {
+            self.warm_owners(&cold).await?;
+            let left = self.writer.fold.cold_owners();
+            if left == cold {
+                return Err(StoreError::Backend(format!(
+                    "turn log owners of {} stay cold after their sections load: {}",
+                    self.scope,
+                    left.join(", ")
+                )));
+            }
+            cold = left;
+        }
+        Ok(self.writer.next)
     }
 
     async fn warm_owners(&mut self, owners: &[String]) -> Result<(), StoreError> {
