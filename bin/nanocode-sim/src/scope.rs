@@ -16,7 +16,7 @@ use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_partitions::{Partition, Row};
 use nanocode_scope::{
     Checkpoints, Committed, Fence, Manifest, MemoryCheckpoints, Part, PartedLeases, Policy,
-    Reached, Resident, Route, Scope, ScopeError, Scopes, Stats, Wiring, Written,
+    Reached, Resident, Route, Routed, Scope, ScopeError, Scopes, Stats, Wiring, Written,
     sim::{self as scope_sim, Mutation},
 };
 use nanocode_sync::{Atom, Signal, block_on};
@@ -41,6 +41,7 @@ const ENTRY_BYTES: usize = 16;
 const TTL_MS: u64 = 1_000;
 const GRACE_MS: u64 = 300;
 const MARGIN_MS: u64 = 100;
+const LAPSE_MS: u64 = TTL_MS + GRACE_MS + MARGIN_MS;
 const TICK_MS_MAX: u64 = 120;
 const START_MS: u64 = 1_000_000;
 const CHECKPOINT_ROWS: Range<u64> = 3..10;
@@ -113,6 +114,9 @@ pub struct ScopeStats {
     pub forwards_unreachable: u64,
     pub forward_ms_max: u64,
     pub resident_bytes_max: u64,
+    pub races: u64,
+    pub races_refused: u64,
+    pub races_missed: u64,
 }
 
 impl ScopeStats {
@@ -143,6 +147,9 @@ impl ScopeStats {
         self.forwards_unreachable += other.forwards_unreachable;
         self.forward_ms_max = self.forward_ms_max.max(other.forward_ms_max);
         self.resident_bytes_max = self.resident_bytes_max.max(other.resident_bytes_max);
+        self.races += other.races;
+        self.races_refused += other.races_refused;
+        self.races_missed += other.races_missed;
     }
 
     fn runtime(&mut self, stats: &Stats) {
@@ -603,40 +610,46 @@ fn send(rng: &mut Rng, world: &World, nodes: &mut [Node], stats: &mut ScopeStats
     stats.sends += 1;
     let command = add(rng, world.policy.checkpoint_rows);
     let node = &mut nodes[at];
-    let sent = match driven(world, "a get", node.scopes.get(&scope))
-        .unwrap_or(Err(ScopeError::Busy))
-    {
-        Err(_) => Err(None),
-        Ok(Reached::Local(handle)) => {
-            node.handles.insert(scope.clone(), handle.clone());
-            driven(world, "a send", handle.send(command))
-                .unwrap_or(Err(ScopeError::Busy))
-                .map_err(Some)
-        }
-        Ok(Reached::Routed(routed)) => {
-            stats.routed += 1;
-            let holder = routed.holder().to_owned();
-            let watched = nanocode_platform::timeout(
-                Duration::from_millis(WATCHDOG_MS),
-                routed.send(command),
-            );
-            match drive(&world.time, watched) {
-                Some(Ok(sent)) => sent.map_err(Some),
-                Some(Err(_)) | None => {
-                    flag(
-                        &world.wrong,
-                        format!(
-                            "deadline: a forward of {scope} to {holder} waited past {WATCHDOG_MS} ms under a {FORWARD_MS} ms forward deadline"
-                        ),
-                    );
-                    Err(None)
-                }
+    let sent =
+        match driven(world, "a get", node.scopes.get(&scope)).unwrap_or(Err(ScopeError::Busy)) {
+            Err(_) => Err(None),
+            Ok(Reached::Local(handle)) => {
+                node.handles.insert(scope.clone(), handle.clone());
+                driven(world, "a send", handle.send(command))
+                    .unwrap_or(Err(ScopeError::Busy))
+                    .map_err(Some)
             }
-        }
-    };
+            Ok(Reached::Routed(routed)) => {
+                stats.routed += 1;
+                forwarded(world, &scope, &routed, command)
+            }
+        };
     match sent {
         Ok(_) => stats.committed += 1,
         Err(_) => stats.refused += 1,
+    }
+}
+
+fn forwarded(
+    world: &World,
+    scope: &str,
+    routed: &Routed<Buckets>,
+    command: Add,
+) -> Result<Committed<u64>, Option<ScopeError>> {
+    let holder = routed.holder().to_owned();
+    let watched =
+        nanocode_platform::timeout(Duration::from_millis(WATCHDOG_MS), routed.send(command));
+    match drive(&world.time, watched) {
+        Some(Ok(sent)) => sent.map_err(Some),
+        Some(Err(_)) | None => {
+            flag(
+                &world.wrong,
+                format!(
+                    "deadline: a forward of {scope} to {holder} waited past {WATCHDOG_MS} ms under a {FORWARD_MS} ms forward deadline"
+                ),
+            );
+            Err(None)
+        }
     }
 }
 
@@ -671,7 +684,7 @@ fn stall(rng: &mut Rng, world: &World, nodes: &mut [Node], stats: &mut ScopeStat
         let thread = std::thread::spawn(move || drop(sent.send(reader.state())));
         match read.recv_timeout(Duration::from_millis(READ_WAIT_MS)) {
             Ok(state) => {
-                let committed = world.refold(&scope, u64::MAX);
+                let committed = world.refold(&scope, handle.next());
                 if *state != committed {
                     flag(
                         &world.wrong,
@@ -813,11 +826,36 @@ fn step(
     world: &World,
     nodes: &mut Vec<Node>,
     generation: &mut u64,
+    race: &mut Option<Race>,
     stats: &mut ScopeStats,
 ) {
     stats.steps += 1;
     advance(rng, world, nodes);
     let before: Vec<Vec<(String, u64)>> = nodes.iter().map(|node| residents(world, node)).collect();
+    let crashed = match race.take() {
+        Some(raced) => {
+            let (crashed, next) = play(rng, world, nodes, generation, raced, stats);
+            *race = next;
+            crashed
+        }
+        None => roll(rng, world, nodes, generation, stats),
+    };
+    publish(world, nodes);
+    for (at, node) in nodes.iter().enumerate() {
+        if crashed != Some(at) {
+            departures(world, node, &before[at], stats);
+        }
+    }
+    folds(world, nodes);
+}
+
+fn roll(
+    rng: &mut Rng,
+    world: &World,
+    nodes: &mut [Node],
+    generation: &mut u64,
+    stats: &mut ScopeStats,
+) -> Option<usize> {
     let mut crashed = None;
     let roll = rng.below(1_000_000);
     let mut bands = [
@@ -883,13 +921,272 @@ fn step(
         publish(world, nodes);
         send(rng, world, nodes, stats);
     }
-    publish(world, nodes);
-    for (at, node) in nodes.iter().enumerate() {
-        if crashed != Some(at) {
-            departures(world, node, &before[at], stats);
+    crashed
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Point {
+    BeforeCheckpoint,
+    AfterCheckpoint,
+    Release,
+    CrashLapse,
+    NextAppend,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Act {
+    Prime,
+    Pause,
+    Forward,
+    Lapse,
+    Claim,
+    Checkpoint,
+    Crash,
+    Stale,
+}
+
+impl Point {
+    const ALL: [Self; 5] = [
+        Self::BeforeCheckpoint,
+        Self::AfterCheckpoint,
+        Self::Release,
+        Self::CrashLapse,
+        Self::NextAppend,
+    ];
+
+    const fn acts(self) -> &'static [Act] {
+        match self {
+            Self::BeforeCheckpoint | Self::Release | Self::NextAppend => &[
+                Act::Prime,
+                Act::Pause,
+                Act::Forward,
+                Act::Lapse,
+                Act::Claim,
+                Act::Stale,
+            ],
+            Self::AfterCheckpoint => &[
+                Act::Prime,
+                Act::Pause,
+                Act::Forward,
+                Act::Lapse,
+                Act::Claim,
+                Act::Checkpoint,
+                Act::Stale,
+            ],
+            Self::CrashLapse => &[
+                Act::Prime,
+                Act::Pause,
+                Act::Forward,
+                Act::Lapse,
+                Act::Claim,
+                Act::Crash,
+                Act::Lapse,
+                Act::Stale,
+            ],
         }
     }
-    folds(world, nodes);
+
+    fn uncheckpointed(self, policy: &Policy) -> u64 {
+        match self {
+            Self::NextAppend => policy.checkpoint_rows as u64,
+            Self::BeforeCheckpoint | Self::AfterCheckpoint | Self::Release | Self::CrashLapse => 1,
+        }
+    }
+}
+
+struct Race {
+    point: Point,
+    at: usize,
+    scope: String,
+    old: usize,
+    new: usize,
+}
+
+impl Race {
+    const fn new(point: Point, scope: String) -> Self {
+        Self {
+            point,
+            at: 0,
+            scope,
+            old: 0,
+            new: 0,
+        }
+    }
+}
+
+fn play(
+    rng: &mut Rng,
+    world: &World,
+    nodes: &mut [Node],
+    generation: &mut u64,
+    mut race: Race,
+    stats: &mut ScopeStats,
+) -> (Option<usize>, Option<Race>) {
+    let act = race.point.acts()[race.at];
+    publish(world, nodes);
+    let mut crashed = None;
+    let played = match act {
+        Act::Prime => prime(rng, world, nodes, &mut race, stats),
+        Act::Pause => {
+            stats.pauses += 1;
+            nodes[race.old].paused = true;
+            true
+        }
+        Act::Forward => forward(rng, world, nodes, &race, stats),
+        Act::Lapse => {
+            lapse(world, nodes);
+            true
+        }
+        Act::Claim => claim(world, &mut nodes[race.new], &race.scope),
+        Act::Checkpoint => driven(world, "a drain", nodes[race.new].scopes.drain(&race.scope))
+            .is_some_and(|drained| drained.is_ok()),
+        Act::Crash => {
+            stats.crashes += 1;
+            *generation += 1;
+            nodes[race.new] = world.node(&format!("n{}g{generation}", race.new));
+            crashed = Some(race.new);
+            true
+        }
+        Act::Stale => stale_race(rng, world, &mut nodes[race.old], &race, stats),
+    };
+    if !played {
+        if act == Act::Prime {
+            return (crashed, Some(race));
+        }
+        stats.races_missed += 1;
+        return (crashed, None);
+    }
+    race.at += 1;
+    if race.at == race.point.acts().len() {
+        stats.races += 1;
+        return (crashed, None);
+    }
+    (crashed, Some(race))
+}
+
+fn prime(
+    rng: &mut Rng,
+    world: &World,
+    nodes: &mut [Node],
+    race: &mut Race,
+    stats: &mut ScopeStats,
+) -> bool {
+    let now = world.db.load(Ordering::Relaxed);
+    for node in nodes.iter_mut().filter(|node| node.paused) {
+        node.paused = false;
+        node.clock.store(now, Ordering::Relaxed);
+    }
+    publish(world, nodes);
+    let part = world.reader.partition(&race.scope);
+    let holder = match world.store.fence_row(part) {
+        Some(Row::Held { holder, .. }) => nodes.iter().position(|node| node.name == holder),
+        Some(Row::Released { .. }) | None => None,
+    };
+    let old = holder.unwrap_or_else(|| rng.pick(nodes.len()));
+    let new = (old + 1 + rng.pick(nodes.len() - 1)) % nodes.len();
+    let node = &mut nodes[old];
+    let _ = driven(world, "a renewal", node.scopes.renew());
+    let Some(Ok(Reached::Local(handle))) = driven(world, "a get", node.scopes.get(&race.scope))
+    else {
+        return false;
+    };
+    node.handles.insert(race.scope.clone(), handle.clone());
+    let target = world.witness.latest_seq(&race.scope) + race.point.uncheckpointed(&world.policy);
+    if handle.next() < target {
+        stats.sends += 1;
+        let command = Add {
+            bucket: u8::try_from(rng.below(u64::from(BUCKETS))).expect("a bucket fits in u8"),
+            values: (handle.next()..target).map(|_| rng.below(1_000)).collect(),
+        };
+        match driven(world, "a send", handle.send(command)) {
+            Some(Ok(_)) => stats.committed += 1,
+            Some(Err(_)) | None => stats.refused += 1,
+        }
+    }
+    let target = world.witness.latest_seq(&race.scope) + race.point.uncheckpointed(&world.policy);
+    race.old = old;
+    race.new = new;
+    handle.next() >= target
+}
+
+fn forward(
+    rng: &mut Rng,
+    world: &World,
+    nodes: &mut [Node],
+    race: &Race,
+    stats: &mut ScopeStats,
+) -> bool {
+    let old = nodes[race.old].name.clone();
+    let node = &mut nodes[race.new];
+    let _ = driven(world, "a renewal", node.scopes.renew());
+    let Some(Ok(Reached::Routed(routed))) = driven(world, "a get", node.scopes.get(&race.scope))
+    else {
+        return false;
+    };
+    if routed.holder() != old {
+        return false;
+    }
+    stats.sends += 1;
+    stats.routed += 1;
+    let command = Add {
+        bucket: 0,
+        values: vec![rng.below(1_000)],
+    };
+    match forwarded(world, &race.scope, &routed, command) {
+        Ok(_) => stats.committed += 1,
+        Err(_) => stats.refused += 1,
+    }
+    true
+}
+
+fn lapse(world: &World, nodes: &mut [Node]) {
+    let now = world.db.fetch_add(LAPSE_MS, Ordering::Relaxed) + LAPSE_MS;
+    for node in nodes.iter_mut().filter(|node| !node.paused) {
+        node.clock.store(now, Ordering::Relaxed);
+        let _ = driven(world, "a renewal", node.scopes.renew());
+    }
+}
+
+fn claim(world: &World, node: &mut Node, scope: &str) -> bool {
+    let _ = driven(world, "a renewal", node.scopes.renew());
+    let Some(Ok(Reached::Local(handle))) = driven(world, "a get", node.scopes.get(scope)) else {
+        return false;
+    };
+    node.handles.insert(scope.to_owned(), handle);
+    true
+}
+
+fn stale_race(
+    rng: &mut Rng,
+    world: &World,
+    node: &mut Node,
+    race: &Race,
+    stats: &mut ScopeStats,
+) -> bool {
+    stats.stale_plays += 1;
+    let refused = world.witness.stale.load(Ordering::Relaxed);
+    match race.point {
+        Point::Release => {
+            let part = node.log.partition(&race.scope);
+            let _ = driven(world, "a stale release", node.scopes.release(part));
+        }
+        Point::NextAppend => {
+            let Some(handle) = node.handles.get(&race.scope).cloned() else {
+                return false;
+            };
+            let command = Add {
+                bucket: 0,
+                values: vec![rng.below(1_000)],
+            };
+            let _ = driven(world, "a stale send", handle.send(command));
+        }
+        Point::BeforeCheckpoint | Point::AfterCheckpoint | Point::CrashLapse => {
+            let _ = driven(world, "a stale drain", node.scopes.drain(&race.scope));
+        }
+    }
+    let refused = world.witness.stale.load(Ordering::Relaxed) > refused;
+    stats.races_refused += u64::from(refused);
+    refused || world.wrong.read(Option::is_some)
 }
 
 struct Outcome {
@@ -980,10 +1277,33 @@ fn seeded(seed: u64, mutation: ScopeMutation, time: &Arc<Clock>) -> Outcome {
         policy.checkpoint_rows,
         policy.resident_bytes_max
     );
+    let first = rng.pick(Point::ALL.len());
+    let races = Point::ALL.len() as u64;
+    let mut planned = (0..races).map(|at| {
+        let point = Point::ALL[(first + at as usize) % Point::ALL.len()];
+        (steps * (at + 1) / (races + 1), point)
+    });
+    let mut next = planned.next();
+    let mut race = None;
     scope_sim::mutate(mutation.0);
     let mut generation = 0;
-    for _ in 0..steps {
-        step(&mut rng, &world, &mut nodes, &mut generation, &mut stats);
+    for at in 0..steps {
+        if race.is_none()
+            && let Some((start, point)) = next
+            && at >= start
+        {
+            let scope = world.scopes[rng.pick(world.scopes.len())].clone();
+            race = Some(Race::new(point, scope));
+            next = planned.next();
+        }
+        step(
+            &mut rng,
+            &world,
+            &mut nodes,
+            &mut generation,
+            &mut race,
+            &mut stats,
+        );
         if world.wrong.read(Option::is_some) {
             break;
         }

@@ -71,14 +71,14 @@ trait Resident           the app's fold: State, Command, Reply, empty, decide(&S
 
 ### Invariants
 
-`nanocode-sim --scenario scope` runs two or three nodes over one model store with leases on its clock, in virtual time: it crashes and restarts nodes, pauses them until their leases lapse and are claimed, releases partitions, stalls and abandons appends, and forwards to holders that never answer.
+`nanocode-sim --scenario scope` runs two or three nodes over one model store with leases on its clock, in virtual time: it crashes and restarts nodes, pauses them until their leases lapse and are claimed, releases partitions, stalls and abandons appends, and forwards to holders that never answer. Every seed also runs five scripted races: the old owner is paused with rows past its checkpoint, a forward to it goes unanswered, its lease lapses and is claimed, and it then writes a checkpoint at its old epoch before the new owner's first checkpoint, after it, in a release, after the new owner crashes and its lease lapses too, or before its next append.
 
 | Invariant | Check | Mutation |
 |---|---|---|
 | I8 a cold claim reads at most one checkpoint and N tail rows | every scan a claim makes starts at the newest manifest's seq and returns at most `checkpoint_rows` rows | `checkpoint_indexes_only`: the claim ignores the checkpoint and scans history |
 | I9 a read never waits on an append | with an append stalled, `state()` from another thread answers within 1 s | `read_through_writer`: reads queue behind the writer |
 | I10 the state a reader sees is a committed fold | during the stall, and for every handle after every step, `state()` equals a refold of the committed rows below its seq | `publish_before_commit` |
-| I11 a stale owner's checkpoint never lands | after a lapsed lease is claimed, the old owner ticks and drains at its old epoch; a landed manifest matches the lease row's holder and epoch | `checkpoint_skips_epoch`: the store skips the fence |
+| I11 a stale owner's checkpoint never lands | after a lapsed lease is claimed, the old owner ticks, drains, releases and appends at its old epoch; a landed manifest matches the lease row's holder and epoch | `checkpoint_skips_epoch`: the store skips the fence |
 | I12 a resident is dropped only after a final checkpoint at its release cursor | a scope that left a node still holding its lease (an eviction, drain or release) has its newest manifest at the log's head | `evict_without_checkpoint` |
 | A checkpoint writes only the parts that changed | a landed checkpoint sends no part its scope's previous manifest names | `checkpoint_rewrites_unchanged_parts` |
 | A forward has a deadline | a forward to a holder that never answers returns before a 1 s watchdog | `forward_waits_unbounded` |
