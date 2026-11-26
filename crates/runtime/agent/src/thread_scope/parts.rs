@@ -15,6 +15,8 @@ use crate::durability::StoreError;
 #[derive(Deserialize, Serialize)]
 struct Meta {
     generation: u64,
+    #[serde(default)]
+    row: u64,
 }
 
 fn json(value: &impl Serialize) -> String {
@@ -57,6 +59,7 @@ pub(crate) fn encode(state: &ThreadState, rows: usize) -> Vec<Part> {
         name: "meta".to_owned(),
         body: json(&Meta {
             generation: state.generation,
+            row: state.row,
         }),
     }];
     assert_eq!(
@@ -101,6 +104,8 @@ pub(crate) fn encode(state: &ThreadState, rows: usize) -> Vec<Part> {
         }));
     }
     keyed(&mut parts, "wake", state.wakes.iter());
+    keyed(&mut parts, "intent", state.intents.iter());
+    keyed(&mut parts, "uncached", state.uncached.iter());
     if sim::mutated(Mutation::PartDropped) {
         parts.pop();
     }
@@ -162,6 +167,7 @@ pub(crate) fn decode(parts: Vec<Part>) -> Result<ThreadState, StoreError> {
         return Err(invalid("the checkpoint has no meta part"));
     };
     state.generation = meta.generation;
+    state.row = meta.row;
     for event in ordered("events", pieces.events)? {
         state.events.push_back(Arc::new(event));
     }
@@ -272,6 +278,13 @@ fn keep(
             state
                 .wakes
                 .insert(key, Arc::new(parsed::<ArmedWake>(name, body)?));
+        }
+        "intent" => {
+            let held: Option<String> = parsed(name, body)?;
+            state.intents.insert(key, held.map(Arc::from));
+        }
+        "uncached" => {
+            state.uncached.insert(key, parsed(name, body)?);
         }
         kind => return Err(invalid(format!("part {name} has unknown kind {kind}"))),
     }

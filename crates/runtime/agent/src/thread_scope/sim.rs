@@ -9,15 +9,17 @@ pub enum Mutation {
     AdoptionSkipsBlobs,
     JobForwarded,
     JobRowsDropped,
+    ScopedIntentSkipped,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::PartDropped,
         Self::AdoptionSkipsRetired,
         Self::AdoptionSkipsBlobs,
         Self::JobForwarded,
         Self::JobRowsDropped,
+        Self::ScopedIntentSkipped,
     ];
 
     #[must_use]
@@ -29,6 +31,7 @@ impl Mutation {
             Self::AdoptionSkipsBlobs => "adoption_skips_blobs",
             Self::JobForwarded => "job_forwarded",
             Self::JobRowsDropped => "job_rows_dropped",
+            Self::ScopedIntentSkipped => "scoped_intent_skipped",
         }
     }
 

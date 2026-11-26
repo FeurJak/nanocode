@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use nanocode_sync::{OrdMap, Vector};
 use nanocode_turnlog::{
-    ArmedWake, Checkpoint, EffectClass, Event, Hold, OpenCall, Outcome, Phase, Record, Recovered,
-    Retry, Status, Turn, apply_patch, input_digest, internal_host,
+    ArmedWake, Checkpoint, EffectClass, Event, FOLD_SNAPSHOT_KEY, Hold, OpenCall, Outcome, Phase,
+    Record, Recovered, Retry, SNAPSHOT_RATIO, Status, Turn, apply_patch, cache_key, input_digest,
+    internal_host,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -33,7 +34,10 @@ pub struct ThreadState {
     pub(crate) calls: OrdMap<Arc<str>, Arc<OpenCall>>,
     pub(crate) models: OrdMap<Arc<str>, Vector<Box<RawValue>>>,
     pub(crate) wakes: OrdMap<Arc<str>, Arc<ArmedWake>>,
+    pub(crate) intents: OrdMap<Arc<str>, Option<Arc<str>>>,
+    pub(crate) uncached: OrdMap<Arc<str>, u64>,
     pub(crate) generation: u64,
+    pub(crate) row: u64,
     pub(crate) bytes: usize,
 }
 
@@ -155,6 +159,76 @@ impl ThreadState {
     }
 
     #[must_use]
+    pub const fn row(&self) -> u64 {
+        self.row
+    }
+
+    #[must_use]
+    pub fn unknown(&self) -> Vec<String> {
+        self.calls
+            .iter()
+            .filter(|(_, call)| call.effect.needs_row())
+            .map(|(id, _)| id.as_ref().to_owned())
+            .collect()
+    }
+
+    pub fn intents(&self) -> impl Iterator<Item = (&str, Option<&str>, &OpenCall)> {
+        self.intents.iter().filter_map(|(call_id, state)| {
+            let call = self.calls.get(call_id)?;
+            Some((call_id.as_ref(), state.as_deref(), call.as_ref()))
+        })
+    }
+
+    #[must_use]
+    pub fn intent(&self, call_id: &str) -> Option<&OpenCall> {
+        self.intents
+            .contains_key(call_id)
+            .then(|| self.calls.get(call_id).map(AsRef::as_ref))
+            .flatten()
+    }
+
+    #[must_use]
+    pub fn recovering(&self) -> bool {
+        self.turns.values().any(|turn| {
+            turn.recovered
+                .is_some_and(|recovered| recovered.at == Some(self.row))
+        })
+    }
+
+    #[must_use]
+    pub fn next_attempt(&self, turn: &str) -> u64 {
+        match self.turn(turn).and_then(|turn| turn.recovered) {
+            Some(Recovered {
+                at: Some(at),
+                attempt,
+            }) if self.row <= at => attempt + 1,
+            Some(Recovered { at: None, attempt }) => attempt + 1,
+            _ => 1,
+        }
+    }
+
+    #[must_use]
+    pub fn retired(&self, id: &str) -> Option<&Turn> {
+        self.turn(id)
+            .filter(|turn| turn.digest.starts_with(super::adopt::RETIRED_DIGEST))
+    }
+
+    #[must_use]
+    pub fn cached_state(&self, state: &str) -> Option<&RawValue> {
+        self.host(&cache_key(state))
+    }
+
+    #[must_use]
+    pub fn cache_due(&self, state: &str) -> bool {
+        let cached = self
+            .cached_state(state)
+            .map_or(0, |value| value.get().len() as u64);
+        self.uncached
+            .get(state)
+            .is_some_and(|bytes| *bytes > SNAPSHOT_RATIO as u64 * cached)
+    }
+
+    #[must_use]
     pub fn finished(&self) -> usize {
         self.turns
             .values()
@@ -172,6 +246,7 @@ impl ThreadState {
             text.push('\n');
         };
         put("generation", &self.generation);
+        put("row", &self.row);
         for (id, turn) in self.turns.iter() {
             put("turn", &(id.as_ref(), turn.as_ref()));
         }
@@ -208,6 +283,12 @@ impl ThreadState {
         for (key, wake) in self.wakes.iter() {
             put("wake", &(key.as_ref(), wake.as_ref()));
         }
+        for (call_id, state) in self.intents.iter() {
+            put("intent", &(call_id.as_ref(), state.as_deref()));
+        }
+        for (state, bytes) in self.uncached.iter() {
+            put("uncached", &(state.as_ref(), bytes));
+        }
         nanocode_digest::blake3(text.as_bytes())
             .to_hex()
             .as_str()
@@ -218,6 +299,7 @@ impl ThreadState {
         for record in nanocode_turnlog::decode(body)? {
             self.take(&record, Some(seq))?;
         }
+        self.row = seq;
         self.bytes += body.len();
         Ok(())
     }
@@ -332,9 +414,9 @@ impl ThreadState {
             Record::Intended {
                 call_id,
                 input,
+                state,
                 tool,
                 turn,
-                ..
             } => {
                 self.open(
                     call_id,
@@ -343,6 +425,8 @@ impl ThreadState {
                     tool,
                     turn.clone(),
                 );
+                self.intents
+                    .insert(Arc::from(call_id.as_str()), state.as_deref().map(Arc::from));
                 Ok(())
             }
             Record::Result { call_id, .. } => {
@@ -419,8 +503,11 @@ impl ThreadState {
                 next - 1
             )));
         }
-        if state.is_none() {
-            self.lower(seq, fact)?;
+        self.lower(seq, fact, state)?;
+        if let Some(state) = state {
+            let bytes = serde_json::to_string(fact).map_err(invalid)?.len() as u64;
+            let held = self.uncached.get(state).copied().unwrap_or_default();
+            self.uncached.insert(Arc::from(state), held + bytes);
         }
         self.facts.push_back(Arc::new(KeptFact {
             fact: fact.clone(),
@@ -429,8 +516,22 @@ impl ThreadState {
         Ok(())
     }
 
-    fn lower(&mut self, seq: u64, fact: &StoredFact) -> Result<(), StoreError> {
+    fn lower(
+        &mut self,
+        seq: u64,
+        fact: &StoredFact,
+        state: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let runtime = state.is_none();
+        if !runtime && super::sim::mutated(super::sim::Mutation::ScopedIntentSkipped) {
+            return Ok(());
+        }
         match fact {
+            Fact::Input(_) | Fact::Marker(Marker::Status { .. } | Marker::Recovery { .. })
+                if !runtime =>
+            {
+                Ok(())
+            }
             Fact::Input(input) => self.lower_input(seq, input),
             Fact::Marker(Marker::Status { turn, status }) => self.status(turn, &lowered(status)),
             Fact::Marker(Marker::Recovery { turn, attempt, at }) => {
@@ -445,10 +546,13 @@ impl ThreadState {
                     &intent.tool,
                     intent.turn.clone(),
                 );
+                self.intents
+                    .insert(Arc::from(intent.call_id.as_str()), state.map(Arc::from));
                 Ok(())
             }
             Fact::EffectResult(result) => {
                 self.calls.remove(result.call_id.as_str());
+                self.intents.remove(result.call_id.as_str());
                 Ok(())
             }
             Fact::Decision(Decision::Host { key, value }) => {
@@ -589,6 +693,12 @@ impl ThreadState {
             return Err(invalid(
                 "the row retires turns into older rows; a resident thread keeps its turns",
             ));
+        }
+        if let Some(state) = key
+            .strip_prefix(FOLD_SNAPSHOT_KEY)
+            .and_then(|rest| rest.strip_prefix('\n'))
+        {
+            self.uncached.remove(state);
         }
         self.hosts.insert(Arc::from(key), value.to_owned());
         Ok(())

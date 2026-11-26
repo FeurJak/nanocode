@@ -13,7 +13,7 @@ use std::{
 
 use nanocode::{
     backend::Prompt,
-    durability::facts::{Decision, Fact},
+    durability::facts::{Decision, EffectResult, Fact, Intent, IntentTarget},
     session_host::{LogEntry, Submission, TurnState},
     turnlog::{
         ThreadCommand, ThreadFold, ThreadLog, ThreadLogs, ThreadPolicy, ThreadReply, ThreadState,
@@ -425,14 +425,69 @@ fn command(rng: &mut Rng, turns: &mut u64, state: Option<&ThreadState>) -> Threa
             Some(state) => wake_command(rng, state),
             None => ThreadCommand::Pending,
         },
-        _ => ThreadCommand::Facts {
-            facts: vec![(
-                Fact::Decision(Decision::Time {
-                    unix_millis: rng.below(1_000_000),
-                }),
-                Some(format!("state{}", rng.below(2))),
-            )],
+        _ => scoped(rng, *turns, state),
+    }
+}
+
+fn scoped(rng: &mut Rng, turns: u64, state: Option<&ThreadState>) -> ThreadCommand {
+    let owner = rng.chance(500_000).then(|| format!("state{}", rng.below(2)));
+    let open = state.and_then(|state| {
+        let intents: Vec<(String, Option<String>)> = state
+            .intents()
+            .map(|(call_id, held, _)| (call_id.to_owned(), held.map(str::to_owned)))
+            .collect();
+        (!intents.is_empty()).then(|| intents[rng.pick(intents.len())].clone())
+    });
+    let fact = match rng.below(4) {
+        0 => Fact::Decision(Decision::Time {
+            unix_millis: rng.below(1_000_000),
+        }),
+        1 => {
+            let id = rng.below(1_000_000);
+            return ThreadCommand::Facts {
+                facts: vec![(
+                    Fact::Intent(Intent {
+                        turn: rng.chance(500_000).then(|| turn_of(rng, turns)),
+                        call_id: format!("i{id}"),
+                        tool: "deploy".to_owned(),
+                        target: IntentTarget::Nested {
+                            parent: format!("p{id}"),
+                            input: raw(&json!({ "intent": id })),
+                        },
+                    }),
+                    owner,
+                )],
+            };
+        }
+        2 => match open {
+            Some((call_id, held)) => {
+                return ThreadCommand::Facts {
+                    facts: vec![(
+                        Fact::EffectResult(EffectResult {
+                            call_id,
+                            output: raw(&json!({ "done": true })),
+                        }),
+                        held,
+                    )],
+                };
+            }
+            None => Fact::Decision(Decision::Time {
+                unix_millis: rng.below(1_000_000),
+            }),
         },
+        _ => {
+            return ThreadCommand::Write {
+                records: vec![Record::Recovery {
+                    at: None,
+                    attempt: 1 + rng.below(3),
+                    turn: turn_of(rng, turns),
+                    unknown: Vec::new(),
+                }],
+            };
+        }
+    };
+    ThreadCommand::Facts {
+        facts: vec![(fact, Some(format!("state{}", rng.below(2))))],
     }
 }
 
@@ -724,7 +779,8 @@ fn legacy(world: &World, stats: &mut ThreadScopeStats) {
                     .collect::<Vec<_>>()
             && fold.holds().count() == ours.holds().count()
             && fold.next_fact() == ours.next_fact()
-            && fold.open_calls().count() == ours.open_calls().count();
+            && fold.open_calls().count() == ours.open_calls().count()
+            && recovered(&fold) == recovered_ours(&ours);
         if !same {
             flag(
                 &world.wrong,
@@ -734,6 +790,39 @@ fn legacy(world: &World, stats: &mut ThreadScopeStats) {
             );
         }
     }
+}
+
+type Recovered = (Vec<String>, Vec<(String, Option<String>)>, Vec<(String, u64)>, bool);
+
+fn recovered(fold: &Fold) -> Recovered {
+    (
+        fold.unknown(),
+        fold.intents()
+            .map(|(call_id, state, _)| (call_id.to_owned(), state.map(str::to_owned)))
+            .collect(),
+        fold.turns()
+            .iter()
+            .map(|turn| (turn.id.clone(), fold.next_attempt(&turn.id)))
+            .collect(),
+        fold.recovering(),
+    )
+}
+
+fn recovered_ours(state: &ThreadState) -> Recovered {
+    let mut turns: Vec<(String, u64)> = state
+        .turns()
+        .map(|turn| (turn.id.clone(), state.next_attempt(&turn.id)))
+        .collect();
+    turns.sort_by_key(|(id, _)| state.turn(id).map_or(0, |turn| turn.first));
+    (
+        state.unknown(),
+        state
+            .intents()
+            .map(|(call_id, held, _)| (call_id.to_owned(), held.map(str::to_owned)))
+            .collect(),
+        turns,
+        state.recovering(),
+    )
 }
 
 fn step(
