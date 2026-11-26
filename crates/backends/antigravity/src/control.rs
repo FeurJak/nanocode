@@ -113,10 +113,23 @@ impl Inner {
         );
     }
 
-    fn replay(&self, id: &str, output: Value, checkpoint: Option<Value>) -> Result<TurnResult> {
+    async fn replay(
+        &self,
+        owner: &DurableOwner,
+        id: &str,
+        output: Value,
+        checkpoint: Option<Value>,
+    ) -> Result<TurnResult> {
         let output: Output = serde_json::from_value(output).map_err(recovery_error)?;
         let boundary = match checkpoint {
             Some(payload) => {
+                let (payload, _) = crate::pages::hydrate(
+                    nanocode_durability::PayloadReader::from(owner),
+                    payload,
+                    &mut std::collections::HashSet::new(),
+                )
+                .await
+                .map_err(recovery_error)?;
                 let mut state = State::restored(&payload).map_err(recovery_error)?;
                 state.settle();
                 nanocode_agent_core::backend::TurnBoundary::portable(self.checkpoint_of(&state))
@@ -141,13 +154,15 @@ impl Inner {
     async fn cancel_unstarted(&self, owner: &DurableOwner, id: &str) -> bool {
         match owner.cancel(id.to_owned(), None).await {
             Ok(()) => true,
-            Err(DurableError::CancellationCheckpointRequired { .. }) => owner
-                .cancel(
-                    id.to_owned(),
-                    Some(self.encode(&self.settled.get()).ok()).flatten(),
+            Err(DurableError::CancellationCheckpointRequired { .. }) => {
+                let settled = self.settled.get();
+                matches!(
+                    self.write(&settled, |payload| owner
+                        .cancel(id.to_owned(), Some(payload)))
+                        .await,
+                    Ok(Ok(()))
                 )
-                .await
-                .is_ok(),
+            }
             Err(_) => false,
         }
     }
@@ -195,7 +210,7 @@ impl Inner {
                         return self.enqueue(request, id, true, automatic, events).await;
                     }
                     Admission::Completed { output, checkpoint } => {
-                        Some(self.replay(&id, output, checkpoint))
+                        Some(self.replay(owner, &id, output, checkpoint).await)
                     }
                     Admission::Failed { error, .. } => {
                         Some(Err(NanocodeError::ReplayedExecutionFailed(error)))
@@ -377,7 +392,16 @@ impl Inner {
                     .map_err(agent_error)?
                     .decode::<Value>()
                     .map_err(agent_error)?;
-                State::restored(&payload)
+                let (payload, pages) = crate::pages::hydrate(
+                    nanocode_durability::PayloadReader::from(owner),
+                    payload,
+                    &mut std::collections::HashSet::new(),
+                )
+                .await
+                .map_err(agent_error)?;
+                let state = State::restored(&payload)?;
+                self.keep_pages(pages);
+                Ok(state)
             }
             None => Ok(self.settled_state()),
         }
@@ -473,9 +497,11 @@ impl Inner {
             Ended::Finished(Ok(done)) => {
                 state.settle();
                 let output = json!({"final_message": done.final_message, "usage": done.usage});
-                let written = owner
-                    .complete(id.clone(), self.encode(&state)?, &output)
-                    .await;
+                let written = self
+                    .write(&state, |payload| {
+                        owner.complete(id.clone(), payload, &output)
+                    })
+                    .await?;
                 (written.map(|()| Ok(done)), true)
             }
             Ended::Cancelled => {
@@ -485,7 +511,9 @@ impl Inner {
                 }
                 state.close_calls(INTERRUPTED);
                 state.settle();
-                let written = owner.cancel(id.clone(), Some(self.encode(&state)?)).await;
+                let written = self
+                    .write(&state, |payload| owner.cancel(id.clone(), Some(payload)))
+                    .await?;
                 (written.map(|()| Err(NanocodeError::TurnCancelled)), true)
             }
             Ended::Finished(Err(error)) => {
@@ -496,9 +524,10 @@ impl Inner {
                 }
                 state.close_calls(INTERRUPTED);
                 state.settle();
-                let written = owner
-                    .fail(id.clone(), self.encode(&state)?, error.to_string())
-                    .await;
+                let message = error.to_string();
+                let written = self
+                    .write(&state, |payload| owner.fail(id.clone(), payload, message))
+                    .await?;
                 (written.map(|()| Err(error)), true)
             }
         };
@@ -851,9 +880,9 @@ impl Inner {
         if self.config.committed || self.initialized.load(Ordering::SeqCst) {
             return Ok(());
         }
-        owner
-            .commit_checkpoint(self.encode(&self.settled.get())?)
-            .await
+        let settled = self.settled.get();
+        self.write(&settled, |payload| owner.commit_checkpoint(payload))
+            .await?
             .map_err(agent_error)?;
         self.initialized.store(true, Ordering::SeqCst);
         Ok(())
@@ -922,18 +951,16 @@ impl Inner {
                 return result.map_err(reopen);
             }
             Ok(()) => {
-                owner
-                    .complete(id.clone(), self.encode(&state)?, &Value::Null)
-                    .await
+                self.write(&state, |payload| {
+                    owner.complete(id.clone(), payload, &Value::Null)
+                })
+                .await?
             }
             Err(error) => {
-                owner
-                    .fail(
-                        id.clone(),
-                        self.encode(&self.settled_state())?,
-                        error.to_string(),
-                    )
-                    .await
+                let message = error.to_string();
+                let settled = self.settled_state();
+                self.write(&settled, |payload| owner.fail(id.clone(), payload, message))
+                    .await?
             }
         };
         if let Err(error) = written {
@@ -988,9 +1015,8 @@ impl Inner {
         state.step += 1;
         state.push(Content::user(vec![Part::text(notice)]));
         if let Some(owner) = &self.config.durable {
-            owner
-                .commit_checkpoint(self.encode(&state)?)
-                .await
+            self.write(&state, |payload| owner.commit_checkpoint(payload))
+                .await?
                 .map_err(agent_error)?;
         }
         self.save(&state);

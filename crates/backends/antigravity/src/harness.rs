@@ -243,11 +243,12 @@ impl AntigravityHarness {
             client = client.with_retry(retry);
         }
         let initial_notice = self.initial_notice(&spec, &settings, services.as_ref());
-        let durable = match spec.durable_state.take() {
+        let mut durable = match spec.durable_state.take() {
             Some(state) => Some(acquire(state, spec.thinking).await?),
             None => None,
         };
         let stored = durable.as_ref().and_then(|durable| durable.stored.clone());
+        let pages = durable.as_mut().and_then(|durable| durable.pages.take());
         let imported = match (&stored, &spec.checkpoint) {
             (None, Some(checkpoint)) => Some(
                 checkpoint
@@ -446,7 +447,11 @@ impl AntigravityHarness {
         });
         factory.bind(&driver.inner);
         let driver = match (stored, imported) {
-            (Some(stored), _) => driver.restore_payload(&stored)?,
+            (Some(stored), _) => {
+                let driver = driver.restore_payload(&stored)?;
+                driver.inner.keep_pages(pages);
+                driver
+            }
             (None, Some(imported)) => {
                 let driver = driver.restore_payload(&imported)?;
                 driver.import().await?;
@@ -499,6 +504,7 @@ struct Acquired {
     journal: nanocode_agent_core::backend::ChildJournal,
     store: nanocode_durability::SharedStore,
     stored: Option<serde_json::Value>,
+    pages: Option<crate::pages::Pages>,
     initial: Option<Thinking>,
     record: Option<nanocode_durability::SessionRecord>,
 }
@@ -522,16 +528,24 @@ async fn acquire(
         .await
         .map_err(agent_error)?;
     let record = state.record().await.map_err(agent_error)?;
-    let stored = match stored {
-        Some(payload) => Some(
-            owner
+    let (stored, pages) = match stored {
+        Some(payload) => {
+            let stored = owner
                 .load_payload(payload)
                 .await
                 .map_err(agent_error)?
                 .decode::<serde_json::Value>()
-                .map_err(agent_error)?,
-        ),
-        None => None,
+                .map_err(agent_error)?;
+            let (stored, pages) = crate::pages::hydrate(
+                nanocode_durability::PayloadReader::from(&owner),
+                stored,
+                &mut std::collections::HashSet::new(),
+            )
+            .await
+            .map_err(agent_error)?;
+            (Some(stored), pages)
+        }
+        None => (None, None),
     };
     let initial = match &stored {
         Some(_) => None,
@@ -546,6 +560,7 @@ async fn acquire(
         journal,
         store,
         stored,
+        pages,
         initial,
         record,
     })

@@ -128,6 +128,7 @@ pub(crate) struct Inner {
     pub(crate) noticed: AtomicBool,
     pub(crate) notices: Atom<Vec<String>>,
     pub(crate) initialized: AtomicBool,
+    pub(crate) pages: nanocode_sync::Slot<crate::pages::Pages>,
 }
 
 pub struct Driver {
@@ -184,6 +185,11 @@ impl State {
     pub(crate) fn restored(payload: &Value) -> Result<Self> {
         let invalid =
             |error: serde_json::Error| NanocodeError::InvalidCheckpoint(error.to_string());
+        if crate::pages::paged(payload) {
+            return Err(NanocodeError::InvalidCheckpoint(
+                "an antigravity checkpoint was restored before its pages were loaded".into(),
+            ));
+        }
         let contents: Vec<Content> = payload
             .get("contents")
             .cloned()
@@ -279,13 +285,21 @@ impl Inner {
     }
 
     pub(crate) fn payload(&self, state: &State) -> Value {
-        json!({
+        let mut payload = self.head(state);
+        payload.insert(
+            "contents".to_owned(),
+            serde_json::to_value(&state.contents).expect("antigravity contents encode as JSON"),
+        );
+        Value::Object(payload)
+    }
+
+    pub(crate) fn head(&self, state: &State) -> serde_json::Map<String, Value> {
+        let Value::Object(head) = json!({
             "format": crate::durability::FORMAT,
             "provider": crate::harness::FAMILY,
             "model": self.config.model,
             "thinking": self.thinking(),
             "workspace": self.config.workspace,
-            "contents": state.contents.iter().map(|content| serde_json::to_value(content).unwrap_or(Value::Null)).collect::<Vec<_>>(),
             "step": state.step,
             "settings_sent": state.settings_sent,
             "calls": state.calls,
@@ -296,11 +310,48 @@ impl Inner {
             "last_execution": state.last_execution,
             "operation": state.operation,
             "progress": state.operation.as_ref().map(|_| &state.progress),
-        })
+        }) else {
+            unreachable!("a JSON object literal is an object");
+        };
+        head
     }
 
-    pub(crate) fn encode(&self, state: &State) -> Result<EncodedPayload> {
-        EncodedPayload::encode(&self.payload(state)).map_err(agent_error)
+    pub(crate) fn keep_pages(&self, pages: Option<crate::pages::Pages>) {
+        if let Some(pages) = pages {
+            drop(self.pages.put(pages));
+        }
+    }
+
+    pub(crate) async fn write<T, F, Fut>(
+        &self,
+        state: &State,
+        write: F,
+    ) -> Result<nanocode_durability::Result<T>>
+    where
+        F: FnOnce(EncodedPayload) -> Fut,
+        Fut: std::future::Future<Output = nanocode_durability::Result<T>>,
+    {
+        let (mut pages, held) = match self.pages.take() {
+            Some(pages) => (pages, true),
+            None => (crate::pages::Pages::default(), false),
+        };
+        let payload = match pages.encode(self.head(state), &state.contents) {
+            Ok(payload) => payload,
+            Err(error) => {
+                if held {
+                    drop(self.pages.put(crate::pages::Pages::default()));
+                }
+                return Err(agent_error(error));
+            }
+        };
+        let written = write(payload).await;
+        if held {
+            if written.is_ok() {
+                pages.committed();
+            }
+            drop(self.pages.put(pages));
+        }
+        Ok(written)
     }
 
     pub(crate) async fn persist(&self, state: &State) -> Result<()> {
@@ -308,9 +359,8 @@ impl Inner {
         let (Some(durable), Some(operation)) = (&self.config.durable, &state.operation) else {
             return Ok(());
         };
-        durable
-            .advance(operation.clone(), self.encode(state)?)
-            .await
+        self.write(state, |payload| durable.advance(operation.clone(), payload))
+            .await?
             .map_err(agent_error)
     }
 
@@ -359,6 +409,7 @@ impl Driver {
                 noticed: AtomicBool::new(false),
                 notices: Atom::default(),
                 initialized: AtomicBool::new(false),
+                pages: nanocode_sync::Slot::new(Some(crate::pages::Pages::default())),
             }),
         }
     }
@@ -405,9 +456,10 @@ impl Driver {
         {
             return Ok(());
         }
-        owner
-            .commit_checkpoint(self.inner.encode(&self.inner.settled.get())?)
-            .await
+        let settled = self.inner.settled.get();
+        self.inner
+            .write(&settled, |payload| owner.commit_checkpoint(payload))
+            .await?
             .map_err(agent_error)
     }
 }

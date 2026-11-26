@@ -8,9 +8,11 @@ use nanocode_agent_core::{
 };
 use nanocode_backend_antigravity_client::Content;
 use nanocode_durability::{
-    AdmittedTurn, CheckpointFormat, Error, FormatFuture, PayloadReader, Result, SessionRecord,
+    AdmittedTurn, CheckpointFormat, EncodedPayload, Error, FormatFuture, PayloadReader, Result,
+    SessionRecord,
 };
 use serde_json::Value;
+use std::collections::HashSet;
 
 pub const FORMAT: &str = "antigravity.v1";
 
@@ -147,24 +149,54 @@ impl CheckpointFormat for AntigravityCheckpointFormat {
 
     fn owns(&self, checkpoint: &Value) -> bool {
         checkpoint.get("format").and_then(Value::as_str) == Some(FORMAT)
+            || crate::pages::paged(checkpoint)
+    }
+
+    fn hydrate<'a>(
+        &'a self,
+        reader: PayloadReader<'a>,
+        stored: Value,
+    ) -> FormatFuture<'a, Result<Value>> {
+        Box::pin(async move {
+            let mut read = HashSet::new();
+            Ok(crate::pages::hydrate(reader, stored, &mut read).await?.0)
+        })
+    }
+
+    fn hydrate_noting<'a>(
+        &'a self,
+        reader: PayloadReader<'a>,
+        stored: Value,
+        read: &'a mut HashSet<String>,
+    ) -> FormatFuture<'a, Result<Value>> {
+        Box::pin(async move { Ok(crate::pages::hydrate(reader, stored, read).await?.0) })
     }
 
     fn hydrate_continuation<'a>(
         &'a self,
-        _reader: PayloadReader<'a>,
+        reader: PayloadReader<'a>,
         continuation: Value,
     ) -> FormatFuture<'a, Result<Option<Value>>> {
-        let owned = self.owns(&continuation);
-        Box::pin(async move { Ok(owned.then_some(continuation)) })
+        self.hydrate_owned(reader, continuation)
     }
 
     fn hydrate_cursor<'a>(
         &'a self,
-        _reader: PayloadReader<'a>,
+        reader: PayloadReader<'a>,
         continuation: Value,
     ) -> FormatFuture<'a, Result<Option<Value>>> {
-        let owned = self.owns(&continuation);
-        Box::pin(async move { Ok(owned.then_some(continuation)) })
+        self.hydrate_owned(reader, continuation)
+    }
+
+    fn encode(&self, checkpoint: Value) -> Result<EncodedPayload> {
+        match checkpoint {
+            Value::Object(object)
+                if object.get("format").and_then(Value::as_str) == Some(FORMAT) =>
+            {
+                crate::pages::encode_whole(object)
+            }
+            checkpoint => EncodedPayload::encode(&checkpoint),
+        }
     }
 
     fn session_checkpoint(
@@ -196,6 +228,27 @@ impl CheckpointFormat for AntigravityCheckpointFormat {
 
     fn transcript(&self, checkpoint: &Value, _turns: &[AdmittedTurn<'_>]) -> Vec<TranscriptItem> {
         transcript_items(&contents(checkpoint))
+    }
+}
+
+impl AntigravityCheckpointFormat {
+    fn hydrate_owned<'a>(
+        &'a self,
+        reader: PayloadReader<'a>,
+        continuation: Value,
+    ) -> FormatFuture<'a, Result<Option<Value>>> {
+        let owned = self.owns(&continuation);
+        Box::pin(async move {
+            if !owned {
+                return Ok(None);
+            }
+            let mut read = HashSet::new();
+            Ok(Some(
+                crate::pages::hydrate(reader, continuation, &mut read)
+                    .await?
+                    .0,
+            ))
+        })
     }
 }
 

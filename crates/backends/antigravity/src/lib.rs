@@ -6,6 +6,7 @@ mod facts;
 mod fold;
 mod harness;
 mod nanotools;
+mod pages;
 mod profile;
 mod prompts;
 mod record;

@@ -651,23 +651,27 @@ impl Inner {
         let (Some(owner), Some(operation)) = (&self.config.durable, &state.operation) else {
             return Ok(None);
         };
-        let writes = match advance {
-            true => vec![OwnerWrite::Advance {
-                continuation: self.encode(state)?,
-            }],
-            false => Vec::new(),
-        };
-        let begun = owner
-            .admit_step(
+        let input = EncodedPayload::encode(&json!({"call": index})).map_err(agent_error)?;
+        let admit = |writes| {
+            owner.admit_step(
                 operation.clone(),
                 writes,
                 step.to_owned(),
                 MODEL_STEP.to_owned(),
-                EncodedPayload::encode(&json!({"call": index})).map_err(agent_error)?,
+                input,
                 StepRecovery::Rerun,
             )
-            .await
-            .map_err(agent_error)?;
+        };
+        let begun = match advance {
+            true => {
+                self.write(state, |continuation| {
+                    admit(vec![OwnerWrite::Advance { continuation }])
+                })
+                .await?
+            }
+            false => admit(Vec::new()).await,
+        }
+        .map_err(agent_error)?;
         let BeginStep::Replay(output) = begun else {
             return Ok(None);
         };
@@ -693,22 +697,22 @@ impl Inner {
         let (Some(owner), Some(operation)) = (&self.config.durable, &state.operation) else {
             return Ok(());
         };
-        owner
-            .commit_writes(
+        let output = EncodedPayload::encode(output).map_err(agent_error)?;
+        self.write(state, |continuation| {
+            owner.commit_writes(
                 operation.clone(),
                 vec![
                     OwnerWrite::CompleteStep {
                         step_id: step.to_owned(),
-                        output: EncodedPayload::encode(output).map_err(agent_error)?,
+                        output,
                     },
-                    OwnerWrite::Advance {
-                        continuation: self.encode(state)?,
-                    },
+                    OwnerWrite::Advance { continuation },
                 ],
             )
-            .await
-            .map(drop)
-            .map_err(agent_error)
+        })
+        .await?
+        .map(drop)
+        .map_err(agent_error)
     }
 
     async fn reply(
