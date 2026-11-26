@@ -36,6 +36,11 @@ async fn serve(mut owner: Owner, mut jobs: mpsc::UnboundedReceiver<Job>) {
     while let Some(job) = jobs.recv().await {
         job(&mut owner).await;
     }
+    if let Some(folded) = owner.folded.take()
+        && let Ok(snapshot) = folded.snapshot()
+    {
+        owner.log.remember(snapshot);
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]

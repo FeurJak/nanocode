@@ -62,10 +62,11 @@ pub enum OneLogFactsMutation {
     IntentOptional,
     AbandonUnsettled,
     CacheInline,
+    RememberedSkipsTail,
 }
 
 impl OneLogFactsMutation {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::None,
         Self::FoldReadsUnlogged,
         Self::CommitBuffered,
@@ -82,6 +83,7 @@ impl OneLogFactsMutation {
         Self::IntentOptional,
         Self::AbandonUnsettled,
         Self::CacheInline,
+        Self::RememberedSkipsTail,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -108,6 +110,7 @@ impl OneLogFactsMutation {
             Self::IntentOptional => "intent_optional",
             Self::AbandonUnsettled => "abandon_unsettled",
             Self::CacheInline => "cache_inline",
+            Self::RememberedSkipsTail => "remembered_skips_tail",
         }
     }
 
@@ -132,6 +135,7 @@ impl OneLogFactsMutation {
             Self::CancelLeavesIntent => facts_sim::Mutation::CancelLeavesIntent,
             Self::IntentOptional => facts_sim::Mutation::IntentOptional,
             Self::AbandonUnsettled => facts_sim::Mutation::AbandonUnsettled,
+            Self::RememberedSkipsTail => facts_sim::Mutation::RememberedSkipsTail,
             Self::None
             | Self::FoldReadsUnlogged
             | Self::CacheNeverDue
@@ -148,6 +152,7 @@ pub struct OneLogFactsStats {
     pub blobs: u64,
     pub restarts: u64,
     pub refolds: u64,
+    pub remembered: u64,
     pub swaps: u64,
     pub unknown: u64,
     pub gated: u64,
@@ -170,6 +175,7 @@ impl OneLogFactsStats {
         self.blobs += other.blobs;
         self.restarts += other.restarts;
         self.refolds += other.refolds;
+        self.remembered += other.remembered;
         self.swaps += other.swaps;
         self.unknown += other.unknown;
         self.gated += other.gated;
@@ -541,6 +547,18 @@ impl World {
         let log = Arc::clone(self.log.as_ref().expect("the facts log is open"));
         if block_on(log.read(|fold| fold.logs_facts(SCOPE))) {
             self.check_cached()?;
+        }
+        let remembering = self.stats.refolds % 3 == 0;
+        for held in [self.live.as_ref(), self.stale.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter(|_| remembering)
+        {
+            let snapshot = held
+                .snapshot()
+                .map_err(|error| format!("snapshot a fold to remember: {error}"))?;
+            self.facts().remember(snapshot);
+            self.stats.remembered += 1;
         }
         let folded = block_on(fold_facts::<Ledger>(self.facts()))
             .map_err(|error| format!("refold the log: {error}"))?;

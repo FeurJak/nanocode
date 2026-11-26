@@ -101,6 +101,7 @@ pub struct OneLog {
     owed: Atom<bool>,
     owners: Atom<nanocode_sync::Map<String, OwnerToken>>,
     recovering: Atom<BTreeSet<String>>,
+    remembered: Atom<BTreeMap<(String, bool), Arc<crate::durability::facts::Snapshot>>>,
     resolved: Atom<BTreeSet<String>>,
     restarts: u64,
     this: Weak<Self>,
@@ -533,6 +534,7 @@ impl OneLog {
             owed: Atom::new(false),
             owners: Atom::default(),
             recovering: Atom::new(recovering),
+            remembered: Atom::default(),
             resolved: Atom::default(),
             restarts: policy.restarts,
             retired_max: policy.retired_max,
@@ -627,6 +629,16 @@ impl OneLog {
 
     pub async fn reclaim(&self) -> Result<(), StoreError> {
         self.log.reclaim().await
+    }
+
+    #[must_use]
+    pub fn remembered_bytes(&self) -> usize {
+        self.remembered.read(|remembered| {
+            remembered
+                .values()
+                .map(|snapshot| snapshot.state.get().len())
+                .sum()
+        })
     }
 
     pub async fn read<R>(&self, read: impl FnOnce(&Fold) -> R + Send + 'static) -> R

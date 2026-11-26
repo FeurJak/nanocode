@@ -31,6 +31,8 @@ pub trait FactLog: Send + Sync {
     }
 
     fn append(&self, after: u64, write: Append) -> StoreFuture<'_, Result<u64, StoreError>>;
+
+    fn remember(&self, _snapshot: Snapshot) {}
 }
 
 struct Forward<'a>(&'a mut dyn FactSink);

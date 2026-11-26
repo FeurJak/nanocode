@@ -394,6 +394,7 @@ default_table='
 1 canary_one_log_facts_scope_leaks canary:8 --scenario one_log_facts --mutation scope_leaks
 1 canary_one_log_facts_admission_copied canary:8 --scenario one_log_facts --mutation admission_copied
 1 canary_one_log_facts_cache_gap canary:8 --scenario one_log_facts --mutation cache_gap
+1 canary_one_log_facts_remembered_skips_tail canary:8 --scenario one_log_facts --mutation remembered_skips_tail
 1 canary_one_log_facts_cache_never_due canary:8 --scenario one_log_facts --mutation cache_never_due
 1 canary_one_log_facts_host_copied canary:8 --scenario one_log_facts --mutation host_copied
 1 canary_one_log_facts_cancel_leaves_intent canary:8 --scenario one_log_facts --mutation cancel_leaves_intent

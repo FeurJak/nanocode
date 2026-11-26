@@ -31,10 +31,11 @@ pub mod sim {
         CancelLeavesIntent,
         IntentOptional,
         AbandonUnsettled,
+        RememberedSkipsTail,
     }
 
     impl Mutation {
-        pub const ALL: [Self; 11] = [
+        pub const ALL: [Self; 12] = [
             Self::CommitBuffered,
             Self::UnseenSkipped,
             Self::IntentReplayed,
@@ -46,6 +47,7 @@ pub mod sim {
             Self::CancelLeavesIntent,
             Self::IntentOptional,
             Self::AbandonUnsettled,
+            Self::RememberedSkipsTail,
         ];
 
         #[must_use]
@@ -63,6 +65,7 @@ pub mod sim {
                 Self::CancelLeavesIntent => "cancel_leaves_intent",
                 Self::IntentOptional => "intent_optional",
                 Self::AbandonUnsettled => "abandon_unsettled",
+                Self::RememberedSkipsTail => "remembered_skips_tail",
             }
         }
 
@@ -195,12 +198,48 @@ impl OneLog {
         family: &str,
         format: u32,
     ) -> Result<Replay, StoreError> {
+        let key = (scope.state.clone(), scope.turns);
+        let remembered = self
+            .remembered
+            .read(|remembered| remembered.get(&key).cloned())
+            .filter(|snapshot| snapshot.family == family && snapshot.format == format);
+        if let Some(remembered) = remembered {
+            nanocode_trace::event!(target: "nc_metrics", nanocode_trace::Level::INFO, {
+                monotonic_counter.nc.facts.replays_remembered = 1_u64
+            });
+            if sim::mutated(sim::Mutation::RememberedSkipsTail) {
+                return Ok(Replay {
+                    snapshot: Some(Snapshot::clone(&remembered)),
+                    facts: Vec::new(),
+                    blobs: std::collections::BTreeMap::new(),
+                });
+            }
+            return self
+                .replayed_after(scope, Some(Snapshot::clone(&remembered)))
+                .await;
+        }
+        nanocode_trace::event!(target: "nc_metrics", nanocode_trace::Level::INFO, {
+            monotonic_counter.nc.facts.replays_cached = 1_u64
+        });
         let cached = self
             .log
             .cached_state(&scope.state)
             .await?
             .filter(|snapshot| snapshot.family == family && snapshot.format == format);
         self.replayed_after(scope, cached).await
+    }
+
+    fn remember(&self, scope: &Scope, snapshot: Snapshot) {
+        let key = (scope.state.clone(), scope.turns);
+        let snapshot = Arc::new(snapshot);
+        self.remembered.update(|remembered| {
+            if remembered
+                .get(&key)
+                .is_none_or(|held| held.seq < snapshot.seq)
+            {
+                remembered.insert(key.clone(), Arc::clone(&snapshot));
+            }
+        });
     }
 
     async fn replayed_after(
@@ -292,6 +331,10 @@ impl FactLog for Scoped {
 
     fn append<'a>(&'a self, after: u64, write: Append) -> StoreFuture<'a, Result<u64, StoreError>> {
         Box::pin(self.log.appended(&self.scope, after, write))
+    }
+
+    fn remember(&self, snapshot: Snapshot) {
+        self.log.remember(&self.scope, snapshot);
     }
 }
 
