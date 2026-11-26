@@ -1,0 +1,709 @@
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+
+use nanocode_durability_core::{StoreError, StoreFuture};
+use nanocode_partitions::{Partition, Row};
+use nanocode_sync::{Atom, OrdMap, Slot, Vector, oneshot, watch};
+use nanocode_turnlog::{LogHost, SCAN_END};
+
+use crate::{
+    Committed, Part, Policy, Resident, ScopeError,
+    checkpoint::{Checkpoints, Manifest, digest},
+    lease::Leases,
+    owner::{Ask, Checkpointed, Core, Life, Owner, Turn, Why},
+    route::Route,
+    sim::{self, Mutation},
+};
+
+pub type ClaimHook =
+    Arc<dyn Fn(Arc<str>) -> StoreFuture<'static, Result<(), StoreError>> + Send + Sync>;
+pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub residents: u64,
+    pub resident_bytes: u64,
+    pub loads: u64,
+    pub load_rows: u64,
+    pub load_rows_max: u64,
+    pub load_parts: u64,
+    pub commits: u64,
+    pub rows: u64,
+    pub checkpoints: u64,
+    pub checkpoint_parts: u64,
+    pub checkpoint_parts_kept: u64,
+    pub checkpoint_part_bytes: u64,
+    pub checkpoint_failures: u64,
+    pub evictions: u64,
+    pub over_budget: u64,
+    pub releases: u64,
+    pub lost: u64,
+    pub forwards: u64,
+    pub forward_ms_total: u64,
+    pub forward_ms_max: u64,
+    pub forwards_busy: u64,
+    pub forwards_unreachable: u64,
+}
+
+pub struct Wiring<F: Resident> {
+    pub fold: Arc<F>,
+    pub log: Arc<dyn LogHost>,
+    pub leases: Arc<dyn Leases>,
+    pub checkpoints: Arc<dyn Checkpoints>,
+    pub route: Arc<dyn Route<F>>,
+    pub policy: Policy,
+    pub clock: Clock,
+    pub claimed: Option<ClaimHook>,
+}
+
+type Waiter<V> = Arc<Slot<oneshot::Sender<Result<V, ScopeError>>>>;
+
+struct Flights<V>(Atom<OrdMap<Arc<str>, Vector<Waiter<V>>>>);
+
+enum Flight<V> {
+    Lead,
+    Wait(oneshot::Receiver<Result<V, ScopeError>>),
+}
+
+struct Flying<'a, V: Clone> {
+    flights: &'a Flights<V>,
+    key: Arc<str>,
+}
+
+impl<V: Clone> Drop for Flying<'_, V> {
+    fn drop(&mut self) {
+        self.flights.0.update(|flights| flights.remove(&self.key));
+    }
+}
+
+impl<V: Clone + Send + 'static> Flights<V> {
+    fn new() -> Self {
+        Self(Atom::default())
+    }
+
+    async fn run<W: Future<Output = Result<V, ScopeError>>>(
+        &self,
+        key: &str,
+        work: impl FnOnce() -> W,
+    ) -> Result<V, ScopeError> {
+        let key: Arc<str> = Arc::from(key);
+        let (sender, receiver) = oneshot::channel();
+        let waiter: Waiter<V> = Arc::new(Slot::new(Some(sender)));
+        let lead = self.0.update(|flights| match flights.get(&key) {
+            Some(waiting) => {
+                let mut waiting = waiting.clone();
+                waiting.push_back(Arc::clone(&waiter));
+                flights.insert(Arc::clone(&key), waiting);
+                false
+            }
+            None => {
+                flights.insert(Arc::clone(&key), Vector::new());
+                true
+            }
+        });
+        let flight = if lead {
+            Flight::Lead
+        } else {
+            Flight::Wait(receiver)
+        };
+        match flight {
+            Flight::Wait(receiver) => receiver.await.unwrap_or(Err(ScopeError::Moved)),
+            Flight::Lead => {
+                let flying = Flying {
+                    flights: self,
+                    key: Arc::clone(&key),
+                };
+                let answer = work().await;
+                let waiting = self
+                    .0
+                    .update(|flights| flights.remove(&key))
+                    .unwrap_or_default();
+                std::mem::forget(flying);
+                for waiter in &waiting {
+                    if let Some(sender) = waiter.take() {
+                        drop(sender.send(answer.clone()));
+                    }
+                }
+                answer
+            }
+        }
+    }
+}
+
+pub(crate) struct Inner<F: Resident> {
+    pub(crate) fold: Arc<F>,
+    pub(crate) log: Arc<dyn LogHost>,
+    pub(crate) leases: Arc<dyn Leases>,
+    pub(crate) checkpoints: Arc<dyn Checkpoints>,
+    route: Arc<dyn Route<F>>,
+    pub(crate) policy: Policy,
+    pub(crate) clock: Clock,
+    claimed: Option<ClaimHook>,
+    residents: Atom<OrdMap<Arc<str>, Arc<Owner<F>>>>,
+    loads: Flights<Arc<Owner<F>>>,
+    claims: Flights<u64>,
+    unreachable: Atom<BTreeSet<String>>,
+    tick: AtomicU64,
+    pub(crate) stats: Atom<Stats>,
+}
+
+pub struct Scopes<F: Resident> {
+    inner: Arc<Inner<F>>,
+}
+
+impl<F: Resident> Clone for Scopes<F> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+pub struct Scope<F: Resident> {
+    inner: Arc<Inner<F>>,
+    owner: Arc<Owner<F>>,
+}
+
+impl<F: Resident> Clone for Scope<F> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            owner: Arc::clone(&self.owner),
+        }
+    }
+}
+
+pub struct Routed<F: Resident> {
+    inner: Arc<Inner<F>>,
+    scope: Arc<str>,
+    holder: String,
+}
+
+impl<F: Resident> Clone for Routed<F> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            scope: Arc::clone(&self.scope),
+            holder: self.holder.clone(),
+        }
+    }
+}
+
+pub enum Reached<F: Resident> {
+    Local(Scope<F>),
+    Routed(Routed<F>),
+}
+
+impl<F: Resident> Reached<F> {
+    pub async fn send(&self, command: F::Command) -> Result<Committed<F::Reply>, ScopeError> {
+        match self {
+            Self::Local(scope) => scope.send(command).await,
+            Self::Routed(routed) => routed.send(command).await,
+        }
+    }
+}
+
+impl<F: Resident> Scope<F> {
+    pub fn name(&self) -> &str {
+        &self.owner.scope
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.owner.epoch
+    }
+
+    pub fn next(&self) -> u64 {
+        self.owner.next()
+    }
+
+    pub fn state(&self) -> Arc<F::State> {
+        #[cfg(not(target_family = "wasm"))]
+        if sim::mutated(Mutation::ReadThroughWriter) {
+            return match nanocode_sync::block_on(self.owner.ask(Ask::Read, &self.inner)) {
+                Turn::Read(state) => state,
+                _ => self.owner.state(),
+            };
+        }
+        self.owner.state()
+    }
+
+    pub fn watch(&self) -> watch::Receiver<Arc<F::State>> {
+        self.owner.watch()
+    }
+
+    pub async fn send(&self, command: F::Command) -> Result<Committed<F::Reply>, ScopeError> {
+        self.owner.used.store(self.inner.touch(), Ordering::Relaxed);
+        match self.owner.ask(Ask::Send(command), &self.inner).await {
+            Turn::Committed(committed) => committed,
+            Turn::Moved(Some(command)) => match self.inner.get(&self.owner.scope).await? {
+                Reached::Local(scope) => {
+                    match scope.owner.ask(Ask::Send(command), &self.inner).await {
+                        Turn::Committed(committed) => committed,
+                        _ => Err(ScopeError::Moved),
+                    }
+                }
+                Reached::Routed(routed) => routed.send(command).await,
+            },
+            Turn::Moved(None) | Turn::Read(_) | Turn::Checkpointed(_) | Turn::Drained(_) => {
+                panic!("a send to scope {} is answered as a send", self.owner.scope)
+            }
+        }
+    }
+}
+
+impl<F: Resident> Routed<F> {
+    pub fn holder(&self) -> &str {
+        &self.holder
+    }
+
+    pub async fn send(&self, command: F::Command) -> Result<Committed<F::Reply>, ScopeError> {
+        self.inner.forward(&self.holder, &self.scope, command).await
+    }
+}
+
+impl<F: Resident> Scopes<F> {
+    pub fn new(wiring: Wiring<F>) -> Self {
+        assert!(
+            wiring.policy.checkpoint_rows > 0,
+            "a scope checkpoints after at least one row"
+        );
+        Self {
+            inner: Arc::new(Inner {
+                fold: wiring.fold,
+                log: wiring.log,
+                leases: wiring.leases,
+                checkpoints: wiring.checkpoints,
+                route: wiring.route,
+                policy: wiring.policy,
+                clock: wiring.clock,
+                claimed: wiring.claimed,
+                residents: Atom::default(),
+                loads: Flights::new(),
+                claims: Flights::new(),
+                unreachable: Atom::default(),
+                tick: AtomicU64::new(0),
+                stats: Atom::default(),
+            }),
+        }
+    }
+
+    pub async fn get(&self, scope: &str) -> Result<Reached<F>, ScopeError> {
+        self.inner.get(scope).await
+    }
+
+    pub async fn serve(
+        &self,
+        scope: &str,
+        command: F::Command,
+    ) -> Result<Committed<F::Reply>, ScopeError> {
+        let part = self.inner.leases.partition(scope);
+        if self.inner.leases.held(part).is_none() {
+            return Err(ScopeError::Moved);
+        }
+        match self.inner.get(scope).await? {
+            Reached::Local(scope) => scope.send(command).await,
+            Reached::Routed(_) => Err(ScopeError::Moved),
+        }
+    }
+
+    pub async fn release(&self, part: Partition) -> Result<(), ScopeError> {
+        self.inner.release(part).await
+    }
+
+    pub async fn drain(&self, scope: &str) -> Result<u64, ScopeError> {
+        let Some(owner) = self
+            .inner
+            .residents
+            .read(|residents| residents.get(scope).cloned())
+        else {
+            return Err(ScopeError::Moved);
+        };
+        self.inner.drain(&owner, Why::Release).await
+    }
+
+    pub async fn renew(&self) -> Result<Vec<Partition>, ScopeError> {
+        let lost = self.inner.leases.renew().await?;
+        for part in &lost {
+            self.inner.forget(*part);
+        }
+        Ok(lost)
+    }
+
+    pub async fn tick(&self) -> Vec<(String, ScopeError)> {
+        let owners: Vec<Arc<Owner<F>>> = self
+            .inner
+            .residents
+            .read(|residents| residents.values().cloned().collect());
+        let mut failed = Vec::new();
+        for owner in owners {
+            if let Turn::Checkpointed(Err(error)) = owner.ask(Ask::Checkpoint, &self.inner).await {
+                failed.push((owner.scope.as_ref().to_owned(), error));
+            }
+        }
+        failed
+    }
+
+    pub fn residents(&self) -> Vec<(String, u64, u64)> {
+        self.inner.residents.read(|residents| {
+            residents
+                .iter()
+                .map(|(scope, owner)| (scope.as_ref().to_owned(), owner.epoch, owner.next()))
+                .collect()
+        })
+    }
+
+    pub fn stats(&self) -> Stats {
+        let (residents, bytes) = self.inner.weighed();
+        Stats {
+            residents,
+            resident_bytes: bytes,
+            ..self.inner.stats.read(|stats| *stats)
+        }
+    }
+}
+
+impl<F: Resident> Inner<F> {
+    fn touch(&self) -> u64 {
+        self.tick.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn weighed(&self) -> (u64, u64) {
+        self.residents.read(|residents| {
+            let bytes: usize = residents.values().map(|owner| owner.weight()).sum();
+            (residents.len() as u64, bytes as u64)
+        })
+    }
+
+    fn resident(&self, scope: &str, part: Partition) -> Option<Arc<Owner<F>>> {
+        let owner = self
+            .residents
+            .read(|residents| residents.get(scope).cloned())?;
+        if owner.life() == Life::Serving && self.leases.held(part) == Some(owner.epoch) {
+            return Some(owner);
+        }
+        if owner.life() != Life::Draining {
+            self.evicted(&owner);
+        }
+        None
+    }
+
+    fn evicted(&self, owner: &Arc<Owner<F>>) {
+        self.residents.update(|residents| {
+            if residents
+                .get(&owner.scope)
+                .is_some_and(|kept| Arc::ptr_eq(kept, owner))
+            {
+                residents.remove(&owner.scope);
+            }
+        });
+    }
+
+    fn forget(&self, part: Partition) {
+        let lost: Vec<Arc<Owner<F>>> = self.residents.read(|residents| {
+            residents
+                .values()
+                .filter(|owner| owner.part == part)
+                .cloned()
+                .collect()
+        });
+        for owner in &lost {
+            owner.lose();
+            self.evicted(owner);
+        }
+        self.stats.update(|stats| stats.lost += lost.len() as u64);
+    }
+
+    async fn get(self: &Arc<Self>, scope: &str) -> Result<Reached<F>, ScopeError> {
+        let part = self.leases.partition(scope);
+        if let Some(owner) = self.resident(scope, part) {
+            owner.used.store(self.touch(), Ordering::Relaxed);
+            return Ok(self.local(owner));
+        }
+        let epoch = match self.leases.held(part) {
+            Some(epoch) => epoch,
+            None => match self.claim(scope, part).await? {
+                Ok(epoch) => epoch,
+                Err(holder) => {
+                    return Ok(Reached::Routed(Routed {
+                        inner: Arc::clone(self),
+                        scope: Arc::from(scope),
+                        holder,
+                    }));
+                }
+            },
+        };
+        let owner = self
+            .loads
+            .run(scope, || self.load(scope, part, epoch))
+            .await?;
+        self.make_room(scope).await;
+        Ok(self.local(owner))
+    }
+
+    fn local(self: &Arc<Self>, owner: Arc<Owner<F>>) -> Reached<F> {
+        Reached::Local(Scope {
+            inner: Arc::clone(self),
+            owner,
+        })
+    }
+
+    async fn claim(&self, scope: &str, part: Partition) -> Result<Result<u64, String>, ScopeError> {
+        let row = self.leases.row(part).await?;
+        let other = match &row {
+            Row::Held { holder, .. } if holder != self.leases.node() => Some(holder.clone()),
+            Row::Held { .. } | Row::Released { .. } => None,
+        };
+        if let Some(holder) = &other
+            && !self.unreachable.read(|missed| missed.contains(holder))
+        {
+            return Ok(Err(holder.clone()));
+        }
+        let key = format!("{}", part.0);
+        let claimed = self
+            .claims
+            .run(&key, || async {
+                if let Some(epoch) = self.leases.held(part) {
+                    return Ok(epoch);
+                }
+                self.leases.claim(part).await.map_err(ScopeError::from)
+            })
+            .await;
+        match (claimed, other) {
+            (Ok(epoch), _) => Ok(Ok(epoch)),
+            (Err(ScopeError::Lost | ScopeError::Busy), Some(holder)) => Ok(Err(holder)),
+            (Err(ScopeError::Lost), None) => Err(ScopeError::Busy),
+            (Err(error), _) => {
+                let _ = scope;
+                Err(error)
+            }
+        }
+    }
+
+    async fn load(
+        &self,
+        scope: &str,
+        part: Partition,
+        epoch: u64,
+    ) -> Result<Arc<Owner<F>>, ScopeError> {
+        if let Some(owner) = self
+            .residents
+            .read(|residents| residents.get(scope).cloned())
+            && owner.epoch == epoch
+            && owner.life() == Life::Serving
+        {
+            return Ok(owner);
+        }
+        if let Some(hook) = &self.claimed {
+            hook(Arc::from(scope)).await?;
+        }
+        let manifest = if sim::mutated(Mutation::CheckpointIndexesOnly) {
+            None
+        } else {
+            self.checkpoints.latest(scope).await?
+        };
+        let now = (self.clock)();
+        let (mut state, next, checkpointed, parts) = match manifest {
+            None => (
+                self.fold.empty(),
+                0,
+                Checkpointed {
+                    next: 0,
+                    at_ms: now,
+                    digests: BTreeSet::new(),
+                },
+                0,
+            ),
+            Some(manifest) => self.restore(scope, manifest, now).await?,
+        };
+        let tail = self.log.scan(scope, next, SCAN_END).await?;
+        let mut at = next;
+        for (seq, row) in &tail {
+            if *seq < at {
+                return Err(ScopeError::Store(StoreError::Backend(format!(
+                    "the log answered row {seq} of {scope} below {at}"
+                ))));
+            }
+            self.fold.apply(&mut state, *seq, row)?;
+            at = seq + 1;
+        }
+        self.stats.update(|stats| {
+            stats.loads += 1;
+            stats.load_rows += tail.len() as u64;
+            stats.load_rows_max = stats.load_rows_max.max(tail.len() as u64);
+            stats.load_parts += parts;
+        });
+        let weight = self.fold.weight(&state);
+        let core = Core {
+            state: Arc::new(state),
+            next: at,
+            since: tail.len(),
+            checkpointed,
+        };
+        let owner = Arc::new(Owner::new(
+            Arc::from(scope),
+            part,
+            epoch,
+            core,
+            weight,
+            self.touch(),
+        ));
+        self.residents
+            .update(|residents| residents.insert(Arc::clone(&owner.scope), Arc::clone(&owner)));
+        Ok(owner)
+    }
+
+    async fn restore(
+        &self,
+        scope: &str,
+        manifest: Manifest,
+        now: u64,
+    ) -> Result<(F::State, u64, Checkpointed, u64), ScopeError> {
+        if manifest.scope != scope {
+            return Err(ScopeError::Store(StoreError::Backend(format!(
+                "the checkpoint store answered a checkpoint of {} for {scope}",
+                manifest.scope
+            ))));
+        }
+        let digests: BTreeSet<String> = manifest.parts.iter().map(|(_, at)| at.clone()).collect();
+        let wanted: Vec<String> = digests.iter().cloned().collect();
+        let found = self.checkpoints.parts(&wanted).await?;
+        let mut bodies: OrdMap<String, String> = OrdMap::default();
+        for (at, body) in found {
+            if digest(&body) != at {
+                return Err(ScopeError::Store(StoreError::Backend(format!(
+                    "checkpoint part {at} of {scope} holds a body of another digest"
+                ))));
+            }
+            bodies.insert(at, body);
+        }
+        let mut parts = Vec::with_capacity(manifest.parts.len());
+        for (name, at) in &manifest.parts {
+            let Some(body) = bodies.get(at) else {
+                return Err(ScopeError::Store(StoreError::Backend(format!(
+                    "checkpoint of {scope} at {} names part {name} whose body {at} is missing",
+                    manifest.seq
+                ))));
+            };
+            parts.push(Part {
+                name: name.clone(),
+                body: body.clone(),
+            });
+        }
+        let state = self.fold.decode(parts)?;
+        let checkpointed = Checkpointed {
+            next: manifest.seq,
+            at_ms: now,
+            digests,
+        };
+        Ok((state, manifest.seq, checkpointed, wanted.len() as u64))
+    }
+
+    async fn drain(&self, owner: &Arc<Owner<F>>, why: Why) -> Result<u64, ScopeError> {
+        let drained = match owner.ask(Ask::Drain(why), self).await {
+            Turn::Drained(drained) => drained,
+            Turn::Moved(_) => Err(ScopeError::Moved),
+            Turn::Committed(_) | Turn::Read(_) | Turn::Checkpointed(_) => {
+                panic!("a drain of scope {} is answered as a drain", owner.scope)
+            }
+        };
+        if drained.is_ok() {
+            self.evicted(owner);
+        }
+        drained
+    }
+
+    async fn release(&self, part: Partition) -> Result<(), ScopeError> {
+        let owners: Vec<Arc<Owner<F>>> = self.residents.read(|residents| {
+            residents
+                .values()
+                .filter(|owner| owner.part == part)
+                .cloned()
+                .collect()
+        });
+        for owner in &owners {
+            self.drain(owner, Why::Release).await?;
+        }
+        self.leases.release(part).await?;
+        self.stats.update(|stats| stats.releases += 1);
+        Ok(())
+    }
+
+    async fn make_room(&self, keep: &str) {
+        let count = self.residents.read(OrdMap::len);
+        for _ in 0..count {
+            let (bytes, victim) = self.residents.read(|residents| {
+                let bytes: usize = residents.values().map(|owner| owner.weight()).sum();
+                let victim = residents
+                    .values()
+                    .filter(|owner| {
+                        owner.scope.as_ref() != keep
+                            && owner.idle()
+                            && owner.life() == Life::Serving
+                    })
+                    .min_by_key(|owner| owner.used.load(Ordering::Relaxed))
+                    .cloned();
+                (bytes, victim)
+            });
+            if bytes <= self.policy.resident_bytes_max {
+                return;
+            }
+            let Some(victim) = victim else {
+                self.stats.update(|stats| stats.over_budget += 1);
+                return;
+            };
+            if self.drain(&victim, Why::Evict).await.is_err() {
+                self.stats.update(|stats| stats.over_budget += 1);
+                return;
+            }
+            self.stats.update(|stats| stats.evictions += 1);
+        }
+    }
+
+    async fn forward(
+        &self,
+        holder: &str,
+        scope: &str,
+        command: F::Command,
+    ) -> Result<Committed<F::Reply>, ScopeError> {
+        let started = nanocode_platform::now();
+        let forwarded = self.route.forward(holder, scope, command);
+        let answer = if sim::mutated(Mutation::ForwardWaitsUnbounded) {
+            forwarded.await
+        } else {
+            match nanocode_platform::timeout(
+                Duration::from_millis(self.policy.forward_ms),
+                forwarded,
+            )
+            .await
+            {
+                Ok(answer) => answer,
+                Err(_) => Err(ScopeError::Unreachable {
+                    holder: holder.to_owned(),
+                }),
+            }
+        };
+        let ms = u64::try_from(nanocode_platform::elapsed(started).as_millis()).unwrap_or(u64::MAX);
+        let unreachable = matches!(answer, Err(ScopeError::Unreachable { .. }));
+        self.unreachable.update(|missed| {
+            if unreachable {
+                missed.insert(holder.to_owned());
+            } else {
+                missed.remove(holder);
+            }
+        });
+        self.stats.update(|stats| {
+            stats.forwards += 1;
+            stats.forward_ms_total += ms;
+            stats.forward_ms_max = stats.forward_ms_max.max(ms);
+            stats.forwards_busy += u64::from(matches!(answer, Err(ScopeError::Busy)));
+            stats.forwards_unreachable += u64::from(unreachable);
+        });
+        answer
+    }
+}

@@ -1,0 +1,58 @@
+use std::sync::atomic::{AtomicU8, Ordering};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Mutation {
+    None,
+    CheckpointIndexesOnly,
+    ReadThroughWriter,
+    PublishBeforeCommit,
+    CheckpointSkipsEpoch,
+    EvictWithoutCheckpoint,
+    CheckpointRewritesUnchangedParts,
+    ForwardWaitsUnbounded,
+}
+
+impl Mutation {
+    pub const ALL: [Self; 7] = [
+        Self::CheckpointIndexesOnly,
+        Self::ReadThroughWriter,
+        Self::PublishBeforeCommit,
+        Self::CheckpointSkipsEpoch,
+        Self::EvictWithoutCheckpoint,
+        Self::CheckpointRewritesUnchangedParts,
+        Self::ForwardWaitsUnbounded,
+    ];
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::CheckpointIndexesOnly => "checkpoint_indexes_only",
+            Self::ReadThroughWriter => "read_through_writer",
+            Self::PublishBeforeCommit => "publish_before_commit",
+            Self::CheckpointSkipsEpoch => "checkpoint_skips_epoch",
+            Self::EvictWithoutCheckpoint => "evict_without_checkpoint",
+            Self::CheckpointRewritesUnchangedParts => "checkpoint_rewrites_unchanged_parts",
+            Self::ForwardWaitsUnbounded => "forward_waits_unbounded",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        std::iter::once(Self::None)
+            .chain(Self::ALL)
+            .find(|mutation| mutation.name() == name)
+    }
+}
+
+static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
+
+pub fn mutate(mutation: Mutation) {
+    MUTATION.store(mutation as u8, Ordering::SeqCst);
+}
+
+#[must_use]
+pub fn mutated(mutation: Mutation) -> bool {
+    MUTATION.load(Ordering::Relaxed) == mutation as u8
+}

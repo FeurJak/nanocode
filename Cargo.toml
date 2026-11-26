@@ -26,6 +26,7 @@ members = [
     "crates/core/cost-fold",
     "crates/core/live-fold",
     "crates/core/partitions",
+    "crates/runtime/scope",
     "crates/core/dispatch",
     "crates/runtime/board",
     "crates/runtime/dispatcher",

@@ -1,0 +1,114 @@
+mod checkpoint;
+mod lease;
+mod owner;
+mod route;
+mod scopes;
+pub mod sim;
+
+use nanocode_durability_core::StoreError;
+
+pub use checkpoint::{
+    Checkpoints, Fence, Manifest, MemoryCheckpoints, MemoryStats, Written, digest,
+};
+pub use lease::{Leases, PartedLeases};
+pub use route::Route;
+pub use scopes::{ClaimHook, Clock, Reached, Routed, Scope, Scopes, Stats, Wiring};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    pub name: String,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Committed<R> {
+    pub seq: u64,
+    pub reply: R,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Policy {
+    pub checkpoint_rows: usize,
+    pub checkpoint_ms: u64,
+    pub resident_bytes_max: usize,
+    pub forward_ms: u64,
+}
+
+pub trait Resident: Send + Sync + 'static {
+    type State: Clone + Send + Sync + 'static;
+    type Command: Send + 'static;
+    type Reply: Send + 'static;
+
+    fn empty(&self) -> Self::State;
+
+    fn decide(&self, state: &Self::State, command: &Self::Command) -> (Vec<String>, Self::Reply);
+
+    fn apply(&self, state: &mut Self::State, seq: u64, row: &str) -> Result<(), StoreError>;
+
+    fn encode(&self, state: &Self::State) -> Vec<Part>;
+
+    fn decode(&self, parts: Vec<Part>) -> Result<Self::State, StoreError>;
+
+    fn weight(&self, state: &Self::State) -> usize;
+}
+
+#[derive(Clone, Debug)]
+pub enum ScopeError {
+    Busy,
+    Unreachable {
+        holder: String,
+    },
+    Moved,
+    Lost,
+    Uncertain,
+    Bound {
+        bound: &'static str,
+        limit: usize,
+        asked: usize,
+    },
+    Store(StoreError),
+}
+
+impl std::fmt::Display for ScopeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => formatter
+                .write_str("the scope is held by a live owner that did not take the command"),
+            Self::Unreachable { holder } => write!(
+                formatter,
+                "the scope's holder {holder} did not answer within the forward deadline; the command may have reached it"
+            ),
+            Self::Moved => formatter.write_str(
+                "the scope's owner stopped before the command was written; nothing was written",
+            ),
+            Self::Lost => {
+                formatter.write_str("the scope's lease epoch moved; the command was not committed")
+            }
+            Self::Uncertain => formatter
+                .write_str("the command's append ended without an answer; it may have landed"),
+            Self::Bound {
+                bound,
+                limit,
+                asked,
+            } => {
+                write!(
+                    formatter,
+                    "{bound} is {limit}, the command asked for {asked}"
+                )
+            }
+            Self::Store(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ScopeError {}
+
+impl From<StoreError> for ScopeError {
+    fn from(error: StoreError) -> Self {
+        match error {
+            StoreError::Busy => Self::Busy,
+            StoreError::Fenced => Self::Lost,
+            error => Self::Store(error),
+        }
+    }
+}

@@ -1,0 +1,29 @@
+[package]
+name = "nanocode-scope"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Resident scopes: a scope's folded state owned by its lease holder for the whole lease, group-committed commands, content-addressed checkpoints and routing to the holder"
+autotests = false
+autobenches = false
+
+[dependencies]
+nanocode-digest.workspace = true
+nanocode-durability-core.workspace = true
+nanocode-partitions.workspace = true
+nanocode-platform.workspace = true
+nanocode-sync.workspace = true
+nanocode-turnlog.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+test = false
+doctest = false
+bench = false
