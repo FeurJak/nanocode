@@ -46,6 +46,7 @@ use crate::{
 mod export;
 mod facts;
 mod import;
+mod over;
 mod shared;
 mod wakes;
 
@@ -53,6 +54,7 @@ pub use export::Exported;
 pub use facts::sim as facts_sim;
 pub(crate) use facts::{Owners, Scope as FactScope, UNKNOWN_OUTCOME, in_scope, unknown_outcome};
 pub use import::{Imported, sim as import_sim};
+pub use over::OneLogOver;
 pub use wakes::{Fire, Heard, WakeError};
 
 const TOOLS_MARK: &str = "$nanocode_tools";

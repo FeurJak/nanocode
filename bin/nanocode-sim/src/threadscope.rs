@@ -113,6 +113,7 @@ pub struct ThreadScopeStats {
     pub hold_reopens: u64,
     pub hold_settles: u64,
     pub wake_ops: u64,
+    pub over_foreign: u64,
     pub seeds: u64,
     pub steps: u64,
     pub sends: u64,
@@ -154,6 +155,7 @@ impl ThreadScopeStats {
         self.hold_reopens += other.hold_reopens;
         self.hold_settles += other.hold_settles;
         self.wake_ops += other.wake_ops;
+        self.over_foreign += other.over_foreign;
         self.seeds += other.seeds;
         self.steps += other.steps;
         self.sends += other.sends;
@@ -275,6 +277,11 @@ impl World {
             logs,
             handles: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn foreign(&self, thread: &str, seq: u64, records: &[Record]) -> Result<(), StoreError> {
+        let row = nanocode_turnlog::encode(records)?;
+        block_on(self.reader.append(thread, &[(seq, row)]))
     }
 
     fn rows(&self, thread: &str) -> Vec<(u64, String)> {
@@ -1160,6 +1167,14 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
         crate::threadwakes::run(&mut rng, &wakes, &mut stats);
         wakes.net.nodes.set(Vec::new());
         if let Some(wrong) = wakes.wrong.read(Clone::clone) {
+            flag(&world.wrong, wrong);
+        }
+    }
+    if world.wrong.read(Option::is_none) {
+        let over = self::world(&mut rng, time);
+        crate::threadover::run(&mut rng, &over, &mut stats);
+        over.net.nodes.set(Vec::new());
+        if let Some(wrong) = over.wrong.read(Clone::clone) {
             flag(&world.wrong, wrong);
         }
     }

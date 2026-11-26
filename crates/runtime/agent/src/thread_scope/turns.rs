@@ -219,6 +219,19 @@ impl ThreadTurns {
         })
     }
 
+    pub fn rebound(&self, log: Arc<ThreadLog>) -> Result<Self, StoreError> {
+        if log.state().is_none() {
+            return Err(refused(nanocode_scope::ScopeError::Routed {
+                holder: log.holder().unwrap_or_default().to_owned(),
+            }));
+        }
+        Ok(Self {
+            log,
+            recovering: Atom::new(self.recovering.read(Clone::clone)),
+            restarts: self.restarts,
+        })
+    }
+
     #[must_use]
     pub const fn log(&self) -> &Arc<ThreadLog> {
         &self.log

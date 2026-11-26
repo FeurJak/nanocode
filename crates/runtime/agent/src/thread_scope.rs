@@ -28,7 +28,7 @@ mod parts;
 pub mod sim;
 mod state;
 mod turns;
-mod wakes;
+pub(crate) mod wakes;
 
 pub use facts::ThreadFacts;
 pub use holds::ThreadHolds;

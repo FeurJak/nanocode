@@ -34,7 +34,16 @@ pub fn summary(state: &ThreadState) -> WakeSummary {
     }
 }
 
-fn armed_at(state: &ThreadState, key: &str) -> Option<ArmedWake> {
+#[must_use]
+pub(crate) fn due(state: &ThreadState, now_ms: u64) -> Vec<(String, ArmedWake)> {
+    state
+        .wakes()
+        .filter(|(_, armed)| armed.due(now_ms))
+        .map(|(key, armed)| (key.to_owned(), armed.clone()))
+        .collect()
+}
+
+pub(crate) fn armed_at(state: &ThreadState, key: &str) -> Option<ArmedWake> {
     state
         .wakes()
         .find(|(held, _)| *held == key)
@@ -73,6 +82,10 @@ impl ThreadWakes {
             wakes_max,
             index: Atom::new(None),
         })
+    }
+
+    pub fn rebound(&self, log: Arc<ThreadLog>) -> Result<Self, StoreError> {
+        Self::new(log, &self.thread, self.wakes_max)
     }
 
     #[must_use]
@@ -210,12 +223,7 @@ impl ThreadWakes {
     }
 
     pub fn due_wakes(&self, now_ms: u64) -> Result<Vec<(String, ArmedWake)>, StoreError> {
-        Ok(self
-            .state()?
-            .wakes()
-            .filter(|(_, armed)| armed.due(now_ms))
-            .map(|(key, armed)| (key.to_owned(), armed.clone()))
-            .collect())
+        Ok(due(&*self.state()?, now_ms))
     }
 
     pub fn next_due(&self) -> Result<Option<u64>, StoreError> {

@@ -151,7 +151,7 @@ pub fn session_store<S: durability::StateStore + 'static>(
 
 pub mod turnlog {
     pub use nanocode_agent::{
-        Done, Exported, Fire, Heard, Imported, Job, KeptFact, OneLog, OneLogJournals, OneLogStore,
+        Done, Exported, Fire, Heard, Imported, Job, KeptFact, OneLog, OneLogJournals, OneLogOver, OneLogStore,
         Policy, Staged, ThreadCommand, ThreadFacts, ThreadFold, ThreadHolds, ThreadLog, ThreadLogs,
         ThreadPolicy, ThreadReply, ThreadState, ThreadTurns, ThreadWakes, WakeError, facts_sim, import_sim,
         thread_scope_sim,
