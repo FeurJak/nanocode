@@ -24,10 +24,12 @@ pub enum Mutation {
     JournalLoadsFinished,
     KeepFinishedTurns,
     AdmissionSkipsHistory,
+    StoreLostUnretried,
+    JournalLostUnretried,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 22] = [
         Self::PartDropped,
         Self::AdoptionSkipsRetired,
         Self::AdoptionSkipsBlobs,
@@ -48,6 +50,8 @@ impl Mutation {
         Self::JournalLoadsFinished,
         Self::KeepFinishedTurns,
         Self::AdmissionSkipsHistory,
+        Self::StoreLostUnretried,
+        Self::JournalLostUnretried,
     ];
 
     #[must_use]
@@ -74,6 +78,8 @@ impl Mutation {
             Self::JournalLoadsFinished => "journal_loads_finished",
             Self::KeepFinishedTurns => "keep_finished_turns",
             Self::AdmissionSkipsHistory => "admission_skips_history",
+            Self::StoreLostUnretried => "store_lost_unretried",
+            Self::JournalLostUnretried => "journal_lost_unretried",
         }
     }
 

@@ -14,7 +14,12 @@ use nanocode_tool_host::{
 use nanocode_turnlog::{EffectClass, Effects, Record};
 use serde_json::{Value, json, value::RawValue};
 
-use super::{Staged, ThreadLog, ThreadState, facts::refused, sim, state::invalid};
+use nanocode_scope::ScopeError;
+
+use super::{
+    Staged, ThreadBinding, ThreadLog, ThreadState, binding::Bind, facts::refused, sim,
+    state::invalid,
+};
 use crate::{
     durability::StoreError,
     one_log::{STORED_MARK, TOOLS_MARK, raw, shared, stored_key},
@@ -22,8 +27,10 @@ use crate::{
 
 type Cell = (String, u64);
 
+const UNRETRIED: sim::Mutation = sim::Mutation::JournalLostUnretried;
+
 struct Inner {
-    log: Arc<ThreadLog>,
+    bind: Bind,
     effects: Arc<Atom<Effects>>,
     live: Atom<BTreeSet<Cell>>,
     unsaved: Atom<BTreeMap<Cell, u64>>,
@@ -37,8 +44,16 @@ pub struct ThreadJournals(Arc<Inner>);
 impl ThreadJournals {
     #[must_use]
     pub fn new(log: Arc<ThreadLog>, effects: Arc<Atom<Effects>>) -> Self {
+        Self::bound(Bind::Fixed(log), effects)
+    }
+
+    pub(crate) fn rebinding(binding: Arc<ThreadBinding>, effects: Arc<Atom<Effects>>) -> Self {
+        Self::bound(Bind::Rebinds(binding), effects)
+    }
+
+    fn bound(bind: Bind, effects: Arc<Atom<Effects>>) -> Self {
         Self(Arc::new(Inner {
-            log,
+            bind,
             effects,
             live: Atom::new(BTreeSet::new()),
             unsaved: Atom::new(BTreeMap::new()),
@@ -50,7 +65,7 @@ impl ThreadJournals {
     #[must_use]
     pub fn rebound(&self, log: Arc<ThreadLog>) -> Self {
         Self(Arc::new(Inner {
-            log,
+            bind: Bind::Fixed(log),
             effects: Arc::clone(&self.0.effects),
             live: Atom::new(self.0.live.read(Clone::clone)),
             unsaved: Atom::new(self.0.unsaved.read(Clone::clone)),
@@ -60,8 +75,8 @@ impl ThreadJournals {
     }
 
     #[must_use]
-    pub fn log(&self) -> &Arc<ThreadLog> {
-        &self.0.log
+    pub fn log(&self) -> Arc<ThreadLog> {
+        self.0.bind.log()
     }
 
     #[must_use]
@@ -83,9 +98,13 @@ impl ThreadJournals {
         &self,
         read: impl Fn(&ThreadState) -> Result<T, StoreError> + Send + Sync + 'static,
     ) -> Result<T, StoreError> {
+        let read = Arc::new(read);
         self.0
-            .log
-            .job_staged(move |staged| read(staged.state()))
+            .bind
+            .retried(UNRETRIED, |log| {
+                let read = Arc::clone(&read);
+                async move { log.job_staged(move |staged| read(staged.state())).await }
+            })
             .await
             .map_err(refused)
     }
@@ -228,8 +247,8 @@ impl Inner {
         false
     }
 
-    async fn save(self: Arc<Self>, update: CellJournalUpdate) -> Result<(), StoreError> {
-        let external = self.external(&update)?;
+    async fn save(self: Arc<Self>, update: CellJournalUpdate) -> Result<(), ScopeError> {
+        let external = self.external(&update).map_err(ScopeError::Store)?;
         let started = update
             .calls
             .iter()
@@ -239,35 +258,100 @@ impl Inner {
             .map(|call| call.id)
             .collect::<Vec<_>>();
         let update = Arc::new(update);
-        let fresh = {
-            let update = Arc::clone(&update);
-            self.log
-                .job_staged(move |staged| staged_update(staged, &update))
-                .await
-                .map_err(refused)?
+        let cell = (update.session_id.clone(), update.cell_id);
+        if !external.is_empty() {
+            let external: Arc<[Record]> = Arc::from(external);
+            let (fresh, seq) = self
+                .bind
+                .retried(UNRETRIED, |log| {
+                    let (update, external) = (Arc::clone(&update), Arc::clone(&external));
+                    async move { written(&log, update, external).await }
+                })
+                .await?;
+            let saved = Saved {
+                update: &update,
+                cell,
+                fresh,
+                seq,
+                started,
+                external: true,
+            };
+            assert!(
+                self.due(&saved),
+                "a cell journal update that starts an external call is due"
+            );
+            return Ok(());
+        }
+        let first = self.bind.serving(UNRETRIED).await?;
+        let (log, (fresh, seq), retries) = match staged_on(&first, &update).await {
+            Err(ScopeError::Lost) => match self.bind.again(&first, UNRETRIED).await {
+                Some(log) => {
+                    let log = log?;
+                    let staged = staged_on(&log, &update).await?;
+                    (log, staged, false)
+                }
+                None => return Err(ScopeError::Lost),
+            },
+            staged => (first, staged?, true),
         };
-        let seq = self.log.next().ok_or_else(|| {
-            refused(nanocode_scope::ScopeError::Routed {
-                holder: self.log.holder().unwrap_or_default().to_owned(),
-            })
-        })?;
         let saved = Saved {
             update: &update,
-            cell: (update.session_id.clone(), update.cell_id),
+            cell,
             fresh,
             seq,
             started,
-            external: !external.is_empty(),
+            external: false,
         };
         if !self.due(&saved) {
             return Ok(());
         }
-        if external.is_empty() {
-            self.log.flush(None).await.map(drop).map_err(refused)
-        } else {
-            self.log.write(external).await.map_err(refused)
-        }
+        let log = match log.flush(None).await {
+            Err(ScopeError::Lost) if retries => match self.bind.again(&log, UNRETRIED).await {
+                Some(log) => {
+                    let log = log?;
+                    staged_on(&log, &update).await?;
+                    log.flush(None).await?;
+                    log
+                }
+                None => return Err(ScopeError::Lost),
+            },
+            flushed => flushed.map(|_| log)?,
+        };
+        self.bind.settled(&log, UNRETRIED).await
     }
+}
+
+fn seq_of(log: &ThreadLog) -> Result<u64, ScopeError> {
+    log.next().ok_or_else(|| ScopeError::Routed {
+        holder: log.holder().unwrap_or_default().to_owned(),
+    })
+}
+
+async fn written(
+    log: &ThreadLog,
+    update: Arc<CellJournalUpdate>,
+    external: Arc<[Record]>,
+) -> Result<(bool, u64), ScopeError> {
+    let fresh = log
+        .job(move |staged| {
+            let fresh = staged_update(staged, &update)?;
+            staged.extend(external.to_vec())?;
+            Ok(fresh)
+        })
+        .await?;
+    Ok((fresh, seq_of(log)?))
+}
+
+async fn staged_on(
+    log: &ThreadLog,
+    update: &Arc<CellJournalUpdate>,
+) -> Result<(bool, u64), ScopeError> {
+    let fresh = {
+        let update = Arc::clone(update);
+        log.job_staged(move |staged| staged_update(staged, &update))
+            .await?
+    };
+    Ok((fresh, seq_of(log)?))
 }
 
 fn restored(state: &ThreadState, session: &str, whole: &BTreeSet<u64>, shared: &[String]) {
@@ -385,7 +469,12 @@ fn cells(
 impl CellJournalSink for ThreadJournals {
     fn save(&self, update: CellJournalUpdate) -> HostFuture<'static, Result<(), String>> {
         let inner = Arc::clone(&self.0);
-        Box::pin(async move { inner.save(update).await.map_err(|error| error.to_string()) })
+        Box::pin(async move {
+            inner
+                .save(update)
+                .await
+                .map_err(|error| refused(error).to_string())
+        })
     }
 
     fn forget(&self, session_id: &str, cell_id: u64) -> HostFuture<'static, ()> {
@@ -399,21 +488,31 @@ impl CellJournalSink for ThreadJournals {
         let unfinished = inner.live.update(|live| live.remove(&cell));
         Box::pin(async move {
             let (session, cell) = cell;
+            let session: Arc<str> = Arc::from(session);
+            let bind = inner.bind.clone();
             let forgotten = inner
-                .log
-                .job_staged(move |staged| {
-                    staged.push(Record::Forget {
-                        cell,
-                        session: session.clone(),
-                    })
+                .bind
+                .retried(UNRETRIED, |log| {
+                    let session = Arc::clone(&session);
+                    let bind = bind.clone();
+                    async move {
+                        log.job_staged(move |staged| {
+                            staged.push(Record::Forget {
+                                cell,
+                                session: session.as_ref().to_owned(),
+                            })
+                        })
+                        .await?;
+                        if unfinished {
+                            log.flush(None).await?;
+                            bind.settled(&log, UNRETRIED).await?;
+                        }
+                        Ok(())
+                    }
                 })
                 .await;
             if let Err(error) = forgotten {
                 nanocode_trace::warn!(%error, "thread log could not forget a cell journal");
-                return;
-            }
-            if unfinished && let Err(error) = inner.log.flush(None).await {
-                nanocode_trace::warn!(%error, "thread log could not commit a forgotten cell journal");
             }
         })
     }
@@ -454,17 +553,26 @@ impl CellJournalSink for ThreadJournals {
         session_id: &str,
         stored: String,
     ) -> HostFuture<'static, Result<(), String>> {
-        let log = Arc::clone(&self.0.log);
-        let key = stored_key(session_id, STORED_MARK);
+        let inner = Arc::clone(&self.0);
+        let key: Arc<str> = Arc::from(stored_key(session_id, STORED_MARK));
+        let stored: Arc<str> = Arc::from(stored);
         Box::pin(async move {
-            log.job_staged(move |staged| {
-                staged.push(Record::Stored {
-                    key: key.clone(),
-                    value: stored.clone(),
+            inner
+                .bind
+                .retried(UNRETRIED, |log| {
+                    let (key, stored) = (Arc::clone(&key), Arc::clone(&stored));
+                    async move {
+                        log.job_staged(move |staged| {
+                            staged.push(Record::Stored {
+                                key: key.as_ref().to_owned(),
+                                value: stored.as_ref().to_owned(),
+                            })
+                        })
+                        .await
+                    }
                 })
-            })
-            .await
-            .map_err(|error| refused(error).to_string())
+                .await
+                .map_err(|error| refused(error).to_string())
         })
     }
 

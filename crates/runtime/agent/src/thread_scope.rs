@@ -22,6 +22,7 @@ use crate::{
 };
 
 mod adopt;
+mod binding;
 mod facts;
 mod holds;
 pub mod history;
@@ -34,6 +35,7 @@ mod store;
 mod turns;
 pub(crate) mod wakes;
 
+pub(crate) use binding::ThreadBinding;
 pub use facts::ThreadFacts;
 pub use holds::ThreadHolds;
 pub use journals::ThreadJournals;
@@ -795,6 +797,14 @@ impl ThreadLog {
         match &self.reached {
             Reached::Local(scope) => Some(scope.next()),
             Reached::Routed(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn retired(&self) -> bool {
+        match &self.reached {
+            Reached::Local(scope) => scope.retired(),
+            Reached::Routed(_) => false,
         }
     }
 

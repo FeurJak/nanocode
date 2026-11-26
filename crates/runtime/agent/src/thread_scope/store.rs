@@ -3,7 +3,11 @@ use std::{collections::BTreeMap, ops::Bound, sync::Arc};
 use nanocode_sync::Atom;
 use nanocode_turnlog::Record;
 
-use super::{Staged, ThreadFacts, ThreadLog, ThreadState, facts::refused, sim};
+use nanocode_scope::ScopeError;
+
+use super::{
+    Staged, ThreadBinding, ThreadFacts, ThreadLog, ThreadState, binding::Bind, facts::refused, sim,
+};
 use crate::{
     durability::{
         Committed, FactLogs, OwnedState, OwnerId, OwnerToken, Settle, StateCommit, StateStore,
@@ -91,7 +95,7 @@ struct Replacement {
 }
 
 struct Inner {
-    log: Arc<ThreadLog>,
+    bind: Bind,
     owners: Atom<BTreeMap<String, OwnerToken>>,
     durable: Atom<bool>,
     deferred: Atom<bool>,
@@ -104,8 +108,16 @@ pub struct ThreadStore(Arc<Inner>);
 impl ThreadStore {
     #[must_use]
     pub fn new(log: Arc<ThreadLog>) -> Self {
+        Self::bound(Bind::Fixed(log))
+    }
+
+    pub(crate) fn rebinding(binding: Arc<ThreadBinding>) -> Self {
+        Self::bound(Bind::Rebinds(binding))
+    }
+
+    fn bound(bind: Bind) -> Self {
         Self(Arc::new(Inner {
-            log,
+            bind,
             owners: Atom::new(BTreeMap::new()),
             durable: Atom::new(false),
             deferred: Atom::new(false),
@@ -116,7 +128,7 @@ impl ThreadStore {
     #[must_use]
     pub fn rebound(&self, log: Arc<ThreadLog>) -> Self {
         Self(Arc::new(Inner {
-            log,
+            bind: Bind::Fixed(log),
             owners: Atom::new(self.0.owners.read(Clone::clone)),
             durable: Atom::new(*self.0.durable.get()),
             deferred: Atom::new(*self.0.deferred.get()),
@@ -125,8 +137,19 @@ impl ThreadStore {
     }
 
     #[must_use]
-    pub fn log(&self) -> &Arc<ThreadLog> {
-        &self.0.log
+    pub fn log(&self) -> Arc<ThreadLog> {
+        self.0.bind.log()
+    }
+
+    pub(super) async fn retried<T, F, Fut>(&self, command: F) -> Result<T, ScopeError>
+    where
+        F: Fn(Arc<ThreadLog>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, ScopeError>>,
+    {
+        self.0
+            .bind
+            .retried(sim::Mutation::StoreLostUnretried, command)
+            .await
     }
 
     pub(super) fn owned(&self, state_id: &str) -> bool {
@@ -154,11 +177,13 @@ impl ThreadStore {
         &self,
         read: impl Fn(&ThreadState) -> Result<T, StoreError> + Send + Sync + 'static,
     ) -> Result<T, StoreError> {
-        self.0
-            .log
-            .job_staged(move |staged| read(staged.state()))
-            .await
-            .map_err(refused)
+        let read = Arc::new(read);
+        self.retried(|log| {
+            let read = Arc::clone(&read);
+            async move { log.job_staged(move |staged| read(staged.state())).await }
+        })
+        .await
+        .map_err(refused)
     }
 
     async fn replaced(
@@ -166,25 +191,33 @@ impl ThreadStore {
         replacement: Replacement,
         settle: impl Fn(&ThreadState) -> Then + Send + Sync + 'static,
     ) -> Result<u64, StoreError> {
-        let inner = Arc::clone(&self.0);
         let replacement = Arc::new(replacement);
+        let settle = Arc::new(settle);
         let (revision, then) = self
-            .0
-            .log
-            .job_staged(move |staged| {
-                let revision = inner.replace(staged, &replacement)?;
-                Ok((revision, settle(staged.state())))
+            .retried(|log| {
+                let inner = Arc::clone(&self.0);
+                let replacement = Arc::clone(&replacement);
+                let settle = Arc::clone(&settle);
+                let bind = self.0.bind.clone();
+                async move {
+                    let (revision, then) = log
+                        .job_staged(move |staged| {
+                            let revision = inner.replace(staged, &replacement)?;
+                            Ok((revision, settle(staged.state())))
+                        })
+                        .await?;
+                    if then == Then::Flush {
+                        log.flush(None).await?;
+                        bind.settled(&log, sim::Mutation::StoreLostUnretried)
+                            .await?;
+                    }
+                    Ok((revision, then))
+                }
             })
             .await
             .map_err(refused)?;
-        match then {
-            Then::Stage => {}
-            Then::Owe => {
-                self.0.owed.set(true);
-            }
-            Then::Flush => {
-                self.0.log.flush(None).await.map_err(refused)?;
-            }
+        if then == Then::Owe {
+            self.0.owed.set(true);
         }
         Ok(revision)
     }
@@ -228,7 +261,7 @@ impl Inner {
 
 impl StateStore for ThreadStore {
     fn facts(&self) -> Option<Arc<dyn FactLogs>> {
-        Some(Arc::new(ThreadFacts::new(Arc::clone(&self.0.log))))
+        Some(Arc::new(ThreadFacts::new(self.log())))
     }
 
     fn read_record<'a>(
@@ -383,7 +416,20 @@ impl StateStore for ThreadStore {
     }
 
     fn flush(&mut self) -> StoreFuture<'_, Result<(), StoreError>> {
-        Box::pin(async move { self.0.log.flush(None).await.map(drop).map_err(refused) })
+        Box::pin(async move {
+            let log = self.log();
+            let unretried = sim::Mutation::StoreLostUnretried;
+            match log.flush(None).await {
+                Ok(_) => self.0.bind.settled(&log, unretried).await.map_err(refused),
+                Err(ScopeError::Lost) => {
+                    if let Some(fresh) = self.0.bind.again(&log, unretried).await {
+                        fresh.map_err(refused)?;
+                    }
+                    Err(StoreError::Fenced)
+                }
+                Err(error) => Err(refused(error)),
+            }
+        })
     }
 
     fn put_records<'a>(
@@ -391,14 +437,19 @@ impl StateStore for ThreadStore {
         state_id: &'a str,
         records: &'a [StoreRecord],
     ) -> StoreFuture<'a, Result<bool, StoreError>> {
-        let state_id = state_id.to_owned();
-        let records = records.to_vec();
+        let state_id: Arc<str> = Arc::from(state_id);
+        let records: Arc<[StoreRecord]> = Arc::from(records);
         Box::pin(async move {
-            self.0
-                .log
-                .job_staged(move |staged| put(staged, &state_id, &records).map(|()| true))
-                .await
-                .map_err(refused)
+            self.retried(|log| {
+                let state_id = Arc::clone(&state_id);
+                let records = Arc::clone(&records);
+                async move {
+                    log.job_staged(move |staged| put(staged, &state_id, &records).map(|()| true))
+                        .await
+                }
+            })
+            .await
+            .map_err(refused)
         })
     }
 }

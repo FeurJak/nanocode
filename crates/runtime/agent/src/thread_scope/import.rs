@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use nanocode_turnlog::Record;
 
-use super::{ThreadState, ThreadStore, facts::refused, sim, store::records_of};
+use super::{Staged, ThreadState, ThreadStore, facts::refused, sim, store::records_of};
 use crate::{
     durability::{StoreError, StoreRecord},
     one_log::{Exported, Imported, shared, stored_key},
@@ -63,8 +65,8 @@ impl ThreadStore {
         let state_id = state_id.to_owned();
         let payload = payload.to_owned();
         let records = records.to_vec();
-        self.log()
-            .job(move |staged| {
+        let job = Arc::new(
+            move |staged: &mut Staged| -> Result<Result<Imported, StoreError>, StoreError> {
                 if store.owned(&state_id) {
                     return Ok(Err(StoreError::Fenced));
                 }
@@ -86,16 +88,24 @@ impl ThreadStore {
                     state: state_id.clone(),
                 })?;
                 Ok(Ok(imported))
-            })
-            .await
-            .map_err(refused)?
+            },
+        );
+        self.retried(|log| {
+            let job = Arc::clone(&job);
+            async move { log.job(move |staged| job(staged)).await }
+        })
+        .await
+        .map_err(refused)?
     }
 
     pub async fn export_state(&self, state_id: &str) -> Result<Option<Exported>, StoreError> {
-        self.log().flush(None).await.map_err(refused)?;
-        let state = self.log().state().ok_or_else(|| {
+        let log = self
+            .retried(|log| async move { log.flush(None).await.map(|_| log) })
+            .await
+            .map_err(refused)?;
+        let state = log.state().ok_or_else(|| {
             refused(nanocode_scope::ScopeError::Routed {
-                holder: self.log().holder().unwrap_or_default().to_owned(),
+                holder: log.holder().unwrap_or_default().to_owned(),
             })
         })?;
         let Some(checkpoint) = state.checkpoint(state_id) else {

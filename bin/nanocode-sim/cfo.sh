@@ -454,6 +454,8 @@ default_table='
 1 canary_thread_scope_wake_index_skipped canary:16 --scenario thread_scope --mutation wake_index_skipped
 1 canary_thread_scope_gate_compares_intent_to_itself canary:16 --scenario thread_scope --mutation gate_compares_intent_to_itself
 1 canary_thread_scope_lost_unretried canary:16 --scenario thread_scope --mutation lost_unretried
+1 canary_thread_scope_store_lost_unretried canary:16 --scenario thread_scope --mutation store_lost_unretried
+1 canary_thread_scope_journal_lost_unretried canary:16 --scenario thread_scope --mutation journal_lost_unretried
 1 canary_thread_scope_keep_all_events canary:16 --scenario thread_scope --mutation keep_all_events
 1 canary_thread_scope_keep_finished_turns canary:16 --scenario thread_scope --mutation keep_finished_turns
 1 canary_thread_scope_admission_skips_history canary:16 --scenario thread_scope --mutation admission_skips_history

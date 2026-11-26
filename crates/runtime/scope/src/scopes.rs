@@ -240,6 +240,10 @@ impl<F: Resident> Scope<F> {
         self.owner.epoch
     }
 
+    pub fn retired(&self) -> bool {
+        matches!(self.owner.life(), Life::Lost | Life::Released { .. })
+    }
+
     pub fn next(&self) -> u64 {
         self.owner.next()
     }
