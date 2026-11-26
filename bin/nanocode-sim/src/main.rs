@@ -48,6 +48,7 @@ mod longthread;
 mod machines;
 mod memory;
 mod kvlease;
+mod scope;
 mod migrated;
 mod model;
 mod mpp;
@@ -115,6 +116,7 @@ use crate::{
     holds::{HoldsMutation, HoldsStats},
     migrated::{MigratedMutation, MigratedStats},
     kvlease::{KvLeaseMutation, KvLeaseStats},
+    scope::{ScopeMutation, ScopeStats},
     httpd::WireMutation,
     httpserver::{HttpServerMutation, HttpServerStats},
     imports::{ImportsMutation, ImportsStats},
@@ -216,6 +218,7 @@ enum Scenario {
     OneLogFacts,
     Migrated,
     KvLease,
+    Scope,
     PgPool,
 }
 
@@ -282,6 +285,7 @@ struct Args {
     one_log_facts: OneLogFactsMutation,
     migrated: MigratedMutation,
     kv_lease: KvLeaseMutation,
+    scope: ScopeMutation,
     pg_pool: PgPoolMutation,
     #[cfg(unix)]
     alloc: alloc::AllocMutation,
@@ -297,7 +301,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|lease|durable|scale|gc_unwind|interp_drop|held_await|holds|slog|one_log_facts|migrated|kv_lease|pg_pool] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--chain-bytes BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|lease|durable|scale|gc_unwind|interp_drop|held_await|holds|slog|one_log_facts|migrated|kv_lease|scope|pg_pool] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--chain-bytes BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -344,6 +348,7 @@ fn usage() -> ExitCode {
        one_log_facts: [--mutation {}]
        migrated: [--mutation {}]
        kv_lease: [--mutation {}]
+       scope: [--mutation {}]
        pg_pool: [--mutation {}]",
         Mutation::names(),
         TurnMutation::names(),
@@ -393,6 +398,7 @@ fn usage() -> ExitCode {
         OneLogFactsMutation::names(),
         MigratedMutation::names(),
         KvLeaseMutation::names(),
+        ScopeMutation::names(),
         PgPoolMutation::names()
     );
     ExitCode::from(2)
@@ -489,6 +495,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut one_log_facts = OneLogFactsMutation::None;
     let mut migrated = MigratedMutation::None;
     let mut kv_lease = KvLeaseMutation::None;
+    let mut scope = ScopeMutation::NONE;
     let mut pg_pool = PgPoolMutation::None;
     #[cfg(unix)]
     let mut capture = capture::CaptureMutation::None;
@@ -602,6 +609,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "one_log_facts" => Scenario::OneLogFacts,
                     "migrated" => Scenario::Migrated,
                     "kv_lease" => Scenario::KvLease,
+                    "scope" => Scenario::Scope,
                     #[cfg(unix)]
                     "capture" => Scenario::Capture,
                     #[cfg(target_os = "linux")]
@@ -692,6 +700,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::Holds, Some(name)) => holds = HoldsMutation::parse(name)?,
         (Scenario::Migrated, Some(name)) => migrated = MigratedMutation::parse(name)?,
         (Scenario::KvLease, Some(name)) => kv_lease = KvLeaseMutation::parse(name)?,
+        (Scenario::Scope, Some(name)) => scope = ScopeMutation::parse(name)?,
         (Scenario::PgPool, Some(name)) => pg_pool = PgPoolMutation::parse(name)?,
         (Scenario::Slog, Some(name)) => slog = SlogMutation::parse(name)?,
         (Scenario::OneLogFacts, Some(name)) => {
@@ -784,6 +793,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         one_log_facts,
         migrated,
         kv_lease,
+        scope,
         pg_pool,
         #[cfg(unix)]
         alloc,
@@ -943,6 +953,9 @@ fn scenario_replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::KvLease {
         return kvlease::replay(seed, args.kv_lease);
+    }
+    if args.scenario == Scenario::Scope {
+        return scope::replay(seed, args.scope);
     }
     if args.scenario == Scenario::PgPool {
         return pgpool::replay(seed, args.pg_pool);
@@ -1348,6 +1361,7 @@ fn mutations() -> ExitCode {
     add("one_log_facts", OneLogFactsMutation::names());
     add("migrated", MigratedMutation::names());
     add("kv_lease", KvLeaseMutation::names());
+    add("scope", ScopeMutation::names());
     add("pg_pool", PgPoolMutation::names());
     #[cfg(unix)]
     {
@@ -1435,6 +1449,7 @@ struct Totals {
     one_log_facts_totals: OneLogFactsStats,
     migrated_totals: MigratedStats,
     kv_lease_totals: KvLeaseStats,
+    scope_totals: ScopeStats,
     pg_pool_totals: PgPoolStats,
     #[cfg(unix)]
     capture_totals: capture::CaptureStats,
@@ -1501,6 +1516,7 @@ impl Totals {
         self.one_log_facts_totals.add(&other.one_log_facts_totals);
         self.migrated_totals.add(&other.migrated_totals);
         self.kv_lease_totals.add(&other.kv_lease_totals);
+        self.scope_totals.add(&other.scope_totals);
         self.pg_pool_totals.add(&other.pg_pool_totals);
         #[cfg(unix)]
         self.capture_totals.add(&other.capture_totals);
@@ -1816,6 +1832,13 @@ fn judge_one(seed: u64, args: &Args, totals: &mut Totals, caught: &mut Caught) -
             args.options.verbose,
             &mut totals.kv_lease_totals,
         ),
+        Scenario::Scope => scope::judge(
+            seed,
+            args.scope,
+            args.twice,
+            args.options.verbose,
+            &mut totals.scope_totals,
+        ),
         Scenario::Migrated => migrated::judge(
             seed,
             args.migrated,
@@ -2086,6 +2109,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::Holds && args.holds != HoldsMutation::None)
         || (args.scenario == Scenario::Migrated && args.migrated != MigratedMutation::None)
         || (args.scenario == Scenario::KvLease && args.kv_lease != KvLeaseMutation::None)
+        || (args.scenario == Scenario::Scope && args.scope != ScopeMutation::NONE)
         || (args.scenario == Scenario::PgPool && args.pg_pool != PgPoolMutation::None)
         || (args.scenario == Scenario::Slog && args.slog != SlogMutation::None)
         || (args.scenario == Scenario::OneLogFacts
@@ -2189,6 +2213,7 @@ fn main() -> ExitCode {
         one_log_facts_totals,
         migrated_totals,
         kv_lease_totals,
+        scope_totals,
         pg_pool_totals,
         #[cfg(unix)]
         capture_totals,
@@ -2557,6 +2582,16 @@ fn main() -> ExitCode {
             args.twice,
             args.nested_meta,
             &nested_meta_totals,
+        );
+    }
+    if args.scenario == Scenario::Scope {
+        return scope::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.scope,
+            &scope_totals,
         );
     }
     if args.scenario == Scenario::KvLease {

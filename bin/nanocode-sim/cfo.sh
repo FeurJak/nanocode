@@ -416,6 +416,15 @@ default_table='
 1 kv_lease_twice pass --scenario kv_lease --twice
 1 canary_kv_lease_claim_steals_live canary:16 --scenario kv_lease --mutation claim_steals_live
 1 canary_kv_lease_claim_skips_grace canary:16 --scenario kv_lease --mutation claim_skips_grace
+4 scope pass --scenario scope
+1 scope_twice pass --scenario scope --twice
+1 canary_scope_checkpoint_indexes_only canary:16 --scenario scope --mutation checkpoint_indexes_only
+1 canary_scope_read_through_writer canary:16 --scenario scope --mutation read_through_writer
+1 canary_scope_publish_before_commit canary:16 --scenario scope --mutation publish_before_commit
+1 canary_scope_checkpoint_skips_epoch canary:16 --scenario scope --mutation checkpoint_skips_epoch
+1 canary_scope_evict_without_checkpoint canary:16 --scenario scope --mutation evict_without_checkpoint
+1 canary_scope_checkpoint_rewrites_unchanged_parts canary:16 --scenario scope --mutation checkpoint_rewrites_unchanged_parts
+1 canary_scope_forward_waits_unbounded canary:16 --scenario scope --mutation forward_waits_unbounded
 8 repo_cache pass --scenario repo_cache
 2 repo_cache_twice pass --scenario repo_cache --twice
 1 canary_repo_cache_shared_head canary:8 --scenario repo_cache --mutation shared_head

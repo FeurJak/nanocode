@@ -194,6 +194,7 @@ nanocode-board = { version = "0.7.0", path = "crates/runtime/board" }
 nanocode-dispatcher = { version = "0.7.0", path = "crates/runtime/dispatcher" }
 nanocode-board-sync = { version = "0.7.0", path = "crates/runtime/board-sync" }
 nanocode-live = { version = "0.7.0", path = "crates/runtime/live" }
+nanocode-scope = { version = "0.7.0", path = "crates/runtime/scope" }
 nanocode-hands = { version = "0.7.0", path = "crates/runtime/hands" }
 nanocode-code-mode = { version = "0.7.0", path = "crates/runtime/code-mode"  }
 nanocode-workspace = { version = "0.7.0", path = "crates/runtime/workspace" }

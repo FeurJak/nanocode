@@ -1236,6 +1236,7 @@ dependencies = [
  "nanocode-python-data",
  "nanocode-repo-cache",
  "nanocode-sandbox",
+ "nanocode-scope",
  "nanocode-shell",
  "nanocode-store-sql",
  "nanocode-subagents",
