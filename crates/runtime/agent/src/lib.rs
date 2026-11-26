@@ -35,8 +35,8 @@ pub use session_log::{
     Submitted, TurnRecord, TurnRetry, TurnState, submission_digest,
 };
 pub use thread_scope::{
-    Done, Job, KeptFact, Staged, ThreadCommand, ThreadFacts, ThreadFold, ThreadLog, ThreadLogs,
-    ThreadPolicy, ThreadReply, ThreadState, ThreadTurns, sim as thread_scope_sim,
+    Done, Job, KeptFact, Staged, ThreadCommand, ThreadFacts, ThreadFold, ThreadHolds, ThreadLog,
+    ThreadLogs, ThreadPolicy, ThreadReply, ThreadState, ThreadTurns, sim as thread_scope_sim,
 };
 pub use turn_inbox::{
     Attach, Delivery, Driven, Halt, InboxError, InboxHost, MovedQueued, Next, PassEnd, TurnInbox,

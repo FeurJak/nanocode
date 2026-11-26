@@ -352,7 +352,7 @@ impl FactLogs for Logs {
     }
 }
 
-const UNKNOWN_OUTCOME: &str = "Tool execution interrupted by a host crash; outcome unknown. Do not assume it did not run or automatically repeat it.";
+pub(crate) const UNKNOWN_OUTCOME: &str = "Tool execution interrupted by a host crash; outcome unknown. Do not assume it did not run or automatically repeat it.";
 
 pub(crate) fn unknown_outcome() -> Result<Box<RawValue>, StoreError> {
     let wire = ToolOutput::error(UNKNOWN_OUTCOME)

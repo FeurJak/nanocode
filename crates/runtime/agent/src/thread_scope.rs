@@ -23,12 +23,14 @@ use crate::{
 
 mod adopt;
 mod facts;
+mod holds;
 mod parts;
 pub mod sim;
 mod state;
 mod turns;
 
 pub use facts::ThreadFacts;
+pub use holds::ThreadHolds;
 pub use state::{KeptFact, ThreadState};
 pub use turns::ThreadTurns;
 

@@ -109,6 +109,10 @@ pub struct ThreadScopeStats {
     pub turn_ops: u64,
     pub turn_reopens: u64,
     pub turn_lenient: u64,
+    pub hold_ops: u64,
+    pub hold_reopens: u64,
+    pub hold_settles: u64,
+    pub gate_lenient: u64,
     pub seeds: u64,
     pub steps: u64,
     pub sends: u64,
@@ -146,6 +150,10 @@ impl ThreadScopeStats {
         self.turn_ops += other.turn_ops;
         self.turn_reopens += other.turn_reopens;
         self.turn_lenient += other.turn_lenient;
+        self.hold_ops += other.hold_ops;
+        self.hold_reopens += other.hold_reopens;
+        self.hold_settles += other.hold_settles;
+        self.gate_lenient += other.gate_lenient;
         self.seeds += other.seeds;
         self.steps += other.steps;
         self.sends += other.sends;
@@ -1136,6 +1144,14 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
         crate::threadturns::run(&mut rng, &turns, &mut stats);
         turns.net.nodes.set(Vec::new());
         if let Some(wrong) = turns.wrong.read(Clone::clone) {
+            flag(&world.wrong, wrong);
+        }
+    }
+    if world.wrong.read(Option::is_none) {
+        let holds = self::world(&mut rng, time);
+        crate::threadholds::run(&mut rng, &holds, &mut stats);
+        holds.net.nodes.set(Vec::new());
+        if let Some(wrong) = holds.wrong.read(Clone::clone) {
             flag(&world.wrong, wrong);
         }
     }

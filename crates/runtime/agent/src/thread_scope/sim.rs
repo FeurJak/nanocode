@@ -12,10 +12,11 @@ pub enum Mutation {
     ScopedIntentSkipped,
     FactsUnseenSkipped,
     RecoveryUncounted,
+    HoldStaged,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::PartDropped,
         Self::AdoptionSkipsRetired,
         Self::AdoptionSkipsBlobs,
@@ -24,6 +25,7 @@ impl Mutation {
         Self::ScopedIntentSkipped,
         Self::FactsUnseenSkipped,
         Self::RecoveryUncounted,
+        Self::HoldStaged,
     ];
 
     #[must_use]
@@ -38,6 +40,7 @@ impl Mutation {
             Self::ScopedIntentSkipped => "scoped_intent_skipped",
             Self::FactsUnseenSkipped => "facts_unseen_skipped",
             Self::RecoveryUncounted => "recovery_uncounted",
+            Self::HoldStaged => "hold_staged",
         }
     }
 
