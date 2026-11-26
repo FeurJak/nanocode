@@ -17,7 +17,7 @@ use serde_json::value::RawValue;
 use super::{
     history::{HeldFact, Paging},
     sim::{self, Mutation},
-    state::{Legacy, ThreadState, invalid},
+    state::{FinishedFilter, Legacy, ThreadState, Window, invalid},
 };
 use crate::durability::{
     StoreError, StoreFuture,
@@ -165,7 +165,14 @@ impl LogHost for Counted {
 
 fn plain(rows: &[(u64, String)]) -> bool {
     let mut state = ThreadState::default();
-    rows.iter().all(|(seq, row)| state.load(*seq, row, rows.len().max(1)).is_ok())
+    let window = Window {
+        recent_rows: rows.len().max(1),
+        filter: FinishedFilter {
+            bytes: 1,
+            hashes: 1,
+        },
+    };
+    rows.iter().all(|(seq, row)| state.load(*seq, row, window).is_ok())
 }
 
 type Facts = Vec<(u64, Option<String>, StoredFact)>;

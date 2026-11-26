@@ -151,10 +151,11 @@ pub fn session_store<S: durability::StateStore + 'static>(
 
 pub mod turnlog {
     pub use nanocode_agent::{
-        Done, Exported, Fire, Heard, Imported, Job, KeptFact, OneLog, OneLogJournals, OneLogOver,
-        OneLogStore, Policy, Staged, ThreadCommand, ThreadFacts, ThreadFold, ThreadHolds,
-        ThreadJournals, ThreadLog, ThreadLogs, ThreadPolicy, ThreadReply, ThreadState, ThreadStore,
-        ThreadTurns, ThreadWakes, WakeError, facts_sim, import_sim, thread_history, thread_scope_sim,
+        Done, Exported, FinishedFilter, Fire, Found, Heard, Imported, Job, KeptFact, Moved, OneLog,
+        OneLogJournals, OneLogOver, OneLogStore, Policy, Probe, Probes, Probing, Staged,
+        ThreadCommand, ThreadFacts, ThreadFold, ThreadHolds, ThreadJournals, ThreadLog, ThreadLogs,
+        ThreadPolicy, ThreadReply, ThreadState, ThreadStore, ThreadTurns, ThreadWakes, WakeError,
+        Window, facts_sim, import_sim, thread_history, thread_scope_sim,
     };
     pub use nanocode_tool_runtime::effects::{EffectCall, EffectGate};
     pub use nanocode_turnlog::*;

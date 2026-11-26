@@ -22,10 +22,12 @@ pub enum Mutation {
     ReimportAdvances,
     StoreSkipsFence,
     JournalLoadsFinished,
+    KeepFinishedTurns,
+    AdmissionSkipsHistory,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 20] = [
         Self::PartDropped,
         Self::AdoptionSkipsRetired,
         Self::AdoptionSkipsBlobs,
@@ -44,6 +46,8 @@ impl Mutation {
         Self::ReimportAdvances,
         Self::StoreSkipsFence,
         Self::JournalLoadsFinished,
+        Self::KeepFinishedTurns,
+        Self::AdmissionSkipsHistory,
     ];
 
     #[must_use]
@@ -68,6 +72,8 @@ impl Mutation {
             Self::ReimportAdvances => "reimport_advances",
             Self::StoreSkipsFence => "store_skips_fence",
             Self::JournalLoadsFinished => "journal_loads_finished",
+            Self::KeepFinishedTurns => "keep_finished_turns",
+            Self::AdmissionSkipsHistory => "admission_skips_history",
         }
     }
 

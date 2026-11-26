@@ -448,13 +448,15 @@ default_table='
 1 canary_thread_scope_scoped_intent_skipped canary:16 --scenario thread_scope --mutation scoped_intent_skipped
 1 canary_thread_scope_facts_unseen_skipped canary:16 --scenario thread_scope --mutation facts_unseen_skipped
 1 canary_thread_scope_recovery_uncounted canary:16 --scenario thread_scope --mutation recovery_uncounted
-1 canary_thread_scope_snapshot_resets_recovery canary:64 --scenario thread_scope --mutation snapshot_resets_recovery
+1 canary_thread_scope_snapshot_resets_recovery canary:256 --scenario thread_scope --mutation snapshot_resets_recovery
 1 canary_thread_scope_hold_staged canary:16 --scenario thread_scope --mutation hold_staged
 1 canary_thread_scope_wakes_unbounded canary:16 --scenario thread_scope --mutation wakes_unbounded
 1 canary_thread_scope_wake_index_skipped canary:16 --scenario thread_scope --mutation wake_index_skipped
 1 canary_thread_scope_gate_compares_intent_to_itself canary:16 --scenario thread_scope --mutation gate_compares_intent_to_itself
 1 canary_thread_scope_lost_unretried canary:16 --scenario thread_scope --mutation lost_unretried
 1 canary_thread_scope_keep_all_events canary:16 --scenario thread_scope --mutation keep_all_events
+1 canary_thread_scope_keep_finished_turns canary:16 --scenario thread_scope --mutation keep_finished_turns
+1 canary_thread_scope_admission_skips_history canary:16 --scenario thread_scope --mutation admission_skips_history
 1 canary_thread_scope_reservation_skipped canary:16 --scenario thread_scope --mutation reservation_skipped
 1 canary_thread_scope_reimport_advances canary:16 --scenario thread_scope --mutation reimport_advances
 1 canary_thread_scope_store_skips_fence canary:16 --scenario thread_scope --mutation store_skips_fence

@@ -141,7 +141,7 @@ fn cancelled(
     fields: &Map<String, Value>,
     at: u64,
 ) -> Result<Answered, StoreError> {
-    let Some(turn) = staged.state().turn(id) else {
+    let Some(turn) = staged.turn(id)? else {
         return Ok(None);
     };
     match turn.phase {
@@ -156,7 +156,7 @@ fn cancelled(
             let (record, event) = closed(staged, id, TurnState::Cancelled, fields, at)?;
             Ok(Some((record, Some(event))))
         }
-        Phase::Running { .. } | Phase::Finished { .. } => Ok(Some((record_of(turn)?, None))),
+        Phase::Running { .. } | Phase::Finished { .. } => Ok(Some((record_of(&turn)?, None))),
     }
 }
 
@@ -168,11 +168,11 @@ struct Retry<'a> {
 }
 
 fn retried(staged: &mut Staged, retry: &Retry<'_>, at: u64) -> Result<Answered, StoreError> {
-    let Some(turn) = staged.state().turn(retry.id) else {
+    let Some(turn) = staged.turn(retry.id)? else {
         return Ok(None);
     };
     let previous = match &turn.phase {
-        Phase::Finished { .. } => return Ok(Some((record_of(turn)?, None))),
+        Phase::Finished { .. } => return Ok(Some((record_of(&turn)?, None))),
         Phase::Queued { retry } | Phase::Running { retry, .. } => retry.clone(),
     };
     let attempts = previous.as_ref().map_or(0, |held| held.attempts) + 1;
@@ -270,7 +270,7 @@ impl ThreadTurns {
     pub async fn turn(&self, request_id: &str) -> Result<Option<TurnRecord>, StoreError> {
         let id = request_id.to_owned();
         self.log
-            .job_staged(move |staged| staged.state().turn(&id).map(record_of).transpose())
+            .job_staged(move |staged| staged.turn(&id)?.as_deref().map(record_of).transpose())
             .await
             .map_err(refused)
     }

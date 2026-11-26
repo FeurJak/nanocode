@@ -4,7 +4,7 @@ use nanocode_scope::{
     Adopted, Carry, Flushed, Part, Reached, Resident, ScopeError, Scopes, Wiring,
 };
 use nanocode_sync::Slot;
-use nanocode_turnlog::{LogHost, Phase, Record, input_digest, tag};
+use nanocode_turnlog::{LogHost, Phase, Record, Turn, input_digest, tag};
 use serde_json::{Map, Value, value::RawValue};
 
 use crate::{
@@ -37,7 +37,10 @@ pub(crate) mod wakes;
 pub use facts::ThreadFacts;
 pub use holds::ThreadHolds;
 pub use journals::ThreadJournals;
-pub use state::{KeptEvent, KeptFact, Legacy, Reserved, ThreadState};
+pub use state::{
+    FinishedFilter, Found, KeptEvent, KeptFact, Legacy, Moved, Probe, Probes, Probing, Reserved,
+    ThreadState, Window,
+};
 pub use store::ThreadStore;
 pub use turns::ThreadTurns;
 pub use wakes::ThreadWakes;
@@ -49,6 +52,7 @@ type Once<T> = Box<dyn FnOnce(&mut Staged) -> Result<T, StoreError> + Send>;
 pub struct Job {
     run: Arc<Run>,
     lease: Lease,
+    probes: Probes,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -67,12 +71,19 @@ impl Job {
                 run(staged).map(|value| Box::new(value) as Box<dyn Any + Send>)
             }),
             lease: Lease::default(),
+            probes: Probes::default(),
         }
     }
 
     #[must_use]
     pub const fn leased(mut self, lease: Lease) -> Self {
         self.lease = lease;
+        self
+    }
+
+    #[must_use]
+    pub fn probed(mut self, probes: Probes) -> Self {
+        self.probes = probes;
         self
     }
 
@@ -104,6 +115,8 @@ pub struct Staged {
     records: Vec<Record>,
     lease: Lease,
     unreserved: bool,
+    probes: Probes,
+    probing: Option<Probing>,
 }
 
 impl Staged {
@@ -158,6 +171,19 @@ impl Staged {
         &self.state
     }
 
+    pub fn turn(&mut self, id: &str) -> Result<Option<Arc<Turn>>, StoreError> {
+        match self.state.found(id, &self.probes) {
+            Found::Turn(turn) => Ok(Some(turn)),
+            Found::Absent => Ok(None),
+            Found::Probe(probing) => {
+                self.probing = Some(probing);
+                Err(StoreError::NotCommitted(format!(
+                    "turn {id} may have moved into the thread's history; the job reads it there first"
+                )))
+            }
+        }
+    }
+
     #[must_use]
     pub const fn staged(&self) -> usize {
         self.records.len()
@@ -204,8 +230,13 @@ fn run(state: &ThreadState, job: &Job, ahead: u64) -> (Vec<Record>, ThreadReply)
         records: Vec::new(),
         lease: job.lease,
         unreserved: false,
+        probes: Arc::clone(&job.probes),
+        probing: None,
     };
     let ran = (job.run)(&mut staged);
+    if let Some(probing) = staged.probing {
+        return (Vec::new(), ThreadReply::Probe(probing));
+    }
     if staged.unreserved {
         return (Vec::new(), ThreadReply::Unreserved);
     }
@@ -232,6 +263,7 @@ pub struct ThreadPolicy {
     pub row_bytes_max: Option<usize>,
     pub recent_rows: usize,
     pub events_ahead: u64,
+    pub finished_filter: FinishedFilter,
 }
 
 pub struct ThreadFold {
@@ -245,6 +277,14 @@ impl ThreadFold {
         assert!(
             policy.recent_rows > 0,
             "a thread keeps the events and facts of at least its last row"
+        );
+        assert!(
+            policy.finished_filter.bytes > 0,
+            "a finished turn filter holds at least one byte"
+        );
+        assert!(
+            policy.finished_filter.hashes > 0,
+            "a finished turn filter sets at least one bit per turn"
         );
         Self { policy }
     }
@@ -290,6 +330,10 @@ pub enum ThreadCommand {
     },
     Pending,
     Job(Job),
+    Probed {
+        probes: Probes,
+        command: Box<ThreadCommand>,
+    },
 }
 
 #[derive(Debug)]
@@ -305,6 +349,7 @@ pub enum ThreadReply {
     Pending(Vec<TurnRecord>),
     Job(Result<Done, StoreError>),
     Unreserved,
+    Probe(Probing),
     Refused(String),
 }
 
@@ -363,12 +408,23 @@ fn record_in(state: &ThreadState, id: &str) -> Result<TurnRecord, StoreError> {
 }
 
 impl ThreadFold {
-    fn decided(&self, state: &ThreadState, command: &ThreadCommand) -> Decided {
+    fn decided(&self, state: &ThreadState, command: &ThreadCommand, probes: &Probes) -> Decided {
         match command {
             ThreadCommand::Submit { submission, at } => {
+                let held = match state.found(&submission.request_id, probes) {
+                    Found::Probe(probing) => return Ok((Vec::new(), ThreadReply::Probe(probing))),
+                    Found::Turn(turn) => Some(turn),
+                    Found::Absent => None,
+                };
                 let first = state.next_event();
-                let (records, submitted) =
-                    admit(state, submission, *at, self.policy.finished_max, first)?;
+                let (records, submitted) = admit(
+                    state,
+                    held.as_deref(),
+                    submission,
+                    *at,
+                    self.policy.finished_max,
+                    first,
+                )?;
                 Ok((records, ThreadReply::Submitted(submitted)))
             }
             ThreadCommand::Start { request_id, at } => {
@@ -395,7 +451,11 @@ impl ThreadFold {
                 request_id,
                 fields,
                 at,
-            } => cancel(state, request_id, fields, *at),
+            } => match state.found(request_id, probes) {
+                Found::Probe(probing) => Ok((Vec::new(), ThreadReply::Probe(probing))),
+                Found::Turn(turn) => cancel(state, &turn, fields, *at),
+                Found::Absent => Ok((Vec::new(), ThreadReply::Cancelled(None))),
+            },
             ThreadCommand::Append { entries, at } => {
                 let (records, events) = append(state, entries, *at, state.next_event());
                 Ok((records, ThreadReply::Appended(events)))
@@ -414,21 +474,24 @@ impl ThreadFold {
                 applied(state, records)?;
                 Ok((records.clone(), ThreadReply::Wrote))
             }
-            ThreadCommand::Turn { request_id } => Ok((
-                Vec::new(),
-                ThreadReply::Turn(state.turn(request_id).map(record_of).transpose()?),
-            )),
+            ThreadCommand::Turn { request_id } => match state.found(request_id, probes) {
+                Found::Probe(probing) => Ok((Vec::new(), ThreadReply::Probe(probing))),
+                Found::Turn(turn) => Ok((Vec::new(), ThreadReply::Turn(Some(record_of(&turn)?)))),
+                Found::Absent => Ok((Vec::new(), ThreadReply::Turn(None))),
+            },
             ThreadCommand::Pending => Ok((
                 Vec::new(),
                 ThreadReply::Pending(state.pending().map(record_of).collect::<Result<_, _>>()?),
             )),
             ThreadCommand::Job(job) => Ok(run(state, job, self.policy.events_ahead)),
+            ThreadCommand::Probed { probes, command } => self.decided(state, command, probes),
         }
     }
 }
 
 fn admit(
     state: &ThreadState,
+    held: Option<&Turn>,
     submission: &Submission,
     at: u64,
     finished_max: Option<usize>,
@@ -438,7 +501,7 @@ fn admit(
     let digest = submission_digest(&submission.prompt, submission.hand.as_deref())?;
     let prompt = raw(&submission.prompt)?;
     let derived = input_digest(&prompt, submission.hand.as_deref());
-    if let Some(turn) = state.turn(id) {
+    if let Some(turn) = held {
         let record = record_of(turn)?;
         let same = match turn.digest.strip_prefix(adopt::RETIRED_DIGEST) {
             Some(retired) => {
@@ -550,10 +613,8 @@ fn close(
     Ok((records, record, logged(last, Some(id), at, body)))
 }
 
-fn cancel(state: &ThreadState, id: &str, fields: &Map<String, Value>, at: u64) -> Decided {
-    let Some(turn) = state.turn(id) else {
-        return Ok((Vec::new(), ThreadReply::Cancelled(None)));
-    };
+fn cancel(state: &ThreadState, turn: &Turn, fields: &Map<String, Value>, at: u64) -> Decided {
+    let id = turn.id.as_str();
     match turn.phase {
         Phase::Running {
             cancelling: false, ..
@@ -615,7 +676,7 @@ impl Resident for ThreadFold {
     }
 
     fn decide(&self, state: &ThreadState, command: &ThreadCommand) -> (Vec<String>, ThreadReply) {
-        let (records, reply) = match self.decided(state, command) {
+        let (records, reply) = match self.decided(state, command, &Probes::default()) {
             Ok(decided) => decided,
             Err(error) => return (Vec::new(), ThreadReply::Refused(error.to_string())),
         };
@@ -635,7 +696,11 @@ impl Resident for ThreadFold {
     }
 
     fn apply(&self, state: &mut ThreadState, seq: u64, row: &str) -> Result<(), StoreError> {
-        state.load(seq, row, self.policy.recent_rows)
+        let window = Window {
+            recent_rows: self.policy.recent_rows,
+            filter: self.policy.finished_filter,
+        };
+        state.load(seq, row, window)
     }
 
     fn encode(&self, state: &ThreadState) -> Vec<Part> {
@@ -651,7 +716,13 @@ impl Resident for ThreadFold {
     }
 
     fn routable(&self, command: &ThreadCommand) -> bool {
-        !matches!(command, ThreadCommand::Job(_)) || sim::mutated(sim::Mutation::JobForwarded)
+        match command {
+            ThreadCommand::Probed { command, .. } => self.routable(command),
+            command => {
+                !matches!(command, ThreadCommand::Job(_))
+                    || sim::mutated(sim::Mutation::JobForwarded)
+            }
+        }
     }
 
     fn adopt<'a>(
@@ -742,12 +813,45 @@ impl ThreadLog {
         }
     }
 
+    async fn probe_into(&self, probes: &mut Probes, probing: Probing) -> Result<(), ScopeError> {
+        let previous = probes.get(&probing.request_id).map(|probe| probe.through);
+        assert!(
+            previous.is_none_or(|through| through < probing.to),
+            "a thread asks for a history probe only past the one it was given"
+        );
+        let probe = history::probe(&self.host, &self.scope, &probing).await?;
+        Arc::make_mut(probes).insert(probing.request_id, probe);
+        Ok(())
+    }
+
+    async fn probed(
+        &self,
+        command: impl Fn() -> ThreadCommand,
+    ) -> Result<ThreadReply, ScopeError> {
+        let mut probes = Probes::default();
+        loop {
+            let command = if probes.is_empty() {
+                command()
+            } else {
+                ThreadCommand::Probed {
+                    probes: Arc::clone(&probes),
+                    command: Box::new(command()),
+                }
+            };
+            match self.send(command).await? {
+                ThreadReply::Probe(probing) => self.probe_into(&mut probes, probing).await?,
+                reply => return Ok(reply),
+            }
+        }
+    }
+
     pub async fn submit(&self, submission: &Submission) -> Result<Submitted, ScopeError> {
-        let command = ThreadCommand::Submit {
+        let at = now();
+        let command = || ThreadCommand::Submit {
             submission: submission.clone(),
-            at: now(),
+            at,
         };
-        match self.send(command).await? {
+        match self.probed(command).await? {
             ThreadReply::Submitted(submitted) => Ok(submitted),
             reply => unexpected("submit", &reply),
         }
@@ -758,18 +862,24 @@ impl ThreadLog {
         let at = now();
         let finished_max = self.policy.finished_max;
         self.job_staged(move |staged| {
-            let first = match staged.state().turn(&submission.request_id) {
+            let held = staged.turn(&submission.request_id)?;
+            let first = match held {
                 Some(_) => staged.state().next_event(),
                 None => staged.seq(1)?,
             };
-            let (records, submitted) =
-                admit(staged.state(), &submission, at, finished_max, first)?;
+            let (records, submitted) = admit(
+                staged.state(),
+                held.as_deref(),
+                &submission,
+                at,
+                finished_max,
+                first,
+            )?;
             staged.extend(records)?;
             Ok(submitted)
         })
         .await
     }
-
 
     pub async fn start(&self, request_id: &str) -> Result<Option<Started>, ScopeError> {
         let command = ThreadCommand::Start {
@@ -805,12 +915,13 @@ impl ThreadLog {
         request_id: &str,
         fields: &Map<String, Value>,
     ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, ScopeError> {
-        let command = ThreadCommand::Cancel {
+        let at = now();
+        let command = || ThreadCommand::Cancel {
             request_id: request_id.to_owned(),
             fields: fields.clone(),
-            at: now(),
+            at,
         };
-        match self.send(command).await? {
+        match self.probed(command).await? {
             ThreadReply::Cancelled(cancelled) => Ok(cancelled),
             reply => unexpected("cancel", &reply),
         }
@@ -879,27 +990,30 @@ impl ThreadLog {
                 });
             }
         };
-        let lease = Lease {
+        let mut lease = Lease {
             epoch,
             staged,
             reserve: false,
         };
-        let replied = if staged {
-            let command = ThreadCommand::Job(job.clone().leased(lease));
-            match self.reached.stage(command).await?.reply {
-                ThreadReply::Unreserved => {
-                    let reserving = Lease {
+        let mut probes = Probes::default();
+        let replied = loop {
+            let command = ThreadCommand::Job(job.clone().leased(lease).probed(Arc::clone(&probes)));
+            let reply = if lease.staged {
+                self.reached.stage(command).await?.reply
+            } else {
+                self.reached.send(command).await?.reply
+            };
+            match reply {
+                ThreadReply::Unreserved if lease.staged => {
+                    lease = Lease {
                         staged: false,
                         reserve: true,
                         ..lease
                     };
-                    let command = ThreadCommand::Job(job.leased(reserving));
-                    self.reached.send(command).await?.reply
                 }
-                reply => reply,
+                ThreadReply::Probe(probing) => self.probe_into(&mut probes, probing).await?,
+                reply => break reply,
             }
-        } else {
-            self.reached.send(ThreadCommand::Job(job.leased(lease))).await?.reply
         };
         match replied {
             ThreadReply::Job(Ok(Done(done))) => match done.downcast::<T>() {
@@ -913,13 +1027,18 @@ impl ThreadLog {
     }
 
     pub async fn turn(&self, request_id: &str) -> Result<Option<TurnRecord>, ScopeError> {
-        if let Some(state) = self.state() {
-            return Ok(state.turn(request_id).map(record_of).transpose()?);
+        let mut probes = Probes::default();
+        while let Some(state) = self.state() {
+            match state.found(request_id, &probes) {
+                Found::Turn(turn) => return Ok(Some(record_of(&turn)?)),
+                Found::Absent => return Ok(None),
+                Found::Probe(probing) => self.probe_into(&mut probes, probing).await?,
+            }
         }
-        let command = ThreadCommand::Turn {
+        let command = || ThreadCommand::Turn {
             request_id: request_id.to_owned(),
         };
-        match self.send(command).await? {
+        match self.probed(command).await? {
             ThreadReply::Turn(turn) => Ok(turn),
             reply => unexpected("turn", &reply),
         }

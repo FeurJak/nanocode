@@ -270,8 +270,8 @@ fn fired(staged: &mut Staged, fire: &Firing) -> Result<Fire, StoreError> {
         Some(armed) if armed.generation == generation => return Ok(Fire::NotDue),
         _ => return Ok(Fire::Stale),
     }
-    if let Some(turn) = staged.state().turn(id) {
-        return Ok(Fire::Taken(record_of(turn)?));
+    if let Some(turn) = staged.turn(id)? {
+        return Ok(Fire::Taken(record_of(&turn)?));
     }
     let submission = &fire.submission;
     let first = staged.state().next_event();

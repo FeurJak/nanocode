@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use nanocode_sync::{OrdMap, Vector};
+use std::collections::BTreeMap;
+
+use nanocode_sync::{OrdMap, OrdSet, Vector};
 use nanocode_turnlog::{
     ArmedWake, Checkpoint, EffectClass, Event, FOLD_SNAPSHOT_KEY, Hold, OpenCall, Outcome, Phase,
     Record, Recovered, Retry, SNAPSHOT_RATIO, Status, Turn, apply_patch, cache_key, input_digest,
@@ -44,11 +46,95 @@ pub struct Reserved {
     pub epoch: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FinishedFilter {
+    pub bytes: usize,
+    pub hashes: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    pub recent_rows: usize,
+    pub filter: FinishedFilter,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Moved {
+    pub turns: u64,
+    pub below: u64,
+    pub hashes: u32,
+    pub bits: Arc<Vec<u8>>,
+}
+
+impl Moved {
+    fn new(filter: FinishedFilter) -> Self {
+        assert!(filter.bytes > 0, "a finished turn filter holds at least one byte");
+        assert!(filter.hashes > 0, "a finished turn filter sets at least one bit per turn");
+        Self {
+            turns: 0,
+            below: 0,
+            hashes: filter.hashes,
+            bits: Arc::new(vec![0; filter.bytes]),
+        }
+    }
+
+    fn positions(&self, id: &str) -> impl Iterator<Item = (usize, u8)> + use<> {
+        let digest = nanocode_digest::blake3(id.as_bytes());
+        let (low, high) = digest.as_bytes().split_at(8);
+        let low = u64::from_le_bytes(low.try_into().expect("a digest holds eight bytes"));
+        let high = u64::from_le_bytes(high[..8].try_into().expect("a digest holds sixteen bytes")) | 1;
+        let bits = self.bits.len() as u64 * 8;
+        (0..u64::from(self.hashes)).map(move |at| {
+            let bit = low.wrapping_add(at.wrapping_mul(high)) % bits;
+            ((bit / 8) as usize, 1_u8 << (bit % 8))
+        })
+    }
+
+    #[must_use]
+    pub fn may_hold(&self, id: &str) -> bool {
+        self.positions(id)
+            .all(|(byte, mask)| self.bits[byte] & mask != 0)
+    }
+
+    fn insert(&mut self, id: &str, row: u64) {
+        let positions: Vec<(usize, u8)> = self.positions(id).collect();
+        let bits = Arc::make_mut(&mut self.bits);
+        for (byte, mask) in positions {
+            bits[byte] |= mask;
+        }
+        self.turns += 1;
+        self.below = self.below.max(row + 1);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Probing {
+    pub request_id: String,
+    pub from: u64,
+    pub to: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Probe {
+    pub through: u64,
+    pub turn: Option<Arc<Turn>>,
+}
+
+pub type Probes = Arc<BTreeMap<String, Probe>>;
+
+pub enum Found {
+    Turn(Arc<Turn>),
+    Absent,
+    Probe(Probing),
+}
+
 #[derive(Clone, Default)]
 pub struct ThreadState {
     pub(crate) turns: OrdMap<Arc<str>, Arc<Turn>>,
     pub(crate) admitted: OrdMap<u64, Arc<str>>,
     pub(crate) starts: OrdMap<Arc<str>, u64>,
+    pub(crate) ends: OrdSet<(u64, Arc<str>)>,
+    pub(crate) moved: Option<Moved>,
     pub(crate) events: Vector<Arc<KeptEvent>>,
     pub(crate) last_event: u64,
     pub(crate) reserved: Option<Reserved>,
@@ -90,6 +176,52 @@ impl ThreadState {
     #[must_use]
     pub fn turn(&self, id: &str) -> Option<&Turn> {
         self.turns.get(id).map(AsRef::as_ref)
+    }
+
+    #[must_use]
+    pub fn found(&self, id: &str, probes: &Probes) -> Found {
+        if let Some(turn) = self.turns.get(id) {
+            return Found::Turn(Arc::clone(turn));
+        }
+        let Some(moved) = &self.moved else {
+            return Found::Absent;
+        };
+        if super::sim::mutated(super::sim::Mutation::AdmissionSkipsHistory) || !moved.may_hold(id) {
+            return Found::Absent;
+        }
+        match probes.get(id) {
+            Some(probe) if probe.through >= moved.below => {
+                probe.turn.clone().map_or(Found::Absent, Found::Turn)
+            }
+            _ => Found::Probe(Probing {
+                request_id: id.to_owned(),
+                from: self.legacy.map_or(0, |legacy| legacy.next),
+                to: moved.below,
+            }),
+        }
+    }
+
+    #[must_use]
+    pub const fn moved(&self) -> Option<&Moved> {
+        self.moved.as_ref()
+    }
+
+    pub fn traced(&mut self, record: &Record, row: u64, id: &str) -> Result<(), StoreError> {
+        match record {
+            Record::Admitted { turn, .. }
+            | Record::Status { turn, .. }
+            | Record::Recovery { turn, .. }
+                if turn == id =>
+            {
+                self.take(record, Some(row))
+            }
+            Record::Fact {
+                fact,
+                seq,
+                state: None,
+            } if names(fact, id) => self.lower(*seq, fact, None, row),
+            _ => Ok(()),
+        }
     }
 
     pub fn turns(&self) -> impl Iterator<Item = &Turn> {
@@ -338,10 +470,12 @@ impl ThreadState {
 
     #[must_use]
     pub fn finished(&self) -> usize {
-        self.turns
+        let resident = self
+            .turns
             .values()
             .filter(|turn| matches!(turn.phase, Phase::Finished { .. }))
-            .count()
+            .count();
+        resident + self.moved.as_ref().map_or(0, |moved| moved.turns as usize)
     }
 
     #[must_use]
@@ -363,6 +497,12 @@ impl ThreadState {
         }
         for (id, row) in self.starts.iter() {
             put("start", &(id.as_ref(), row));
+        }
+        for (row, id) in self.ends.iter() {
+            put("end", &(row, id.as_ref()));
+        }
+        if let Some(moved) = &self.moved {
+            put("moved", &(moved.turns, moved.below, moved.hashes, moved.bits.as_ref()));
         }
         put("last_event", &self.last_event);
         put("reserved", &self.reserved);
@@ -419,13 +559,46 @@ impl ThreadState {
             .to_owned()
     }
 
-    pub fn load(&mut self, seq: u64, body: &str, recent_rows: usize) -> Result<(), StoreError> {
+    pub fn load(&mut self, seq: u64, body: &str, window: Window) -> Result<(), StoreError> {
         for record in nanocode_turnlog::decode(body)? {
             self.take(&record, Some(seq))?;
         }
         self.row = seq;
-        self.forget_before(seq, recent_rows);
+        self.forget_before(seq, window.recent_rows);
+        self.move_before(seq, window);
         Ok(())
+    }
+
+    fn move_before(&mut self, seq: u64, window: Window) {
+        if super::sim::mutated(super::sim::Mutation::KeepFinishedTurns) {
+            return;
+        }
+        let kept = |row: u64| row + window.recent_rows as u64 > seq;
+        while let Some((row, id)) = self.ends.get_min().cloned()
+            && !kept(row)
+        {
+            self.ends.remove(&(row, Arc::clone(&id)));
+            let turn = self
+                .turns
+                .remove(&id)
+                .expect("a turn that finished in the thread's rows is resident until it moves");
+            assert!(
+                matches!(turn.phase, Phase::Finished { .. }),
+                "only a finished turn moves into history"
+            );
+            assert_eq!(
+                self.admitted.remove(&turn.first).as_deref(),
+                Some(id.as_ref()),
+                "a moved turn is admitted at its first event"
+            );
+            assert!(
+                self.starts.remove(&id).is_some(),
+                "a moved turn started in the thread's rows"
+            );
+            self.moved
+                .get_or_insert_with(|| Moved::new(window.filter))
+                .insert(&id, row);
+        }
     }
 
     fn forget_before(&mut self, seq: u64, recent_rows: usize) {
@@ -459,7 +632,8 @@ impl ThreadState {
             .flat_map(|updates| updates.iter())
             .map(|update| update.get().len())
             .sum();
-        events + facts + turns + stored + hosts + cells
+        let moved = self.moved.as_ref().map_or(0, |moved| moved.bits.len());
+        events + facts + turns + stored + hosts + cells + moved
     }
 
     pub fn take(&mut self, record: &Record, row: Option<u64>) -> Result<(), StoreError> {
@@ -502,7 +676,7 @@ impl ThreadState {
                 at,
             ),
             Record::Host { key, value } => self.host_field(key, value, at),
-            Record::Status { status, turn } => self.status(turn, status),
+            Record::Status { status, turn } => self.status(turn, status, at),
             Record::Recovery {
                 at,
                 attempt,
@@ -634,6 +808,15 @@ impl ThreadState {
             }
             let first = existing.first;
             self.admitted.remove(&first);
+            let ended: Vec<(u64, Arc<str>)> = self
+                .ends
+                .iter()
+                .filter(|(_, held)| held.as_ref() == turn.id)
+                .cloned()
+                .collect();
+            for end in ended {
+                self.ends.remove(&end);
+            }
         }
         if self.admitted.contains_key(&turn.first) {
             return Err(invalid(format!(
@@ -708,7 +891,9 @@ impl ThreadState {
                 Ok(())
             }
             Fact::Input(input) => self.lower_input(seq, input, row),
-            Fact::Marker(Marker::Status { turn, status }) => self.status(turn, &lowered(status)),
+            Fact::Marker(Marker::Status { turn, status }) => {
+                self.status(turn, &lowered(status), row)
+            }
             Fact::Marker(Marker::Recovery { turn, attempt, at }) => {
                 self.recovery(turn, *at, *attempt, &[])
             }
@@ -769,13 +954,14 @@ impl ThreadState {
                         edit_id: edit_id.clone(),
                         prompt,
                     },
+                    row,
                 )
             }
             InputKind::Steer { .. } => Ok(()),
         }
     }
 
-    fn status(&mut self, id: &str, status: &Status) -> Result<(), StoreError> {
+    fn status(&mut self, id: &str, status: &Status, row: u64) -> Result<(), StoreError> {
         let Some(turn) = self.turns.get(id) else {
             return Err(invalid(format!("status of unknown turn {id}")));
         };
@@ -793,6 +979,9 @@ impl ThreadState {
                 .collect();
             for call_id in closed {
                 self.calls.remove(&call_id);
+            }
+            if self.starts.contains_key(id) {
+                self.ends.insert((row, Arc::from(id)));
             }
         }
         self.turns.insert(Arc::from(id), Arc::new(turn));
@@ -1027,6 +1216,14 @@ fn paged(record: &Record) -> StoreError {
     invalid(format!(
         "a {kind} record points at older rows; a resident thread folds values, so its host moves paged history on its first claim"
     ))
+}
+
+fn names(fact: &StoredFact, id: &str) -> bool {
+    match fact {
+        Fact::Input(input) => input.turn == id,
+        Fact::Marker(Marker::Status { turn, .. } | Marker::Recovery { turn, .. }) => turn == id,
+        _ => false,
+    }
 }
 
 fn inline(value: &Value) -> Result<&RawValue, StoreError> {

@@ -13,11 +13,11 @@ use std::{
 
 use nanocode::{
     backend::Prompt,
-    durability::facts::{Decision, EffectResult, Fact, Intent, IntentTarget},
-    session_host::{LogEntry, Submission, TurnState},
+    durability::facts::{Decision, EffectResult, Fact, Intent, IntentTarget, Marker, TurnStatus},
+    session_host::{LogEntry, Submission, Submitted, TurnState},
     turnlog::{
-        ThreadCommand, ThreadFacts, ThreadFold, ThreadLog, ThreadLogs, ThreadPolicy, ThreadReply,
-        ThreadState, thread_history,
+        FinishedFilter, Found, Probes, ThreadCommand, ThreadFacts, ThreadFold, ThreadLog,
+        ThreadLogs, ThreadPolicy, ThreadReply, ThreadState, thread_history,
         thread_scope_sim::{self, Mutation},
     },
 };
@@ -32,7 +32,7 @@ use nanocode_scope::{
 };
 use nanocode_sync::{Atom, block_on};
 use nanocode_turnlog::{
-    Fold, Hold, LogHost, Phase, Record, SCAN_END, Wake,
+    Fold, Hold, LogHost, Phase, Record, SCAN_END, Status, Wake,
     sim::Mutation as TurnLogMutation,
     parted::{ModelParts, PartStore, PartedLog},
 };
@@ -72,6 +72,9 @@ const FACT_STATES: u64 = 2;
 const STAGED_PPM: u64 = 150_000;
 const STAGED_CRASH_PPM: u64 = 300_000;
 const EVENTS_AHEAD: Range<u64> = 0..6;
+const FILTER_BYTES: Range<u64> = 1..64;
+const FILTER_HASHES: Range<u64> = 1..4;
+const RESUBMIT_PPM: u64 = 80_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadScopeMutation(Mutation, ScopeMutation, TurnLogMutation);
@@ -132,6 +135,8 @@ pub struct ThreadScopeStats {
     pub staged: u64,
     pub staged_crashes: u64,
     pub window_checks: u64,
+    pub resubmits: u64,
+    pub moved_max: u64,
     pub claim_bytes_max: u64,
     pub claim_rows_max: u64,
     pub history_bytes_max: u64,
@@ -184,6 +189,8 @@ impl ThreadScopeStats {
         self.staged += other.staged;
         self.staged_crashes += other.staged_crashes;
         self.window_checks += other.window_checks;
+        self.resubmits += other.resubmits;
+        self.moved_max = self.moved_max.max(other.moved_max);
         self.claim_bytes_max = self.claim_bytes_max.max(other.claim_bytes_max);
         self.claim_rows_max = self.claim_rows_max.max(other.claim_rows_max);
         self.history_bytes_max = self.history_bytes_max.max(other.history_bytes_max);
@@ -785,6 +792,14 @@ fn send(
         nodes[at].handles.insert(thread, log);
         return crash.then_some(at);
     }
+    if rng.chance(RESUBMIT_PPM) {
+        let counter = turns.get(&thread).copied().unwrap_or(0);
+        resubmit(rng, world, &log, &thread, counter, stats);
+        if log.state().is_some() {
+            nodes[at].handles.insert(thread, log);
+        }
+        return None;
+    }
     if rng.chance(JOB_PPM) {
         job(rng, world, &log, &thread, stats);
         if log.state().is_some() {
@@ -804,6 +819,103 @@ fn send(
         nodes[at].handles.insert(thread, log);
     }
     None
+}
+
+fn admitted_in(rows: &[(u64, String)], id: &str) -> bool {
+    records(rows, 0, u64::MAX).iter().any(|record| match record {
+        Record::Admitted { turn, .. } => turn == id,
+        Record::Fact {
+            fact: Fact::Input(input),
+            state: None,
+            ..
+        } => input.turn == id && matches!(input.kind, InputKind::Prompt),
+        _ => false,
+    })
+}
+
+fn resubmit(
+    rng: &mut Rng,
+    world: &World,
+    log: &ThreadLog,
+    thread: &str,
+    turns: u64,
+    stats: &mut ThreadScopeStats,
+) {
+    if turns == 0 {
+        return;
+    }
+    let request_id = turn_of(rng, turns);
+    let admitted = admitted_in(&world.rows(thread), &request_id);
+    let submission = Submission {
+        request_id: request_id.clone(),
+        prompt: Prompt::new(format!("prompt {}", rng.below(1_000))),
+        hand: None,
+        metadata: raw(&json!({})),
+    };
+    stats.sends += 1;
+    match driven(world, "a resubmit", log.submit(&submission)) {
+        Some(Ok(Submitted::Accepted { .. })) if admitted => flag(
+            &world.wrong,
+            format!(
+                "{thread} admitted {request_id} again, which its committed rows already admit"
+            ),
+        ),
+        Some(Ok(_)) => {
+            stats.committed += 1;
+            stats.resubmits += 1;
+        }
+        Some(Err(_)) | None => stats.refused += 1,
+    }
+}
+
+fn finished_turn(record: &Record) -> Option<&str> {
+    match record {
+        Record::Status {
+            status: Status::Finished { .. },
+            turn,
+        } => Some(turn),
+        Record::Fact {
+            fact:
+                Fact::Marker(Marker::Status {
+                    status: TurnStatus::Finished { .. },
+                    turn,
+                }),
+            state: None,
+            ..
+        } => Some(turn),
+        _ => None,
+    }
+}
+
+fn moved(world: &World, thread: &str, manifest: &Manifest, state: &ThreadState, from: u64) -> bool {
+    let mut ends: BTreeMap<String, u64> = BTreeMap::new();
+    for (seq, body) in world.rows(thread).iter().filter(|(seq, _)| *seq < manifest.seq) {
+        for record in nanocode_turnlog::decode(body).unwrap_or_default() {
+            if let Some(turn) = finished_turn(&record) {
+                ends.insert(turn.to_owned(), *seq);
+            }
+        }
+    }
+    let stale: Vec<(String, u64)> = state
+        .turns()
+        .filter(|turn| matches!(turn.phase, Phase::Finished { .. }))
+        .filter(|turn| state.start_row(&turn.id).is_some())
+        .filter_map(|turn| {
+            let row = *ends.get(&turn.id)?;
+            (row < from).then(|| (turn.id.clone(), row))
+        })
+        .collect();
+    if stale.is_empty() {
+        return true;
+    }
+    flag(
+        &world.wrong,
+        format!(
+            "the checkpoint of {thread} at row {} holds finished turns {stale:?}, which ended before its window from row {from}",
+            manifest.seq
+        ),
+    );
+    false
 }
 
 fn resident(world: &World, nodes: &[Node], stats: &mut ThreadScopeStats) {
@@ -946,6 +1058,12 @@ fn bounded(world: &World, thread: &str, manifest: &Manifest, state: &ThreadState
     let held: Vec<u64> = state.events().map(|event| event.seq).collect();
     let kept: Vec<u64> = state.facts().map(|(seq, _)| seq).collect();
     stats.window_checks += 1;
+    stats.moved_max = stats
+        .moved_max
+        .max(state.moved().map_or(0, |moved| moved.turns));
+    if !moved(world, thread, manifest, state, from) {
+        return;
+    }
     if held != events || kept != facts {
         flag(
             &world.wrong,
@@ -1091,10 +1209,30 @@ fn legacy(world: &World, stats: &mut ThreadScopeStats) {
             .iter()
             .map(|turn| (turn.id.clone(), phase(&turn.phase), turn.digest.clone(), turn.first))
             .collect();
-        let mine: Vec<(String, &str, String, u64)> = ours
+        let mut mine: Vec<(String, &str, String, u64)> = Vec::new();
+        for turn in fold.turns() {
+            let held = match ours.found(&turn.id, &Probes::default()) {
+                Found::Turn(held) => Some(held),
+                Found::Absent => None,
+                Found::Probe(probing) => driven(
+                    world,
+                    "a history probe",
+                    thread_history::probe(&world.host, thread, &probing),
+                )
+                .and_then(Result::ok)
+                .and_then(|probe| probe.turn),
+            };
+            if let Some(held) = held {
+                mine.push((held.id.clone(), phase(&held.phase), held.digest.clone(), held.first));
+            }
+        }
+        let unknown: Vec<&str> = ours
             .turns()
-            .map(|turn| (turn.id.clone(), phase(&turn.phase), turn.digest.clone(), turn.first))
+            .map(|turn| turn.id.as_str())
+            .filter(|id| !theirs.iter().any(|(held, _, _, _)| held == id))
             .collect();
+        let mut attempts = recovered(&fold);
+        attempts.2.retain(|(id, _)| ours.turn(id).is_some());
         let first = ours.events().next().map_or(u64::MAX, |event| event.seq);
         let recent: Vec<u64> = fold
             .events()
@@ -1103,6 +1241,7 @@ fn legacy(world: &World, stats: &mut ThreadScopeStats) {
             .filter(|seq| *seq >= first)
             .collect();
         let same = theirs == mine
+            && unknown.is_empty()
             && fold.last_event() <= ours.last_event()
             && recent == ours.events().map(|event| event.seq).collect::<Vec<_>>()
             && fold
@@ -1116,7 +1255,7 @@ fn legacy(world: &World, stats: &mut ThreadScopeStats) {
             && fold.holds().count() == ours.holds().count()
             && fold.next_fact() == ours.next_fact()
             && fold.open_calls().count() == ours.open_calls().count()
-            && recovered(&fold) == recovered_ours(&ours);
+            && attempts == recovered_ours(&ours);
         if !same {
             flag(
                 &world.wrong,
@@ -1245,6 +1384,12 @@ fn world(rng: &mut Rng, time: &Arc<Clock>) -> World {
         row_bytes_max: None,
         recent_rows: usize::try_from(rng.range(rows, 2 * rows + 1)).expect("a row bound fits"),
         events_ahead: rng.range(EVENTS_AHEAD.start, EVENTS_AHEAD.end),
+        finished_filter: FinishedFilter {
+            bytes: usize::try_from(rng.range(FILTER_BYTES.start, FILTER_BYTES.end))
+                .expect("a filter bound fits"),
+            hashes: u32::try_from(rng.range(FILTER_HASHES.start, FILTER_HASHES.end))
+                .expect("a hash count fits"),
+        },
     };
     World {
         time: Arc::clone(time),

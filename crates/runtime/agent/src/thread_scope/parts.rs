@@ -8,7 +8,7 @@ use serde_json::value::RawValue;
 
 use super::{
     sim::{self, Mutation},
-    state::{KeptEvent, KeptFact, Legacy, Reserved, ThreadState, invalid},
+    state::{KeptEvent, KeptFact, Legacy, Moved, Reserved, ThreadState, invalid},
 };
 use crate::durability::{StoreError, facts::Digest};
 
@@ -20,6 +20,96 @@ struct Meta {
     reserved: Option<Reserved>,
     fact_base: u64,
     legacy: Option<Legacy>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Bits {
+    Dense(String),
+    Sparse(Vec<u64>),
+}
+
+#[derive(Deserialize, Serialize)]
+struct MovedPart {
+    turns: u64,
+    below: u64,
+    hashes: u32,
+    bytes: usize,
+    bits: Bits,
+}
+
+fn set_bits(bytes: &[u8]) -> Vec<u64> {
+    let mut set = Vec::new();
+    for (at, byte) in (0_u64..).zip(bytes) {
+        for bit in 0..8 {
+            if byte & (1 << bit) != 0 {
+                set.push(at * 8 + bit);
+            }
+        }
+    }
+    set
+}
+
+fn bits_of(bytes: &[u8]) -> Bits {
+    let set = set_bits(bytes);
+    let sparse: usize = set.iter().map(|bit| bit.to_string().len() + 1).sum();
+    if sparse < bytes.len() * 2 {
+        Bits::Sparse(set)
+    } else {
+        Bits::Dense(hex(bytes))
+    }
+}
+
+fn bytes_of(name: &str, moved: &MovedPart) -> Result<Vec<u8>, StoreError> {
+    let bytes = match &moved.bits {
+        Bits::Dense(text) => unhex(name, text)?,
+        Bits::Sparse(set) => {
+            let mut bytes = vec![0_u8; moved.bytes];
+            let mut last = None;
+            for bit in set {
+                if last.is_some_and(|last| *bit <= last) {
+                    return Err(invalid(format!("part {name} lists bit {bit} out of order")));
+                }
+                last = Some(*bit);
+                let byte = usize::try_from(bit / 8)
+                    .ok()
+                    .filter(|byte| *byte < moved.bytes)
+                    .ok_or_else(|| invalid(format!("part {name} sets bit {bit} past its filter")))?;
+                bytes[byte] |= 1 << (bit % 8);
+            }
+            bytes
+        }
+    };
+    if bytes.len() != moved.bytes || bytes.is_empty() {
+        return Err(invalid(format!(
+            "part {name} holds {} filter bytes, not the {} it names",
+            bytes.len(),
+            moved.bytes
+        )));
+    }
+    Ok(bytes)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(text, "{byte:02x}").expect("a string takes hex digits");
+    }
+    text
+}
+
+fn unhex(name: &str, text: &str) -> Result<Vec<u8>, StoreError> {
+    if !text.is_ascii() || text.len() % 2 != 0 || text.is_empty() {
+        return Err(invalid(format!("part {name} holds no whole bytes")));
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| {
+            u8::from_str_radix(&text[at..at + 2], 16)
+                .map_err(|_| invalid(format!("part {name} holds a byte that is not hex")))
+        })
+        .collect()
 }
 
 fn json(value: &impl Serialize) -> String {
@@ -93,6 +183,24 @@ pub(crate) fn encode(state: &ThreadState, rows: usize) -> Vec<Part> {
             .values()
             .filter_map(|id| state.starts.get(id).map(|row| (id.as_ref(), *row))),
     );
+    chunked(
+        &mut parts,
+        "ends",
+        rows,
+        state.ends.iter().map(|(row, id)| (*row, id.as_ref())),
+    );
+    if let Some(moved) = &state.moved {
+        parts.push(Part {
+            name: "moved".to_owned(),
+            body: json(&MovedPart {
+                turns: moved.turns,
+                below: moved.below,
+                hashes: moved.hashes,
+                bytes: moved.bits.len(),
+                bits: bits_of(&moved.bits),
+            }),
+        });
+    }
     chunked(&mut parts, "events", rows, state.events.iter().map(AsRef::as_ref));
     chunked(&mut parts, "facts", rows, state.facts.iter().map(AsRef::as_ref));
     chunked(&mut parts, "blobs", rows, state.blobs.iter());
@@ -150,6 +258,7 @@ struct Pieces {
     facts: BTreeMap<u64, Vec<KeptFact>>,
     blobs: BTreeMap<u64, Vec<Digest>>,
     starts: BTreeMap<u64, Vec<(String, u64)>>,
+    ends: BTreeMap<u64, Vec<(u64, String)>>,
     models: BTreeMap<(Arc<str>, u64), Vec<Box<RawValue>>>,
 }
 
@@ -178,6 +287,16 @@ pub(crate) fn decode(parts: Vec<Part>) -> Result<ThreadState, StoreError> {
             meta = Some(parsed::<Meta>(&part.name, &part.body)?);
             continue;
         }
+        if part.name == "moved" {
+            let moved: MovedPart = parsed(&part.name, &part.body)?;
+            state.moved = Some(Moved {
+                turns: moved.turns,
+                below: moved.below,
+                hashes: moved.hashes,
+                bits: Arc::new(bytes_of(&part.name, &moved)?),
+            });
+            continue;
+        }
         let Some((kind, rest)) = part.name.split_once('/') else {
             return Err(invalid(format!("part {} names no kind", part.name)));
         };
@@ -202,6 +321,14 @@ pub(crate) fn decode(parts: Vec<Part>) -> Result<ThreadState, StoreError> {
     for (id, row) in ordered("starts", pieces.starts)? {
         if state.starts.insert(Arc::from(id.as_str()), row).is_some() {
             return Err(invalid(format!("turn {id} starts twice")));
+        }
+    }
+    for (row, id) in ordered("ends", pieces.ends)? {
+        if !state.starts.contains_key(id.as_str()) {
+            return Err(invalid(format!("turn {id} ends in the thread's rows without a start")));
+        }
+        if state.ends.insert((row, Arc::from(id.as_str()))).is_some() {
+            return Err(invalid(format!("turn {id} ends twice at row {row}")));
         }
     }
     let mut turns: BTreeMap<Arc<str>, BTreeMap<u64, Vec<Box<RawValue>>>> = BTreeMap::new();
@@ -260,6 +387,9 @@ fn place(
         }
         "starts" => {
             pieces.starts.insert(index(name, rest)?, parsed(name, body)?);
+        }
+        "ends" => {
+            pieces.ends.insert(index(name, rest)?, parsed(name, body)?);
         }
         "cell" => {
             let Some((cell, session)) = rest.split_once('/') else {

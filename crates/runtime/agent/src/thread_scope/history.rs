@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use nanocode_turnlog::{Event, LogHost, Record};
 
-use super::{adopt, state::ThreadState};
+use super::{
+    adopt,
+    state::{Probe, Probing, ThreadState},
+};
 use crate::durability::{StoreError, facts::StoredFact};
 
 pub type HeldFact = (u64, Option<String>, StoredFact);
@@ -111,6 +114,28 @@ pub async fn events(
         }
     }
     Ok(paging)
+}
+
+pub async fn probe(
+    host: &Arc<dyn LogHost>,
+    scope: &str,
+    probing: &Probing,
+) -> Result<Probe, StoreError> {
+    let rows = if probing.from < probing.to {
+        host.scan(scope, probing.from, probing.to).await?
+    } else {
+        Vec::new()
+    };
+    let mut traced = ThreadState::default();
+    for (seq, body) in rows {
+        for record in nanocode_turnlog::decode(&body)? {
+            traced.traced(&record, seq, &probing.request_id)?;
+        }
+    }
+    Ok(Probe {
+        through: probing.to,
+        turn: traced.turns.get(probing.request_id.as_str()).cloned(),
+    })
 }
 
 pub async fn facts(
