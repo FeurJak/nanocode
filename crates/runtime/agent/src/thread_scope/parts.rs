@@ -84,7 +84,15 @@ pub(crate) fn encode(state: &ThreadState, rows: usize) -> Vec<Part> {
             .map(|id| state.turns.get(id).expect("an admitted turn is resident"))
             .map(AsRef::as_ref),
     );
-    keyed(&mut parts, "start", state.starts.iter());
+    chunked(
+        &mut parts,
+        "starts",
+        rows,
+        state
+            .admitted
+            .values()
+            .filter_map(|id| state.starts.get(id).map(|row| (id.as_ref(), *row))),
+    );
     chunked(&mut parts, "events", rows, state.events.iter().map(AsRef::as_ref));
     chunked(&mut parts, "facts", rows, state.facts.iter().map(AsRef::as_ref));
     chunked(&mut parts, "blobs", rows, state.blobs.iter());
@@ -141,6 +149,7 @@ struct Pieces {
     events: BTreeMap<u64, Vec<KeptEvent>>,
     facts: BTreeMap<u64, Vec<KeptFact>>,
     blobs: BTreeMap<u64, Vec<Digest>>,
+    starts: BTreeMap<u64, Vec<(String, u64)>>,
     models: BTreeMap<(Arc<str>, u64), Vec<Box<RawValue>>>,
 }
 
@@ -190,6 +199,11 @@ pub(crate) fn decode(parts: Vec<Part>) -> Result<ThreadState, StoreError> {
         state.facts.push_back(Arc::new(fact));
     }
     state.blobs = ordered("blobs", pieces.blobs)?.into_iter().collect();
+    for (id, row) in ordered("starts", pieces.starts)? {
+        if state.starts.insert(Arc::from(id.as_str()), row).is_some() {
+            return Err(invalid(format!("turn {id} starts twice")));
+        }
+    }
     let mut turns: BTreeMap<Arc<str>, BTreeMap<u64, Vec<Box<RawValue>>>> = BTreeMap::new();
     for ((turn, at), chunk) in pieces.models {
         turns.entry(turn).or_default().insert(at, chunk);
@@ -243,6 +257,9 @@ fn place(
         }
         "blobs" => {
             pieces.blobs.insert(index(name, rest)?, parsed(name, body)?);
+        }
+        "starts" => {
+            pieces.starts.insert(index(name, rest)?, parsed(name, body)?);
         }
         "cell" => {
             let Some((cell, session)) = rest.split_once('/') else {
@@ -307,9 +324,6 @@ fn keep(
         }
         "logging" => {
             state.logging.insert(key, parsed(name, body)?);
-        }
-        "start" => {
-            state.starts.insert(key, parsed(name, body)?);
         }
         "cached" => {
             state.cached.insert(key, parsed(name, body)?);
