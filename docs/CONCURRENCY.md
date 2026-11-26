@@ -83,6 +83,7 @@ trait Resident           the app's fold: State, Command, Reply, empty, decide(&S
 | A checkpoint writes only the parts that changed | a landed checkpoint sends no part its scope's previous manifest names | `checkpoint_rewrites_unchanged_parts` |
 | A manifest's listing assembles to the parts its state encodes, and its chain stays under a whole listing | the landed manifest's assembled parts equal the encoded ones (`--scenario thread_scope`, whose cells, calls and wakes drop parts), and its changed bytes since the last whole listing are at most the whole listing's size (`--scenario scope`) | `listing_skips_dropped` (thread_scope), `listing_chain_unbounded` (scope) |
 | A forward has a deadline | a forward to a holder that never answers returns before a 1 s watchdog | `forward_waits_unbounded` |
+| A command is decided once per admission | a burst of 3-6 sends to one owner, with its first append held so the rest queue into one batch past `checkpoint_rows`, commits at one epoch only commands its owner decided once: a command that does not fit the batch keeps the rows it decided for the next one, and is decided again only after a refusal or an epoch move sends it to another owner | `deferred_redecided`: the owner decides a deferred command again |
 
 ### The thread log as a resident scope
 

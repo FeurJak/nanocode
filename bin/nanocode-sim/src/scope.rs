@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU32,
     ops::Range,
+    pin::Pin,
     process::ExitCode,
     sync::{
         Arc,
@@ -62,6 +63,8 @@ const STALE_PPM: u64 = 120_000;
 const ABANDON_PPM: u64 = 300_000;
 const OVERSIZE_PPM: u64 = 20_000;
 const DOWN_ROUTE_PPM: u64 = 200_000;
+const BURST_PPM: u64 = 60_000;
+const BURST_SENDS: Range<u64> = 3..7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScopeMutation(Mutation);
@@ -117,6 +120,9 @@ pub struct ScopeStats {
     pub races: u64,
     pub races_refused: u64,
     pub races_missed: u64,
+    pub bursts: u64,
+    pub burst_sends: u64,
+    pub burst_decides_checked: u64,
 }
 
 impl ScopeStats {
@@ -150,6 +156,9 @@ impl ScopeStats {
         self.races += other.races;
         self.races_refused += other.races_refused;
         self.races_missed += other.races_missed;
+        self.bursts += other.bursts;
+        self.burst_sends += other.burst_sends;
+        self.burst_decides_checked += other.burst_decides_checked;
     }
 
     fn runtime(&mut self, stats: &Stats) {
@@ -180,6 +189,7 @@ pub struct Cells(BTreeMap<u8, Bucket>);
 pub struct Add {
     bucket: u8,
     values: Vec<u64>,
+    decided: Arc<AtomicU64>,
 }
 
 struct Buckets;
@@ -214,6 +224,7 @@ impl Resident for Buckets {
     }
 
     fn decide(&self, state: &Cells, add: &Add) -> (Vec<String>, u64) {
+        add.decided.fetch_add(1, Ordering::Relaxed);
         let rows = add
             .values
             .iter()
@@ -632,6 +643,7 @@ fn add(rng: &mut Rng, limit: usize) -> Add {
     Add {
         bucket: u8::try_from(rng.below(u64::from(BUCKETS))).expect("a bucket fits in u8"),
         values: (0..values).map(|_| rng.below(1_000)).collect(),
+        decided: Arc::default(),
     }
 }
 
@@ -710,6 +722,7 @@ fn stall(rng: &mut Rng, world: &World, nodes: &mut [Node], stats: &mut ScopeStat
     let command = Add {
         bucket: u8::try_from(rng.below(u64::from(BUCKETS))).expect("a bucket fits in u8"),
         values: vec![rng.below(1_000)],
+        decided: Arc::default(),
     };
     let mut sending = Box::pin(handle.send(command));
     let stalled = sending
@@ -773,8 +786,99 @@ fn stale(rng: &mut Rng, world: &World, nodes: &mut [Node], stats: &mut ScopeStat
     let command = Add {
         bucket: 0,
         values: vec![rng.below(1_000)],
+        decided: Arc::default(),
     };
     let _ = driven(world, "a stale send", handle.send(command));
+}
+
+fn epoch_of(world: &World, scope: &str) -> Option<u64> {
+    match world.store.fence_row(world.reader.partition(scope)) {
+        Some(Row::Held { epoch, .. } | Row::Released { epoch, .. }) => Some(epoch),
+        None => None,
+    }
+}
+
+async fn all<T>(mut sends: Vec<Pin<Box<dyn Future<Output = T> + '_>>>) -> Vec<T> {
+    let mut answers: Vec<Option<T>> = sends.iter().map(|_| None).collect();
+    std::future::poll_fn(|context| {
+        for (send, answer) in sends.iter_mut().zip(answers.iter_mut()) {
+            if answer.is_none()
+                && let Poll::Ready(value) = send.as_mut().poll(context)
+            {
+                *answer = Some(value);
+            }
+        }
+        if answers.iter().all(Option::is_some) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    answers.into_iter().flatten().collect()
+}
+
+fn burst(rng: &mut Rng, world: &World, nodes: &mut [Node], stats: &mut ScopeStats) {
+    let at = rng.pick(nodes.len());
+    if nodes[at].paused {
+        return;
+    }
+    let scope = world.scopes[rng.pick(world.scopes.len())].clone();
+    let node = &mut nodes[at];
+    let Some(Ok(Reached::Local(handle))) = driven(world, "a get", node.scopes.get(&scope)) else {
+        return;
+    };
+    node.handles.insert(scope.clone(), handle.clone());
+    let before = epoch_of(world, &scope);
+    let signal = Arc::new(Signal::new());
+    node.tap
+        .gate
+        .set(Some((Arc::from(scope.as_str()), Arc::clone(&signal))));
+    let commands: Vec<Add> = (0..rng.range(BURST_SENDS.start, BURST_SENDS.end))
+        .map(|_| Add {
+            bucket: u8::try_from(rng.below(u64::from(BUCKETS))).expect("a bucket fits in u8"),
+            values: (0..=rng.below(VALUES_MAX))
+                .map(|_| rng.below(1_000))
+                .collect(),
+            decided: Arc::default(),
+        })
+        .collect();
+    let counts: Vec<Arc<AtomicU64>> = commands
+        .iter()
+        .map(|command| Arc::clone(&command.decided))
+        .collect();
+    stats.bursts += 1;
+    stats.burst_sends += commands.len() as u64;
+    let mut sends: Vec<Pin<Box<dyn Future<Output = Result<Committed<u64>, ScopeError>> + '_>>> =
+        commands
+            .into_iter()
+            .map(|command| Box::pin(handle.send(command)) as Pin<Box<dyn Future<Output = _>>>)
+            .collect();
+    for send in &mut sends {
+        let _ = send.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+    }
+    signal.fire();
+    node.tap.gate.set(None);
+    let answers = driven(world, "a burst", all(sends)).unwrap_or_default();
+    if before.is_none() || epoch_of(world, &scope) != before {
+        return;
+    }
+    for (answer, count) in answers.iter().zip(&counts) {
+        if answer.is_err() {
+            continue;
+        }
+        stats.burst_decides_checked += 1;
+        let decided = count.load(Ordering::Relaxed);
+        if decided != 1 {
+            flag(
+                &world.wrong,
+                format!(
+                    "decide: a command to {scope} committed at one epoch after its owner decided it {decided} times"
+                ),
+            );
+            return;
+        }
+    }
 }
 
 fn residents(world: &World, node: &Node) -> Vec<(String, u64)> {
@@ -905,6 +1009,7 @@ fn roll(
         STALL_PPM,
         TICK_PPM,
         STALE_PPM,
+        BURST_PPM,
     ]
     .into_iter();
     let mut floor = 0;
@@ -956,6 +1061,9 @@ fn roll(
     } else if band() {
         publish(world, nodes);
         stale(rng, world, nodes, stats);
+    } else if band() {
+        publish(world, nodes);
+        burst(rng, world, nodes, stats);
     } else {
         publish(world, nodes);
         send(rng, world, nodes, stats);
@@ -1136,6 +1244,7 @@ fn prime(
         let command = Add {
             bucket: u8::try_from(rng.below(u64::from(BUCKETS))).expect("a bucket fits in u8"),
             values: (handle.next()..target).map(|_| rng.below(1_000)).collect(),
+            decided: Arc::default(),
         };
         match driven(world, "a send", handle.send(command)) {
             Some(Ok(_)) => stats.committed += 1,
@@ -1170,6 +1279,7 @@ fn forward(
     let command = Add {
         bucket: 0,
         values: vec![rng.below(1_000)],
+        decided: Arc::default(),
     };
     match forwarded(world, &race.scope, &routed, command) {
         Ok(_) => stats.committed += 1,
@@ -1216,6 +1326,7 @@ fn stale_race(
             let command = Add {
                 bucket: 0,
                 values: vec![rng.below(1_000)],
+                decided: Arc::default(),
             };
             let _ = driven(world, "a stale send", handle.send(command));
         }

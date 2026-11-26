@@ -431,6 +431,7 @@ default_table='
 1 canary_scope_checkpoint_rewrites_unchanged_parts canary:16 --scenario scope --mutation checkpoint_rewrites_unchanged_parts
 1 canary_scope_forward_waits_unbounded canary:16 --scenario scope --mutation forward_waits_unbounded
 1 canary_scope_listing_chain_unbounded canary:16 --scenario scope --mutation listing_chain_unbounded
+1 canary_scope_deferred_redecided canary:16 --scenario scope --mutation deferred_redecided
 4 thread_scope pass --scenario thread_scope
 1 thread_scope_twice pass --scenario thread_scope --twice
 1 canary_thread_scope_part_dropped canary:16 --scenario thread_scope --mutation part_dropped

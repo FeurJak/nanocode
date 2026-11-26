@@ -45,6 +45,28 @@ struct Job<F: Resident> {
     reply: oneshot::Sender<Turn<F>>,
 }
 
+struct Decided<F: Resident> {
+    at: u64,
+    bodies: Vec<String>,
+    answer: F::Reply,
+}
+
+struct Pending<F: Resident> {
+    command: F::Command,
+    decided: Option<Decided<F>>,
+    reply: oneshot::Sender<Turn<F>>,
+}
+
+impl<F: Resident> Pending<F> {
+    fn moved(self) {
+        drop(self.reply.send(Turn::Moved(Some(self.command))));
+    }
+
+    fn answer(self, answer: Result<Committed<F::Reply>, ScopeError>) {
+        drop(self.reply.send(Turn::Committed(answer)));
+    }
+}
+
 struct Queued<F: Resident>(Arc<Slot<Job<F>>>);
 
 impl<F: Resident> Clone for Queued<F> {
@@ -392,7 +414,11 @@ impl<F: Resident> Owner<F> {
         let mut batch = Vec::new();
         for job in jobs {
             match job.ask {
-                Ask::Send(command) => batch.push((command, job.reply)),
+                Ask::Send(command) => batch.push(Pending {
+                    command,
+                    decided: None,
+                    reply: job.reply,
+                }),
                 Ask::Read => {
                     drop(job.reply.send(Turn::Read(self.state())));
                 }
@@ -549,7 +575,7 @@ impl<F: Resident> Owner<F> {
     async fn commit(
         &self,
         leading: &mut Leading<'_, F>,
-        mut batch: Vec<(F::Command, oneshot::Sender<Turn<F>>)>,
+        mut batch: Vec<Pending<F>>,
         inner: &Inner<F>,
     ) {
         while !batch.is_empty() {
@@ -572,13 +598,11 @@ impl<F: Resident> Owner<F> {
     async fn commit_once(
         &self,
         leading: &mut Leading<'_, F>,
-        batch: Vec<(F::Command, oneshot::Sender<Turn<F>>)>,
+        batch: Vec<Pending<F>>,
         inner: &Inner<F>,
-    ) -> Vec<(F::Command, oneshot::Sender<Turn<F>>)> {
+    ) -> Vec<Pending<F>> {
         if self.movable(inner) {
-            for (command, reply) in batch {
-                drop(reply.send(Turn::Moved(Some(command))));
-            }
+            batch.into_iter().for_each(Pending::moved);
             return Vec::new();
         }
         let limit = inner.policy.checkpoint_rows;
@@ -591,8 +615,8 @@ impl<F: Resident> Owner<F> {
         if core.since >= limit
             && let Err(error) = self.checkpoint(core, inner).await
         {
-            for (_, reply) in batch {
-                drop(reply.send(Turn::Committed(Err(error.clone()))));
+            for pending in batch {
+                pending.answer(Err(error.clone()));
             }
             return Vec::new();
         }
@@ -602,25 +626,44 @@ impl<F: Resident> Owner<F> {
         let mut rows: Vec<(u64, String)> = Vec::new();
         let mut answers = Vec::new();
         let mut rest = Vec::new();
-        for (command, reply) in batch {
+        for mut pending in batch {
             if !rest.is_empty() {
-                rest.push((command, reply));
+                rest.push(pending);
                 continue;
             }
-            let (bodies, answer) = inner.fold.decide(&working, &command);
-            if bodies.len() > limit {
+            let decided = match pending.decided.take() {
+                Some(decided) if !sim::mutated(Mutation::DeferredRedecided) => {
+                    assert_eq!(
+                        decided.at, next,
+                        "scope {} commits a deferred command at the row it was decided at",
+                        self.scope
+                    );
+                    decided
+                }
+                Some(_) | None => {
+                    let (bodies, answer) = inner.fold.decide(&working, &pending.command);
+                    Decided {
+                        at: next,
+                        bodies,
+                        answer,
+                    }
+                }
+            };
+            if decided.bodies.len() > limit {
                 let bound = ScopeError::Bound {
                     bound: "checkpoint_rows",
                     limit,
-                    asked: bodies.len(),
+                    asked: decided.bodies.len(),
                 };
-                drop(reply.send(Turn::Committed(Err(bound))));
+                pending.answer(Err(bound));
                 continue;
             }
-            if rows.len() + bodies.len() > room {
-                rest.push((command, reply));
+            if rows.len() + decided.bodies.len() > room {
+                pending.decided = Some(decided);
+                rest.push(pending);
                 continue;
             }
+            let Decided { bodies, answer, .. } = decided;
             for body in bodies {
                 if let Err(error) = inner.fold.apply(&mut working, next, &body) {
                     panic!(
@@ -631,7 +674,7 @@ impl<F: Resident> Owner<F> {
                 rows.push((next, body));
                 next += 1;
             }
-            answers.push((reply, next, answer));
+            answers.push((pending.reply, next, answer));
         }
         if rows.is_empty() {
             for (reply, seq, answer) in answers {
@@ -640,8 +683,8 @@ impl<F: Resident> Owner<F> {
             if !rest.is_empty()
                 && let Err(error) = self.checkpoint(core, inner).await
             {
-                for (_, reply) in rest {
-                    drop(reply.send(Turn::Committed(Err(error.clone()))));
+                for pending in rest {
+                    pending.answer(Err(error.clone()));
                 }
                 return Vec::new();
             }
@@ -670,9 +713,7 @@ impl<F: Resident> Owner<F> {
             for (reply, _, _) in answers {
                 drop(reply.send(Turn::Committed(Err(error.clone()))));
             }
-            for (command, reply) in rest {
-                drop(reply.send(Turn::Moved(Some(command))));
-            }
+            rest.into_iter().for_each(Pending::moved);
             return Vec::new();
         }
         let Some(core) = leading.core.as_mut() else {
