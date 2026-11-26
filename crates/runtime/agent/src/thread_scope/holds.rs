@@ -13,7 +13,7 @@ use nanocode_turnlog::{
 };
 use serde_json::{json, value::RawValue};
 
-use super::{Staged, ThreadLog, ThreadState, facts::refused, sim};
+use super::{Staged, ThreadLog, facts::refused, sim};
 use crate::{
     durability::{
         StoreError,
@@ -40,12 +40,6 @@ struct Gated {
     turn: Option<String>,
 }
 
-fn logs_facts(state: &ThreadState, session: &str) -> bool {
-    state
-        .facts()
-        .any(|(_, kept)| kept.state.as_deref() == Some(session))
-}
-
 fn gated(staged: &mut Staged, call: &Gated) -> Result<Result<(), String>, StoreError> {
     let state = staged.state();
     match state.intent(&call.call_id).map(|open| open.tool.as_str()) {
@@ -56,7 +50,7 @@ fn gated(staged: &mut Staged, call: &Gated) -> Result<Result<(), String>, StoreE
             )));
         }
         Some(_) => return Ok(Ok(())),
-        None if logs_facts(state, &call.session_id) => {
+        None if state.logs_facts(&call.session_id) => {
             return Ok(Err(format!(
                 "call {} to {} has no durable intent, and session {} commits one before each external call",
                 call.call_id, call.tool, call.session_id

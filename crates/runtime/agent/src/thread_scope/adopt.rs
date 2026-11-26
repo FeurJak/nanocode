@@ -15,8 +15,9 @@ use nanocode_turnlog::{
 use serde_json::value::RawValue;
 
 use super::{
+    history::{HeldFact, Paging},
     sim::{self, Mutation},
-    state::{KeptFact, ThreadState, invalid},
+    state::{Legacy, ThreadState, invalid},
 };
 use crate::durability::{
     StoreError, StoreFuture,
@@ -28,11 +29,28 @@ pub(crate) const RETIRED_DIGEST: &str = "retired:";
 struct Counted {
     log: Arc<dyn LogHost>,
     loaded: Slot<Vec<(u64, String)>>,
+    below: u64,
     rows: AtomicU64,
     bytes: AtomicU64,
 }
 
 impl Counted {
+    fn new(log: &Arc<dyn LogHost>, below: u64) -> Self {
+        Self {
+            log: Arc::clone(log),
+            loaded: Slot::new(None),
+            below,
+            rows: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+        }
+    }
+
+    fn kept(&self, mut rows: Vec<(u64, String)>) -> Vec<(u64, String)> {
+        rows.retain(|(seq, _)| *seq < self.below);
+        self.count(&rows);
+        rows
+    }
+
     fn count(&self, rows: &[(u64, String)]) {
         let bytes: usize = rows.iter().map(|(_, body)| body.len()).sum();
         self.rows.fetch_add(rows.len() as u64, Ordering::Relaxed);
@@ -56,9 +74,11 @@ impl LogHost for Counted {
         to: u64,
     ) -> StoreFuture<'a, Result<Vec<(u64, String)>, StoreError>> {
         Box::pin(async move {
-            let rows = self.log.scan(scope, from, to).await?;
-            self.count(&rows);
-            Ok(rows)
+            let to = to.min(self.below);
+            if from >= to {
+                return Ok(Vec::new());
+            }
+            Ok(self.kept(self.log.scan(scope, from, to).await?))
         })
     }
 
@@ -68,10 +88,7 @@ impl LogHost for Counted {
     ) -> StoreFuture<'a, Result<Vec<ScopeRows>, StoreError>> {
         Box::pin(async move {
             let scanned = self.log.scans(scans).await?;
-            for rows in &scanned {
-                self.count(rows);
-            }
-            Ok(scanned)
+            Ok(scanned.into_iter().map(|rows| self.kept(rows)).collect())
         })
     }
 
@@ -83,9 +100,7 @@ impl LogHost for Counted {
             if let Some(rows) = self.loaded.take() {
                 return Ok(rows);
             }
-            let rows = self.log.load(scope).await?;
-            self.count(&rows);
-            Ok(rows)
+            Ok(self.kept(self.log.load(scope).await?))
         })
     }
 
@@ -150,7 +165,7 @@ impl LogHost for Counted {
 
 fn plain(rows: &[(u64, String)]) -> bool {
     let mut state = ThreadState::default();
-    rows.iter().all(|(seq, row)| state.load(*seq, row).is_ok())
+    rows.iter().all(|(seq, row)| state.load(*seq, row, rows.len().max(1)).is_ok())
 }
 
 type Facts = Vec<(u64, Option<String>, StoredFact)>;
@@ -159,7 +174,6 @@ struct View {
     turns: Vec<Turn>,
     retired: Vec<(String, Retired)>,
     retired_count: usize,
-    digests: Vec<(BlobRef, Option<Digest>)>,
     cells: Vec<(String, u64, Vec<Box<RawValue>>)>,
     checkpoints: Vec<(String, Checkpoint)>,
     stored: Vec<(String, String)>,
@@ -178,7 +192,7 @@ fn owned<'a, V: Clone + 'a>(values: impl Iterator<Item = (&'a str, &'a V)>) -> V
 }
 
 impl View {
-    fn of(fold: &Fold, ids: &BTreeSet<String>, blobs: &[BlobRef]) -> Self {
+    fn of(fold: &Fold, ids: &BTreeSet<String>) -> Self {
         let retired = ids
             .iter()
             .filter(|id| fold.turn(id).is_none())
@@ -191,10 +205,6 @@ impl View {
             turns: fold.turns().to_vec(),
             retired,
             retired_count: fold.retired_turns(),
-            digests: blobs
-                .iter()
-                .map(|blob| (*blob, fold.values().digest(*blob).copied()))
-                .collect(),
             cells: fold
                 .cells()
                 .map(|(session, cell, updates)| (session.to_owned(), cell, updates.to_vec()))
@@ -319,7 +329,7 @@ fn turns(state: &mut ThreadState, view: &mut View, events: &[Event]) -> Result<(
     Ok(())
 }
 
-fn events(state: &mut ThreadState, events: Vec<Event>) -> Result<(), StoreError> {
+fn events(events: &[Event], last_event: u64) -> Result<(), StoreError> {
     for pair in events.windows(2) {
         if pair[1].seq <= pair[0].seq {
             return Err(invalid(format!(
@@ -328,15 +338,18 @@ fn events(state: &mut ThreadState, events: Vec<Event>) -> Result<(), StoreError>
             )));
         }
     }
-    state.events = events.into_iter().map(Arc::new).collect();
+    if let Some(last) = events.last()
+        && last.seq > last_event
+    {
+        return Err(invalid(format!(
+            "the turn log answers event {} past its last event {last_event}",
+            last.seq
+        )));
+    }
     Ok(())
 }
 
-fn facts(
-    state: &mut ThreadState,
-    facts: &Facts,
-    values: &BTreeMap<u32, Box<RawValue>>,
-) -> Result<(), StoreError> {
+fn facts(state: &mut ThreadState, facts: &Facts) -> Result<(), StoreError> {
     for (seq, owner, fact) in facts {
         if *seq != state.next_fact() {
             return Err(invalid(format!(
@@ -344,12 +357,11 @@ fn facts(
                 state.next_fact() - 1
             )));
         }
-        let fact = inlined(*seq, fact, values)?;
-        state.index_blob(&fact);
-        state.facts.push_back(Arc::new(KeptFact {
-            fact,
-            state: owner.clone(),
-        }));
+        state.index_blob(fact);
+        if let Some(owner) = owner {
+            state.logged(owner, *seq);
+        }
+        state.fact_base = *seq;
     }
     Ok(())
 }
@@ -419,17 +431,73 @@ async fn values(
     Ok(values)
 }
 
+async fn opened(
+    log: &Arc<dyn LogHost>,
+    scope: &str,
+    legacy: Legacy,
+) -> Result<TurnLog, StoreError> {
+    let counted = Arc::new(Counted::new(log, legacy.next));
+    let opened = TurnLog::open(counted as Arc<dyn LogHost>, scope).await?;
+    let next = opened.load_all().await?;
+    if next != legacy.next {
+        return Err(invalid(format!(
+            "the turn log history of {scope} ends at row {next}, not at row {} where the thread adopted it",
+            legacy.next
+        )));
+    }
+    Ok(opened)
+}
+
+pub(super) async fn legacy_events(
+    log: &Arc<dyn LogHost>,
+    scope: &str,
+    legacy: Legacy,
+    after: u64,
+    paging: Paging,
+) -> Result<Paging, StoreError> {
+    let last = legacy.last_event;
+    opened(log, scope, legacy)
+        .await?
+        .history(after, paging, move |paging: &mut Paging, event| {
+            event.seq <= last && paging.take(event)
+        })
+        .await
+}
+
+pub(super) async fn legacy_facts(
+    log: &Arc<dyn LogHost>,
+    scope: &str,
+    legacy: Legacy,
+    after: u64,
+) -> Result<Vec<HeldFact>, StoreError> {
+    let opened = opened(log, scope, legacy).await?;
+    let last = legacy.last_fact;
+    let read = opened
+        .facts_from(after, Vec::new(), move |facts: &mut Facts, seq, owner, fact| {
+            if seq > after && seq <= last {
+                facts.push((seq, owner.map(str::to_owned), fact.clone()));
+            }
+        })
+        .await?;
+    let refs = blob_refs(&read);
+    let digests = opened
+        .read(move |fold| {
+            refs.iter()
+                .map(|blob| (*blob, fold.values().digest(*blob).copied()))
+                .collect::<Vec<_>>()
+        })
+        .await;
+    let values = values(&opened, &digests).await?;
+    read.into_iter()
+        .map(|(seq, owner, fact)| Ok((seq, owner, inlined(seq, &fact, &values)?)))
+        .collect()
+}
+
 pub(super) async fn adopt(
     log: &Arc<dyn LogHost>,
     scope: &str,
-    part_rows: usize,
 ) -> Result<Option<Adopted<ThreadState>>, StoreError> {
-    let counted = Arc::new(Counted {
-        log: Arc::clone(log),
-        loaded: Slot::new(None),
-        rows: AtomicU64::new(0),
-        bytes: AtomicU64::new(0),
-    });
+    let counted = Arc::new(Counted::new(log, u64::MAX));
     let loaded = log.load(scope).await?;
     counted.count(&loaded);
     if loaded.is_empty() || plain(&loaded) {
@@ -449,22 +517,24 @@ pub(super) async fn adopt(
             facts.push((seq, owner.map(str::to_owned), fact.clone()));
         })
         .await?;
-    let refs = blob_refs(&read);
     let ids: BTreeSet<String> = history
         .iter()
         .filter_map(|event| event.turn.clone())
         .collect();
-    let mut view = legacy.read(move |fold| View::of(fold, &ids, &refs)).await;
-    let values = values(&legacy, &view.digests).await?;
+    let (mut view, last_event) = legacy
+        .read(move |fold| (View::of(fold, &ids), fold.last_event()))
+        .await;
     let mut state = ThreadState::default();
     turns(&mut state, &mut view, &history)?;
-    events(&mut state, history)?;
-    facts(&mut state, &read, &values)?;
+    events(&history, last_event)?;
+    facts(&mut state, &read)?;
     keep(&mut state, view);
-    state.bytes = super::parts::encode(&state, part_rows)
-        .iter()
-        .map(|part| part.body.len())
-        .sum();
+    state.last_event = last_event;
+    state.legacy = Some(Legacy {
+        next,
+        last_event,
+        last_fact: state.fact_base,
+    });
     Ok(Some(Adopted {
         state,
         next,

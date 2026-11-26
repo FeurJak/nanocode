@@ -17,7 +17,7 @@ use nanocode::{
     session_host::{LogEntry, Submission, TurnState},
     turnlog::{
         ThreadCommand, ThreadFacts, ThreadFold, ThreadLog, ThreadLogs, ThreadPolicy, ThreadReply,
-        ThreadState,
+        ThreadState, thread_history,
         thread_scope_sim::{self, Mutation},
     },
 };
@@ -68,6 +68,9 @@ const JOB_PPM: u64 = 150_000;
 const FACT_LOG_PPM: u64 = 100_000;
 const FACT_BLOB_PPM: u64 = 300_000;
 const FACT_STATES: u64 = 2;
+const STAGED_PPM: u64 = 150_000;
+const STAGED_CRASH_PPM: u64 = 300_000;
+const EVENTS_AHEAD: Range<u64> = 0..6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadScopeMutation(Mutation, ScopeMutation);
@@ -114,6 +117,12 @@ pub struct ThreadScopeStats {
     pub hold_settles: u64,
     pub wake_ops: u64,
     pub over_foreign: u64,
+    pub staged: u64,
+    pub staged_crashes: u64,
+    pub window_checks: u64,
+    pub claim_bytes_max: u64,
+    pub claim_rows_max: u64,
+    pub history_bytes_max: u64,
     pub seeds: u64,
     pub steps: u64,
     pub sends: u64,
@@ -156,6 +165,12 @@ impl ThreadScopeStats {
         self.hold_settles += other.hold_settles;
         self.wake_ops += other.wake_ops;
         self.over_foreign += other.over_foreign;
+        self.staged += other.staged;
+        self.staged_crashes += other.staged_crashes;
+        self.window_checks += other.window_checks;
+        self.claim_bytes_max = self.claim_bytes_max.max(other.claim_bytes_max);
+        self.claim_rows_max = self.claim_rows_max.max(other.claim_rows_max);
+        self.history_bytes_max = self.history_bytes_max.max(other.history_bytes_max);
         self.seeds += other.seeds;
         self.steps += other.steps;
         self.sends += other.sends;
@@ -241,6 +256,7 @@ pub(crate) struct World {
     witness: Arc<MemoryCheckpoints<ModelParts>>,
     net: Arc<Net>,
     reader: PartedLog<ModelParts>,
+    host: Arc<dyn LogHost>,
     fold: ThreadFold,
     thread: ThreadPolicy,
     policy: Policy,
@@ -248,6 +264,8 @@ pub(crate) struct World {
     threads: Vec<String>,
     legacy: BTreeMap<String, (Legacy, View)>,
     bases: RefCell<BTreeMap<String, (u64, ThreadState)>>,
+    answered: RefCell<BTreeMap<String, BTreeMap<u64, String>>>,
+    notes: Cell<u64>,
     gone: Cell<(u64, u64)>,
     pub(crate) wrong: Wrong,
 }
@@ -282,6 +300,12 @@ impl World {
     pub(crate) fn foreign(&self, thread: &str, seq: u64, records: &[Record]) -> Result<(), StoreError> {
         let row = nanocode_turnlog::encode(records)?;
         block_on(self.reader.append(thread, &[(seq, row)]))
+    }
+
+    fn note(&self) -> u64 {
+        let note = self.notes.get() + 1;
+        self.notes.set(note);
+        note
     }
 
     fn rows(&self, thread: &str) -> Vec<(u64, String)> {
@@ -649,8 +673,36 @@ fn fact_log(
     }
 }
 
+fn answer(world: &World, thread: &str, seq: u64, body: &serde_json::Value) {
+    world
+        .answered
+        .borrow_mut()
+        .entry(thread.to_owned())
+        .or_default()
+        .insert(seq, body.to_string());
+}
+
+fn staged(rng: &mut Rng, world: &World, log: &ThreadLog, thread: &str, stats: &mut ThreadScopeStats) -> bool {
+    let body = json!({ "type": "staged", "n": world.note() });
+    let event = raw(&body);
+    let at = rng.below(1_000_000);
+    let ran = log.job_staged(move |staged| staged.event(at, None, event.clone()));
+    stats.sends += 1;
+    match driven(world, "a staged job", ran) {
+        Some(Ok(seq)) => {
+            stats.staged += 1;
+            answer(world, thread, seq, &body);
+            rng.chance(STAGED_CRASH_PPM)
+        }
+        Some(Err(_)) | None => {
+            stats.refused += 1;
+            false
+        }
+    }
+}
+
 fn job(rng: &mut Rng, world: &World, log: &ThreadLog, thread: &str, stats: &mut ThreadScopeStats) {
-    let note = rng.below(1_000_000);
+    let note = world.note();
     let at = rng.below(1_000_000);
     let routed = log.state().is_none();
     let ran = log.job(move |staged| {
@@ -671,6 +723,7 @@ fn job(rng: &mut Rng, world: &World, log: &ThreadLog, thread: &str, stats: &mut 
         Some(Ok((event, fact))) => {
             stats.committed += 1;
             stats.jobs += 1;
+            answer(world, thread, event, &json!({ "type": "job", "n": note }));
             if !job_landed(world, thread, note, event, fact) {
                 flag(
                     &world.wrong,
@@ -691,29 +744,32 @@ fn send(
     nodes: &mut [Node],
     turns: &mut BTreeMap<String, u64>,
     stats: &mut ThreadScopeStats,
-) {
+) -> Option<usize> {
     let at = rng.pick(nodes.len());
     let thread = world.threads[rng.pick(world.threads.len())].clone();
-    let Some(reached) = driven(world, "a get", nodes[at].logs.get(&thread)) else {
-        return;
-    };
+    let reached = driven(world, "a get", nodes[at].logs.get(&thread))?;
     let Ok(log) = reached else {
         stats.refused += 1;
-        return;
+        return None;
     };
     if log.state().is_some() {
         adopted(world, &thread, stats);
     }
     if rng.chance(FACT_LOG_PPM) {
         fact_log(rng, world, log, &thread, stats);
-        return;
+        return None;
+    }
+    if log.state().is_some() && rng.chance(STAGED_PPM) {
+        let crash = staged(rng, world, &log, &thread, stats);
+        nodes[at].handles.insert(thread, log);
+        return crash.then_some(at);
     }
     if rng.chance(JOB_PPM) {
         job(rng, world, &log, &thread, stats);
         if log.state().is_some() {
             nodes[at].handles.insert(thread, log);
         }
-        return;
+        return None;
     }
     let state = log.state();
     let counter = turns.entry(thread.clone()).or_insert(0);
@@ -726,6 +782,7 @@ fn send(
     if log.state().is_some() {
         nodes[at].handles.insert(thread, log);
     }
+    None
 }
 
 fn resident(world: &World, nodes: &[Node], stats: &mut ThreadScopeStats) {
@@ -808,8 +865,24 @@ fn adopted(world: &World, thread: &str, stats: &mut ThreadScopeStats) {
             return;
         }
     };
+    let paging = thread_history::Paging::new(None, usize::MAX, None);
+    let events = driven(
+        world,
+        "an adopted history read",
+        thread_history::events(&world.host, thread, &state, 0, paging),
+    );
+    let facts = driven(
+        world,
+        "an adopted fact read",
+        thread_history::facts(&world.host, thread, &state, 0, None),
+    );
+    let (Some(Ok(events)), Some(Ok(facts))) = (events, facts) else {
+        flag(&world.wrong, format!("the adopted history of {thread} does not read back"));
+        return;
+    };
     stats.adopted_checks += 1;
-    if let Some(difference) = threadlegacy::differs(theirs, &threadlegacy::ours(&state, legacy)) {
+    let ours = threadlegacy::ours(&state, legacy, &events.events, &facts);
+    if let Some(difference) = threadlegacy::differs(theirs, &ours) {
         flag(
             &world.wrong,
             format!("the adopted state of {thread} differs from its turn log's own view: {difference}"),
@@ -822,12 +895,102 @@ fn adopted(world: &World, thread: &str, stats: &mut ThreadScopeStats) {
         .insert(thread.to_owned(), (first.seq, state));
 }
 
-fn cold(world: &World, thread: &str) -> Option<Result<ThreadState, String>> {
+fn records(rows: &[(u64, String)], from: u64, to: u64) -> Vec<Record> {
+    rows.iter()
+        .filter(|(seq, _)| (from..to).contains(seq))
+        .flat_map(|(_, body)| nanocode_turnlog::decode(body).unwrap_or_default())
+        .collect()
+}
+
+fn bounded(world: &World, thread: &str, manifest: &Manifest, state: &ThreadState, stats: &mut ThreadScopeStats) {
+    let rows = world.rows(thread);
+    let recent = world.thread.recent_rows as u64;
+    let floor = state.legacy().map_or(0, |legacy| legacy.next);
+    let from = manifest.seq.saturating_sub(recent).max(floor);
+    let window = records(&rows, from, manifest.seq);
+    let events: Vec<u64> = window
+        .iter()
+        .filter_map(|record| match record {
+            Record::Event { seq, .. } => Some(*seq),
+            _ => None,
+        })
+        .collect();
+    let facts: Vec<u64> = window
+        .iter()
+        .filter_map(|record| match record {
+            Record::Fact { seq, .. } => Some(*seq),
+            _ => None,
+        })
+        .collect();
+    let held: Vec<u64> = state.events().map(|event| event.seq).collect();
+    let kept: Vec<u64> = state.facts().map(|(seq, _)| seq).collect();
+    stats.window_checks += 1;
+    if held != events || kept != facts {
+        flag(
+            &world.wrong,
+            format!(
+                "the checkpoint of {thread} at row {} holds events {held:?} and facts {kept:?}, but its last {recent} rows hold events {events:?} and facts {facts:?}",
+                manifest.seq
+            ),
+        );
+        return;
+    }
+    let tail = rows.iter().filter(|(seq, _)| *seq >= manifest.seq);
+    let (tail_rows, tail_bytes) = tail.fold((0_u64, 0_u64), |(count, bytes), (_, body)| {
+        (count + 1, bytes + body.len() as u64)
+    });
+    if tail_rows > world.policy.checkpoint_rows as u64 {
+        flag(
+            &world.wrong,
+            format!(
+                "a cold claim of {thread} reads {tail_rows} rows past its checkpoint at row {}, more than checkpoint_rows {}",
+                manifest.seq, world.policy.checkpoint_rows
+            ),
+        );
+        return;
+    }
+    let digests: Vec<String> = manifest.parts.iter().map(|(_, at)| at.clone()).collect();
+    let part_bytes: u64 = block_on(world.witness.parts(&digests))
+        .map(|found| found.iter().map(|(_, body)| body.len() as u64).sum())
+        .unwrap_or(0);
+    let history: u64 = rows.iter().map(|(_, body)| body.len() as u64).sum();
+    stats.claim_bytes_max = stats.claim_bytes_max.max(part_bytes + tail_bytes);
+    stats.claim_rows_max = stats.claim_rows_max.max(tail_rows);
+    stats.history_bytes_max = stats.history_bytes_max.max(history);
+}
+
+fn renumbered(world: &World, thread: &str) {
+    let answered = world.answered.borrow();
+    let Some(answered) = answered.get(thread) else {
+        return;
+    };
+    let rows = world.rows(thread);
+    for record in records(&rows, 0, u64::MAX) {
+        let Record::Event { event, seq, .. } = record else {
+            continue;
+        };
+        if let Some(body) = answered.get(&seq)
+            && body != event.get()
+        {
+            flag(
+                &world.wrong,
+                format!(
+                    "event {seq} of {thread} was answered to its writer as {body}, but the thread committed {} there",
+                    event.get()
+                ),
+            );
+            return;
+        }
+    }
+}
+
+fn cold(world: &World, thread: &str, stats: &mut ThreadScopeStats) -> Option<Result<ThreadState, String>> {
     let manifest = world.witness.manifests(thread).last().cloned()?;
     let mut state = match decoded(world, &manifest) {
         Ok(state) => state,
         Err(error) => return Some(Err(error)),
     };
+    bounded(world, thread, &manifest, &state, stats);
     for (seq, row) in world
         .rows(thread)
         .iter()
@@ -845,7 +1008,8 @@ fn colds(world: &World, stats: &mut ThreadScopeStats) {
         if !world.witness.manifests(thread).is_empty() {
             adopted(world, thread, stats);
         }
-        let Some(loaded) = cold(world, thread) else {
+        renumbered(world, thread);
+        let Some(loaded) = cold(world, thread, stats) else {
             continue;
         };
         stats.cold_checks += 1;
@@ -910,10 +1074,16 @@ fn legacy(world: &World, stats: &mut ThreadScopeStats) {
             .turns()
             .map(|turn| (turn.id.clone(), phase(&turn.phase), turn.digest.clone(), turn.first))
             .collect();
-        let events = |seqs: Vec<u64>| seqs;
+        let first = ours.events().next().map_or(u64::MAX, |event| event.seq);
+        let recent: Vec<u64> = fold
+            .events()
+            .iter()
+            .map(|event| event.seq)
+            .filter(|seq| *seq >= first)
+            .collect();
         let same = theirs == mine
-            && events(fold.events().iter().map(|event| event.seq).collect())
-                == events(ours.events().map(|event| event.seq).collect())
+            && fold.last_event() <= ours.last_event()
+            && recent == ours.events().map(|event| event.seq).collect::<Vec<_>>()
             && fold
                 .cells()
                 .map(|(session, cell, updates)| (session.to_owned(), cell, updates.len()))
@@ -970,6 +1140,20 @@ fn recovered_ours(state: &ThreadState) -> Recovered {
     )
 }
 
+fn crash(world: &World, nodes: &mut Vec<Node>, at: usize, generation: &mut u64, stats: &mut ThreadScopeStats) {
+    let gone = nodes.remove(at);
+    let runtime = gone.logs.scopes().stats();
+    let (adoptions, rows) = world.gone.get();
+    world
+        .gone
+        .set((adoptions + runtime.adoptions, rows + runtime.adoption_rows));
+    stats.crashes += 1;
+    *generation += 1;
+    nodes.push(world.node(&format!("n{at}g{generation}")));
+    drop(gone);
+    publish(world, nodes);
+}
+
 fn step(
     rng: &mut Rng,
     world: &World,
@@ -984,17 +1168,7 @@ fn step(
         .fetch_add(rng.below(TICK_MS_MAX), Ordering::Relaxed);
     if rng.chance(CRASH_PPM) && nodes.len() > 1 {
         let at = rng.pick(nodes.len());
-        let gone = nodes.remove(at);
-        let runtime = gone.logs.scopes().stats();
-        let (adoptions, rows) = world.gone.get();
-        world
-            .gone
-            .set((adoptions + runtime.adoptions, rows + runtime.adoption_rows));
-        stats.crashes += 1;
-        *generation += 1;
-        nodes.push(world.node(&format!("n{at}g{generation}")));
-        drop(gone);
-        publish(world, nodes);
+        crash(world, nodes, at, generation, stats);
     } else if rng.chance(RELEASE_PPM) {
         let at = rng.pick(nodes.len());
         let part = nanocode_partitions::Partition(u32::try_from(rng.below(u64::from(PARTS))).expect("a partition fits"));
@@ -1004,8 +1178,9 @@ fn step(
     } else if rng.chance(TICK_PPM) {
         let at = rng.pick(nodes.len());
         driven(world, "a tick", nodes[at].logs.scopes().tick());
-    } else {
-        send(rng, world, nodes, turns, stats);
+    } else if let Some(at) = send(rng, world, nodes, turns, stats) {
+        stats.staged_crashes += 1;
+        crash(world, nodes, at, generation, stats);
     }
     for node in nodes.iter() {
         driven(world, "a renewal", node.logs.scopes().renew());
@@ -1033,12 +1208,6 @@ fn world(rng: &mut Rng, time: &Arc<Clock>) -> World {
         Arc::new(ModelParts::new().with_clock(Arc::new(move || clock.load(Ordering::Relaxed))));
     let count = NonZeroU32::new(PARTS).expect("partitions are counted from one");
     block_on(store.migrate(count)).expect("the model store migrates");
-    let thread = ThreadPolicy {
-        part_rows: usize::try_from(rng.range(PART_ROWS.start, PART_ROWS.end))
-            .expect("a part bound fits"),
-        finished_max: None,
-        row_bytes_max: None,
-    };
     let policy = Policy {
         checkpoint_rows: usize::try_from(rng.range(CHECKPOINT_ROWS.start, CHECKPOINT_ROWS.end))
             .expect("a row bound fits"),
@@ -1047,6 +1216,15 @@ fn world(rng: &mut Rng, time: &Arc<Clock>) -> World {
             .expect("a byte bound fits"),
         forward_ms: FORWARD_MS,
     };
+    let rows = policy.checkpoint_rows as u64;
+    let thread = ThreadPolicy {
+        part_rows: usize::try_from(rng.range(PART_ROWS.start, PART_ROWS.end))
+            .expect("a part bound fits"),
+        finished_max: None,
+        row_bytes_max: None,
+        recent_rows: usize::try_from(rng.range(rows, 2 * rows + 1)).expect("a row bound fits"),
+        events_ahead: rng.range(EVENTS_AHEAD.start, EVENTS_AHEAD.end),
+    };
     World {
         time: Arc::clone(time),
         db,
@@ -1054,6 +1232,7 @@ fn world(rng: &mut Rng, time: &Arc<Clock>) -> World {
         witness: Arc::new(MemoryCheckpoints::new(Arc::clone(&store))),
         net: Arc::new(Net::default()),
         reader: PartedLog::new(Arc::clone(&store), count),
+        host: Arc::new(PartedLog::new(Arc::clone(&store), count)),
         fold: ThreadFold::new(thread),
         thread,
         policy,
@@ -1063,6 +1242,8 @@ fn world(rng: &mut Rng, time: &Arc<Clock>) -> World {
             .collect(),
         legacy: BTreeMap::new(),
         bases: RefCell::default(),
+        answered: RefCell::default(),
+        notes: Cell::new(0),
         gone: Cell::new((0, 0)),
         wrong: Arc::default(),
     }

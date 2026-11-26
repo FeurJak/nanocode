@@ -4,7 +4,7 @@ use nanocode_scope::ScopeError;
 use nanocode_turnlog::{CachedAt, Record, cache_key};
 use serde_json::value::RawValue;
 
-use super::{Staged, ThreadLog, ThreadState, sim};
+use super::{Staged, ThreadLog, ThreadState, history, sim};
 use crate::{
     durability::{
         StoreError, StoreFuture,
@@ -90,20 +90,54 @@ fn wanted(
 fn replayed(
     state: &ThreadState,
     scope: &FactScope,
+    older: Option<&(u64, Vec<(u64, StoredFact)>)>,
     after: u64,
-    snapshot: Option<Snapshot>,
 ) -> Result<Replay, StoreError> {
-    let facts: Vec<(u64, StoredFact)> = state
-        .facts_after(after)
-        .filter(|(_, kept)| in_scope(scope, kept.state.as_deref(), &kept.fact))
-        .map(|(seq, kept)| (seq, kept.fact.clone()))
-        .collect();
+    let (after, mut facts) = match older {
+        Some((through, older)) => {
+            if state.fact_base() > *through {
+                return Err(StoreError::NotCommitted(format!(
+                    "the thread keeps facts from {} on, past the facts up to {through} this append read from its history; replay and append again",
+                    state.fact_base() + 1
+                )));
+            }
+            (*through, older.clone())
+        }
+        None => (after, Vec::new()),
+    };
+    if after < state.fact_base() {
+        return Err(StoreError::NotCommitted(format!(
+            "an append after fact {after} needs facts the thread keeps only in its history, from {} on",
+            after + 1
+        )));
+    }
+    facts.extend(
+        state
+            .facts_after(after)
+            .filter(|(_, kept)| in_scope(scope, kept.state.as_deref(), &kept.fact))
+            .map(|(seq, kept)| (seq, kept.fact.clone())),
+    );
     let blobs = wanted(state, &facts)?;
     Ok(Replay {
-        snapshot,
+        snapshot: None,
         facts,
         blobs,
     })
+}
+
+async fn read(
+    log: &ThreadLog,
+    state: &ThreadState,
+    scope: &FactScope,
+    after: u64,
+    from: Option<u64>,
+) -> Result<Vec<(u64, StoredFact)>, StoreError> {
+    Ok(history::facts(&log.host, &log.scope, state, after, from)
+        .await?
+        .into_iter()
+        .filter(|(_, held, fact)| in_scope(scope, held.as_deref(), fact))
+        .map(|(seq, _, fact)| (seq, fact))
+        .collect())
 }
 
 fn cached(state: &ThreadState, scope: &FactScope) -> Result<Option<Snapshot>, StoreError> {
@@ -140,9 +174,43 @@ impl Scoped {
     }
 }
 
+impl Scoped {
+    async fn replayed(
+        &self,
+        state: &ThreadState,
+        snapshot: Option<Snapshot>,
+    ) -> Result<Replay, StoreError> {
+        let after = snapshot.as_ref().map_or(0, |snapshot| snapshot.seq);
+        let from = snapshot
+            .as_ref()
+            .and_then(|_| state.cached_row(&self.scope.state));
+        let facts = read(&self.log, state, &self.scope, after, from).await?;
+        let blobs = wanted(state, &facts)?;
+        Ok(Replay {
+            snapshot,
+            facts,
+            blobs,
+        })
+    }
+
+    async fn older(&self, after: u64) -> Result<Option<(u64, Vec<(u64, StoredFact)>)>, StoreError> {
+        let state = self.state()?;
+        let through = state.fact_base();
+        if after >= through {
+            return Ok(None);
+        }
+        let from = cached(&state, &self.scope)?
+            .filter(|snapshot| snapshot.seq <= after)
+            .and_then(|_| state.cached_row(&self.scope.state));
+        let mut older = read(&self.log, &state, &self.scope, after, from).await?;
+        older.retain(|(seq, _)| *seq <= through);
+        Ok(Some((through, older)))
+    }
+}
+
 impl FactLog for Scoped {
     fn replay(&self) -> StoreFuture<'_, Result<Replay, StoreError>> {
-        Box::pin(async move { replayed(&*self.state()?, &self.scope, 0, None) })
+        Box::pin(async move { self.replayed(&*self.state()?, None).await })
     }
 
     fn replay_cached<'a>(
@@ -154,17 +222,17 @@ impl FactLog for Scoped {
             let state = self.state()?;
             let snapshot = cached(&state, &self.scope)?
                 .filter(|snapshot| snapshot.family == family && snapshot.format == format);
-            let after = snapshot.as_ref().map_or(0, |snapshot| snapshot.seq);
-            replayed(&state, &self.scope, after, snapshot)
+            self.replayed(&state, snapshot).await
         })
     }
 
     fn append(&self, after: u64, write: Append) -> StoreFuture<'_, Result<u64, StoreError>> {
         let scope = self.scope.clone();
         Box::pin(async move {
+            let older = self.older(after).await?;
             self.log
                 .job_once(move |staged| {
-                    let mut unseen = replayed(staged.state(), &scope, after, None)?;
+                    let mut unseen = replayed(staged.state(), &scope, older.as_ref(), after)?;
                     if after > 0 && sim::mutated(sim::Mutation::FactsUnseenSkipped) {
                         unseen.facts.clear();
                         unseen.blobs.clear();

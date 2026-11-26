@@ -17,10 +17,12 @@ pub enum Mutation {
     WakeIndexSkipped,
     GateComparesIntentToItself,
     LostUnretried,
+    KeepAllEvents,
+    ReservationSkipped,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::PartDropped,
         Self::AdoptionSkipsRetired,
         Self::AdoptionSkipsBlobs,
@@ -34,6 +36,8 @@ impl Mutation {
         Self::WakeIndexSkipped,
         Self::GateComparesIntentToItself,
         Self::LostUnretried,
+        Self::KeepAllEvents,
+        Self::ReservationSkipped,
     ];
 
     #[must_use]
@@ -53,6 +57,8 @@ impl Mutation {
             Self::WakeIndexSkipped => "wake_index_skipped",
             Self::GateComparesIntentToItself => "gate_compares_intent_to_itself",
             Self::LostUnretried => "lost_unretried",
+            Self::KeepAllEvents => "keep_all_events",
+            Self::ReservationSkipped => "reservation_skipped",
         }
     }
 

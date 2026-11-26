@@ -452,6 +452,8 @@ default_table='
 1 canary_thread_scope_wake_index_skipped canary:16 --scenario thread_scope --mutation wake_index_skipped
 1 canary_thread_scope_gate_compares_intent_to_itself canary:16 --scenario thread_scope --mutation gate_compares_intent_to_itself
 1 canary_thread_scope_lost_unretried canary:16 --scenario thread_scope --mutation lost_unretried
+1 canary_thread_scope_keep_all_events canary:16 --scenario thread_scope --mutation keep_all_events
+1 canary_thread_scope_reservation_skipped canary:16 --scenario thread_scope --mutation reservation_skipped
 8 repo_cache pass --scenario repo_cache
 2 repo_cache_twice pass --scenario repo_cache --twice
 1 canary_repo_cache_shared_head canary:8 --scenario repo_cache --mutation shared_head

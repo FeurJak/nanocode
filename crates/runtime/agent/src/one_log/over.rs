@@ -177,7 +177,7 @@ impl OneLogOver {
 
     #[must_use]
     pub fn remembered_bytes(&self) -> usize {
-        self.current().log.state().map_or(0, |state| state.bytes)
+        self.current().log.state().map_or(0, |state| state.weighed())
     }
 
     pub async fn reclaim(&self) -> Result<(), StoreError> {

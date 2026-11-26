@@ -67,7 +67,8 @@ fn closed(
     at: u64,
 ) -> Result<(TurnRecord, LoggedEvent), StoreError> {
     settle(staged, id, Owners::Turn)?;
-    let (records, record, event) = close(staged.state(), id, state, fields, at)?;
+    let last = staged.seq(1)?;
+    let (records, record, event) = close(staged.state(), id, state, fields, at, last)?;
     staged.extend(records)?;
     Ok((record, event))
 }
@@ -128,7 +129,8 @@ fn started(
     {
         return Ok(None);
     }
-    let (records, started) = start(staged.state(), id, at)?;
+    let seq = staged.seq(1)?;
+    let (records, started) = start(staged.state(), id, at, seq)?;
     staged.extend(records)?;
     Ok(started)
 }
@@ -256,7 +258,8 @@ impl ThreadTurns {
         let at = now();
         self.log
             .job_staged(move |staged| {
-                let (records, events) = append(staged.state(), &entries, at);
+                let first = staged.seq(entries.len())?;
+                let (records, events) = append(staged.state(), &entries, at, first);
                 staged.extend(records)?;
                 Ok(events)
             })

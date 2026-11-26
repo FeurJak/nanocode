@@ -630,7 +630,12 @@ pub async fn expected(
     })
 }
 
-pub fn ours(state: &ThreadState, legacy: &Legacy) -> View {
+pub fn ours(
+    state: &ThreadState,
+    legacy: &Legacy,
+    events: &[Event],
+    facts: &[(u64, Option<String>, StoredFact)],
+) -> View {
     let mut wakes: Vec<String> = state.wakes().map(|wake| line(&wake)).collect();
     wakes.push(format!("generation {}", state.generation()));
     View {
@@ -641,10 +646,10 @@ pub fn ours(state: &ThreadState, legacy: &Legacy) -> View {
             .iter()
             .filter_map(|id| state.turn(id).map(turn_line))
             .collect(),
-        events: state.events().map(line).collect(),
-        facts: state
-            .facts()
-            .map(|(seq, kept)| line(&(seq, &kept.state, &kept.fact)))
+        events: events.iter().map(line).collect(),
+        facts: facts
+            .iter()
+            .map(|(seq, held, fact)| line(&(seq, held, fact)))
             .collect(),
         cells: state
             .cells()

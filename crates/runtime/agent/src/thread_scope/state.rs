@@ -16,18 +16,46 @@ use crate::durability::{
     },
 };
 
+pub(crate) const RESERVED_KEY: &str = "$thread_reserved";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct KeptFact {
     pub fact: StoredFact,
     pub state: Option<String>,
+    pub row: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct KeptEvent {
+    pub event: Event,
+    pub row: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Legacy {
+    pub next: u64,
+    pub last_event: u64,
+    pub last_fact: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Reserved {
+    pub seq: u64,
+    pub epoch: u64,
 }
 
 #[derive(Clone, Default)]
 pub struct ThreadState {
     pub(crate) turns: OrdMap<Arc<str>, Arc<Turn>>,
     pub(crate) admitted: OrdMap<u64, Arc<str>>,
-    pub(crate) events: Vector<Arc<Event>>,
+    pub(crate) starts: OrdMap<Arc<str>, u64>,
+    pub(crate) events: Vector<Arc<KeptEvent>>,
+    pub(crate) last_event: u64,
+    pub(crate) reserved: Option<Reserved>,
     pub(crate) facts: Vector<Arc<KeptFact>>,
+    pub(crate) fact_base: u64,
+    pub(crate) legacy: Option<Legacy>,
+    pub(crate) cached: OrdMap<Arc<str>, u64>,
     pub(crate) cells: OrdMap<(Arc<str>, u64), Vector<Box<RawValue>>>,
     pub(crate) checkpoints: OrdMap<Arc<str>, Arc<Checkpoint>>,
     pub(crate) stored: OrdMap<Arc<str>, Arc<str>>,
@@ -38,10 +66,10 @@ pub struct ThreadState {
     pub(crate) wakes: OrdMap<Arc<str>, Arc<ArmedWake>>,
     pub(crate) intents: OrdMap<Arc<str>, Option<Arc<str>>>,
     pub(crate) uncached: OrdMap<Arc<str>, u64>,
+    pub(crate) logging: OrdMap<Arc<str>, u64>,
     pub(crate) blobs: Vector<Digest>,
     pub(crate) generation: u64,
     pub(crate) row: u64,
-    pub(crate) bytes: usize,
 }
 
 #[derive(serde::Deserialize)]
@@ -76,7 +104,15 @@ impl ThreadState {
     }
 
     pub fn events(&self) -> impl Iterator<Item = &Event> {
+        self.events.iter().map(|kept| &kept.event)
+    }
+
+    pub fn recent_events(&self) -> impl Iterator<Item = &KeptEvent> {
         self.events.iter().map(AsRef::as_ref)
+    }
+
+    pub fn recent_facts(&self) -> impl Iterator<Item = &KeptFact> {
+        self.facts.iter().map(AsRef::as_ref)
     }
 
     pub fn events_after(&self, after: u64) -> impl Iterator<Item = &Event> {
@@ -84,26 +120,60 @@ impl ThreadState {
     }
 
     #[must_use]
+    pub const fn last_event(&self) -> u64 {
+        self.last_event
+    }
+
+    #[must_use]
+    pub const fn reserved(&self) -> Option<Reserved> {
+        self.reserved
+    }
+
+    #[must_use]
     pub fn next_event(&self) -> u64 {
-        self.events.last().map_or(1, |event| event.seq + 1)
+        self.last_event.max(self.reserved.map_or(0, |reserved| reserved.seq)) + 1
+    }
+
+    #[must_use]
+    pub const fn legacy(&self) -> Option<Legacy> {
+        self.legacy
+    }
+
+    #[must_use]
+    pub fn start_row(&self, turn: &str) -> Option<u64> {
+        self.starts.get(turn).copied()
+    }
+
+    #[must_use]
+    pub fn event_row(&self, after: u64) -> u64 {
+        self.admitted
+            .range(..=after.saturating_add(1))
+            .rev()
+            .find_map(|(_, id)| self.starts.get(id).copied())
+            .unwrap_or_else(|| self.legacy.map_or(0, |legacy| legacy.next))
+    }
+
+    #[must_use]
+    pub fn cached_row(&self, state: &str) -> Option<u64> {
+        self.cached.get(state).copied()
     }
 
     #[must_use]
     pub const fn next_fact(&self) -> u64 {
-        self.facts.len() as u64 + 1
+        self.fact_base + self.facts.len() as u64 + 1
+    }
+
+    #[must_use]
+    pub const fn fact_base(&self) -> u64 {
+        self.fact_base
     }
 
     pub fn facts(&self) -> impl Iterator<Item = (u64, &KeptFact)> {
-        (1..).zip(self.facts.iter().map(AsRef::as_ref))
+        (self.fact_base + 1..).zip(self.facts.iter().map(AsRef::as_ref))
     }
 
     pub fn facts_after(&self, after: u64) -> impl Iterator<Item = (u64, &KeptFact)> {
-        let first = usize::try_from(after).map_or(self.facts.len(), |after| after.min(self.facts.len()));
-        (first..self.facts.len()).filter_map(move |at| {
-            self.facts
-                .get(at)
-                .map(|kept| (at as u64 + 1, kept.as_ref()))
-        })
+        self.facts().skip_while(move |(seq, _)| *seq <= after)
     }
 
     #[must_use]
@@ -208,6 +278,16 @@ impl ThreadState {
     }
 
     #[must_use]
+    pub fn logs_facts(&self, session: &str) -> bool {
+        self.logging.contains_key(session)
+    }
+
+    pub(crate) fn logged(&mut self, session: &str, seq: u64) {
+        if !self.logging.contains_key(session) {
+            self.logging.insert(Arc::from(session), seq);
+        }
+    }
+
     pub fn intent(&self, call_id: &str) -> Option<&OpenCall> {
         self.intents
             .contains_key(call_id)
@@ -281,11 +361,24 @@ impl ThreadState {
         for (first, id) in self.admitted.iter() {
             put("admitted", &(first, id.as_ref()));
         }
+        for (id, row) in self.starts.iter() {
+            put("start", &(id.as_ref(), row));
+        }
+        put("last_event", &self.last_event);
+        put("reserved", &self.reserved);
+        put("fact_base", &self.fact_base);
+        put("legacy", &self.legacy);
         for event in self.events.iter() {
             put("event", event.as_ref());
         }
         for fact in self.facts.iter() {
             put("fact", fact.as_ref());
+        }
+        for (state, row) in self.cached.iter() {
+            put("cached", &(state.as_ref(), row));
+        }
+        for digest in self.blobs.iter() {
+            put("blob", digest);
         }
         for ((session, cell), updates) in self.cells.iter() {
             put("cell", &(session.as_ref(), cell, updates));
@@ -317,22 +410,60 @@ impl ThreadState {
         for (state, bytes) in self.uncached.iter() {
             put("uncached", &(state.as_ref(), bytes));
         }
+        for (state, first) in self.logging.iter() {
+            put("logging", &(state.as_ref(), first));
+        }
         nanocode_digest::blake3(text.as_bytes())
             .to_hex()
             .as_str()
             .to_owned()
     }
 
-    pub fn load(&mut self, seq: u64, body: &str) -> Result<(), StoreError> {
+    pub fn load(&mut self, seq: u64, body: &str, recent_rows: usize) -> Result<(), StoreError> {
         for record in nanocode_turnlog::decode(body)? {
             self.take(&record, Some(seq))?;
         }
         self.row = seq;
-        self.bytes += body.len();
+        self.forget_before(seq, recent_rows);
         Ok(())
     }
 
+    fn forget_before(&mut self, seq: u64, recent_rows: usize) {
+        assert!(recent_rows > 0, "a thread keeps the events of at least its last row");
+        if super::sim::mutated(super::sim::Mutation::KeepAllEvents) {
+            return;
+        }
+        let kept = |row: u64| row + recent_rows as u64 > seq;
+        while self.events.front().is_some_and(|front| !kept(front.row)) {
+            self.events.pop_front();
+        }
+        while self.facts.front().is_some_and(|front| !kept(front.row)) {
+            self.facts.pop_front();
+            self.fact_base += 1;
+        }
+    }
+
+    pub(crate) fn weighed(&self) -> usize {
+        let events: usize = self.events.iter().map(|kept| kept.event.event.get().len()).sum();
+        let facts = self.facts.len() * std::mem::size_of::<KeptFact>();
+        let turns: usize = self
+            .turns
+            .values()
+            .map(|turn| turn.prompt.get().len() + turn.metadata.get().len())
+            .sum();
+        let stored: usize = self.stored.values().map(|value| value.len()).sum();
+        let hosts: usize = self.hosts.values().map(|value| value.get().len()).sum();
+        let cells: usize = self
+            .cells
+            .values()
+            .flat_map(|updates| updates.iter())
+            .map(|update| update.get().len())
+            .sum();
+        events + facts + turns + stored + hosts + cells
+    }
+
     pub fn take(&mut self, record: &Record, row: Option<u64>) -> Result<(), StoreError> {
+        let at = row.unwrap_or(self.row + 1);
         match record {
             Record::Admitted {
                 digest,
@@ -341,29 +472,36 @@ impl ThreadState {
                 metadata,
                 prompt,
                 turn,
-            } => self.admit(Turn {
-                digest: digest.clone(),
-                edits: std::collections::BTreeMap::new(),
-                first: *first,
-                hand: hand.clone(),
-                id: turn.clone(),
-                metadata: metadata.clone(),
-                phase: Phase::Queued { retry: None },
-                prompt: prompt.clone(),
-                recovered: None,
-            }),
-            Record::Fact { fact, seq, state } => self.fact(fact, *seq, state.as_deref()),
-            Record::Event {
+            } => self.admit(
+                Turn {
+                    digest: digest.clone(),
+                    edits: std::collections::BTreeMap::new(),
+                    first: *first,
+                    hand: hand.clone(),
+                    id: turn.clone(),
+                    metadata: metadata.clone(),
+                    phase: Phase::Queued { retry: None },
+                    prompt: prompt.clone(),
+                    recovered: None,
+                },
                 at,
+            ),
+            Record::Fact { fact, seq, state } => self.fact(fact, *seq, state.as_deref(), at),
+            Record::Event {
+                at: stamp,
                 event,
                 seq,
                 turn,
-            } => self.event(Event {
-                at: *at,
-                event: event.clone(),
-                seq: *seq,
-                turn: turn.clone(),
-            }),
+            } => self.event(
+                Event {
+                    at: *stamp,
+                    event: event.clone(),
+                    seq: *seq,
+                    turn: turn.clone(),
+                },
+                at,
+            ),
+            Record::Host { key, value } => self.host_field(key, value, at),
             Record::Status { status, turn } => self.status(turn, status),
             Record::Recovery {
                 at,
@@ -421,7 +559,6 @@ impl ThreadState {
                     .insert(Arc::from(key.as_str()), Arc::from(value.as_str()));
                 Ok(())
             }
-            Record::Host { key, value } => self.host_field(key, value),
             Record::Hold { hold, key } => self.held(key, hold),
             record => self.call(record),
         }
@@ -490,7 +627,7 @@ impl ThreadState {
         );
     }
 
-    fn admit(&mut self, turn: Turn) -> Result<(), StoreError> {
+    fn admit(&mut self, turn: Turn, row: u64) -> Result<(), StoreError> {
         if let Some(existing) = self.turns.get(turn.id.as_str()) {
             if !matches!(existing.phase, Phase::Finished { .. }) {
                 return Err(invalid(format!("turn {} was admitted twice", turn.id)));
@@ -506,24 +643,30 @@ impl ThreadState {
         }
         let id: Arc<str> = Arc::from(turn.id.as_str());
         self.admitted.insert(turn.first, Arc::clone(&id));
+        self.starts.insert(Arc::clone(&id), row);
         self.turns.insert(id, Arc::new(turn));
         Ok(())
     }
 
-    fn event(&mut self, event: Event) -> Result<(), StoreError> {
-        if let Some(last) = self.events.last()
-            && event.seq <= last.seq
-        {
+    fn event(&mut self, event: Event, row: u64) -> Result<(), StoreError> {
+        if event.seq <= self.last_event {
             return Err(invalid(format!(
                 "event {} does not follow event {}",
-                event.seq, last.seq
+                event.seq, self.last_event
             )));
         }
-        self.events.push_back(Arc::new(event));
+        self.last_event = event.seq;
+        self.events.push_back(Arc::new(KeptEvent { event, row }));
         Ok(())
     }
 
-    fn fact(&mut self, fact: &StoredFact, seq: u64, state: Option<&str>) -> Result<(), StoreError> {
+    fn fact(
+        &mut self,
+        fact: &StoredFact,
+        seq: u64,
+        state: Option<&str>,
+        row: u64,
+    ) -> Result<(), StoreError> {
         let next = self.next_fact();
         if seq != next {
             return Err(invalid(format!(
@@ -531,9 +674,10 @@ impl ThreadState {
                 next - 1
             )));
         }
-        self.lower(seq, fact, state)?;
+        self.lower(seq, fact, state, row)?;
         self.index_blob(fact);
         if let Some(state) = state {
+            self.logged(state, seq);
             let bytes = serde_json::to_string(fact).map_err(invalid)?.len() as u64;
             let held = self.uncached.get(state).copied().unwrap_or_default();
             self.uncached.insert(Arc::from(state), held + bytes);
@@ -541,6 +685,7 @@ impl ThreadState {
         self.facts.push_back(Arc::new(KeptFact {
             fact: fact.clone(),
             state: state.map(str::to_owned),
+            row,
         }));
         Ok(())
     }
@@ -550,6 +695,7 @@ impl ThreadState {
         seq: u64,
         fact: &StoredFact,
         state: Option<&str>,
+        row: u64,
     ) -> Result<(), StoreError> {
         let runtime = state.is_none();
         if !runtime && super::sim::mutated(super::sim::Mutation::ScopedIntentSkipped) {
@@ -561,7 +707,7 @@ impl ThreadState {
             {
                 Ok(())
             }
-            Fact::Input(input) => self.lower_input(seq, input),
+            Fact::Input(input) => self.lower_input(seq, input, row),
             Fact::Marker(Marker::Status { turn, status }) => self.status(turn, &lowered(status)),
             Fact::Marker(Marker::Recovery { turn, attempt, at }) => {
                 self.recovery(turn, *at, *attempt, &[])
@@ -585,7 +731,7 @@ impl ThreadState {
                 Ok(())
             }
             Fact::Decision(Decision::Host { key, value }) => {
-                if internal_host(key) {
+                if internal_host(key) || key == RESERVED_KEY {
                     return Err(invalid(format!("host field {key} names a turn log key")));
                 }
                 self.hosts.insert(Arc::from(key.as_str()), value.clone());
@@ -595,21 +741,24 @@ impl ThreadState {
         }
     }
 
-    fn lower_input(&mut self, seq: u64, input: &Input<Value>) -> Result<(), StoreError> {
+    fn lower_input(&mut self, seq: u64, input: &Input<Value>, row: u64) -> Result<(), StoreError> {
         let prompt = inline(&input.value)?.to_owned();
         let metadata = inline(&input.metadata)?.to_owned();
         match &input.kind {
-            InputKind::Prompt => self.admit(Turn {
-                digest: input_digest(&prompt, input.hand.as_deref()),
-                edits: std::collections::BTreeMap::new(),
-                first: input.first.unwrap_or(seq),
-                hand: input.hand.clone(),
-                id: input.turn.clone(),
-                metadata,
-                phase: Phase::Queued { retry: None },
-                prompt,
-                recovered: None,
-            }),
+            InputKind::Prompt => self.admit(
+                Turn {
+                    digest: input_digest(&prompt, input.hand.as_deref()),
+                    edits: std::collections::BTreeMap::new(),
+                    first: input.first.unwrap_or(seq),
+                    hand: input.hand.clone(),
+                    id: input.turn.clone(),
+                    metadata,
+                    phase: Phase::Queued { retry: None },
+                    prompt,
+                    recovered: None,
+                },
+                row,
+            ),
             InputKind::Edit { edit_id } => {
                 let hand = self.turn(&input.turn).and_then(|turn| turn.hand.clone());
                 self.status(
@@ -717,19 +866,41 @@ impl ThreadState {
         Ok(())
     }
 
-    fn host_field(&mut self, key: &str, value: &RawValue) -> Result<(), StoreError> {
+    fn host_field(&mut self, key: &str, value: &RawValue, row: u64) -> Result<(), StoreError> {
         if key == nanocode_turnlog::RETIRED_KEY {
             return Err(invalid(
                 "the row retires turns into older rows; a resident thread keeps its turns",
             ));
+        }
+        if key == RESERVED_KEY {
+            return self.reserve(value);
         }
         if let Some(state) = key
             .strip_prefix(FOLD_SNAPSHOT_KEY)
             .and_then(|rest| rest.strip_prefix('\n'))
         {
             self.uncached.remove(state);
+            self.cached.insert(Arc::from(state), row);
         }
         self.hosts.insert(Arc::from(key), value.to_owned());
+        Ok(())
+    }
+
+    fn reserve(&mut self, value: &RawValue) -> Result<(), StoreError> {
+        let reserved: Reserved = serde_json::from_str(value.get())
+            .map_err(|error| invalid(format!("event reservation: {error}")))?;
+        if reserved.seq < self.next_event() - 1 {
+            return Err(invalid(format!(
+                "event reservation through {} is below event {}",
+                reserved.seq, self.last_event
+            )));
+        }
+        if let Some(previous) = self.reserved
+            && previous.epoch != reserved.epoch
+        {
+            self.last_event = self.last_event.max(previous.seq);
+        }
+        self.reserved = Some(reserved);
         Ok(())
     }
 

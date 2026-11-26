@@ -16,14 +16,15 @@ use crate::{
     },
     one_log::{Finished, Lifecycle, fact_outcome, logged, outcome, raw, record_of},
     session_log::{
-        LogEntry, LoggedEvent, Started, Submission, Submitted, TurnRecord, TurnState, now,
-        submission_digest,
+        LogEntry, LogPage, LoggedEvent, Started, Submission, Submitted, TurnRecord, TurnState,
+        now, submission_digest,
     },
 };
 
 mod adopt;
 mod facts;
 mod holds;
+pub mod history;
 mod parts;
 pub mod sim;
 mod state;
@@ -32,7 +33,7 @@ pub(crate) mod wakes;
 
 pub use facts::ThreadFacts;
 pub use holds::ThreadHolds;
-pub use state::{KeptFact, ThreadState};
+pub use state::{KeptEvent, KeptFact, Legacy, Reserved, ThreadState};
 pub use turns::ThreadTurns;
 pub use wakes::ThreadWakes;
 
@@ -40,15 +41,34 @@ type Run = dyn Fn(&mut Staged) -> Result<Box<dyn Any + Send>, StoreError> + Send
 type Once<T> = Box<dyn FnOnce(&mut Staged) -> Result<T, StoreError> + Send>;
 
 #[derive(Clone)]
-pub struct Job(Arc<Run>);
+pub struct Job {
+    run: Arc<Run>,
+    lease: Lease,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lease {
+    pub epoch: Option<u64>,
+    pub staged: bool,
+    pub reserve: bool,
+}
 
 impl Job {
     pub fn new<T: Send + 'static>(
         run: impl Fn(&mut Staged) -> Result<T, StoreError> + Send + Sync + 'static,
     ) -> Self {
-        Self(Arc::new(move |staged| {
-            run(staged).map(|value| Box::new(value) as Box<dyn Any + Send>)
-        }))
+        Self {
+            run: Arc::new(move |staged| {
+                run(staged).map(|value| Box::new(value) as Box<dyn Any + Send>)
+            }),
+            lease: Lease::default(),
+        }
+    }
+
+    #[must_use]
+    pub const fn leased(mut self, lease: Lease) -> Self {
+        self.lease = lease;
+        self
     }
 
     pub fn once<T: Send + 'static>(
@@ -77,9 +97,57 @@ impl std::fmt::Debug for Done {
 pub struct Staged {
     state: ThreadState,
     records: Vec<Record>,
+    lease: Lease,
+    unreserved: bool,
 }
 
 impl Staged {
+    fn own(&self) -> bool {
+        self.state
+            .reserved
+            .is_some_and(|reserved| Some(reserved.epoch) == self.lease.epoch)
+    }
+
+    pub fn seq(&mut self, events: usize) -> Result<u64, StoreError> {
+        let first = if self.own() {
+            self.state.last_event + 1
+        } else {
+            self.state.next_event()
+        };
+        let last = first + events as u64 - u64::from(events > 0);
+        let reserved = self.own()
+            && self
+                .state
+                .reserved
+                .is_some_and(|reserved| last <= reserved.seq);
+        if events > 0
+            && self.lease.staged
+            && !reserved
+            && !sim::mutated(sim::Mutation::ReservationSkipped)
+        {
+            self.unreserved = true;
+            return Err(StoreError::NotCommitted(format!(
+                "a staged job would hand out events {first} to {last} past the thread's committed reservation; it commits first"
+            )));
+        }
+        Ok(first)
+    }
+
+    fn reserve(&mut self, ahead: u64) -> Result<(), StoreError> {
+        let Some(epoch) = self.lease.epoch else {
+            return Ok(());
+        };
+        let reserved = state::Reserved {
+            seq: self.state.next_event() - 1 + ahead,
+            epoch,
+        };
+        let value = serde_json::value::to_raw_value(&reserved).map_err(state::invalid)?;
+        self.push(Record::Host {
+            key: state::RESERVED_KEY.to_owned(),
+            value,
+        })
+    }
+
     #[must_use]
     pub const fn state(&self) -> &ThreadState {
         &self.state
@@ -119,18 +187,28 @@ impl Staged {
         turn: Option<&str>,
         event: Box<RawValue>,
     ) -> Result<u64, StoreError> {
-        let seq = self.state.next_event();
+        let seq = self.seq(1)?;
         self.push(event_at(at, seq, turn, event))?;
         Ok(seq)
     }
 }
 
-fn run(state: &ThreadState, job: &Job) -> (Vec<Record>, ThreadReply) {
+fn run(state: &ThreadState, job: &Job, ahead: u64) -> (Vec<Record>, ThreadReply) {
     let mut staged = Staged {
         state: state.clone(),
         records: Vec::new(),
+        lease: job.lease,
+        unreserved: false,
     };
-    match (job.0)(&mut staged) {
+    let ran = (job.run)(&mut staged);
+    if staged.unreserved {
+        return (Vec::new(), ThreadReply::Unreserved);
+    }
+    let ran = match ran {
+        Ok(done) if job.lease.reserve && ahead > 0 => staged.reserve(ahead).map(|()| done),
+        ran => ran,
+    };
+    match ran {
         Ok(done) => {
             let mut records = staged.records;
             if sim::mutated(sim::Mutation::JobRowsDropped) {
@@ -147,6 +225,8 @@ pub struct ThreadPolicy {
     pub part_rows: usize,
     pub finished_max: Option<usize>,
     pub row_bytes_max: Option<usize>,
+    pub recent_rows: usize,
+    pub events_ahead: u64,
 }
 
 pub struct ThreadFold {
@@ -157,7 +237,16 @@ impl ThreadFold {
     #[must_use]
     pub fn new(policy: ThreadPolicy) -> Self {
         assert!(policy.part_rows > 0, "a part holds at least one row");
+        assert!(
+            policy.recent_rows > 0,
+            "a thread keeps the events and facts of at least its last row"
+        );
         Self { policy }
+    }
+
+    #[must_use]
+    pub const fn policy(&self) -> ThreadPolicy {
+        self.policy
     }
 }
 
@@ -210,6 +299,7 @@ pub enum ThreadReply {
     Turn(Option<TurnRecord>),
     Pending(Vec<TurnRecord>),
     Job(Result<Done, StoreError>),
+    Unreserved,
     Refused(String),
 }
 
@@ -271,11 +361,13 @@ impl ThreadFold {
     fn decided(&self, state: &ThreadState, command: &ThreadCommand) -> Decided {
         match command {
             ThreadCommand::Submit { submission, at } => {
-                let (records, submitted) = admit(state, submission, *at, self.policy.finished_max)?;
+                let first = state.next_event();
+                let (records, submitted) =
+                    admit(state, submission, *at, self.policy.finished_max, first)?;
                 Ok((records, ThreadReply::Submitted(submitted)))
             }
             ThreadCommand::Start { request_id, at } => {
-                let (records, started) = start(state, request_id, *at)?;
+                let (records, started) = start(state, request_id, *at, state.next_event())?;
                 Ok((records, ThreadReply::Started(started)))
             }
             ThreadCommand::Finish {
@@ -288,8 +380,9 @@ impl ThreadFold {
                     Ok((Vec::new(), ThreadReply::Finished(None)))
                 }
                 Some(_) => {
+                    let last = state.next_event();
                     let (records, record, event) =
-                        close(state, request_id, *finished, fields, *at)?;
+                        close(state, request_id, *finished, fields, *at, last)?;
                     Ok((records, ThreadReply::Finished(Some((record, event)))))
                 }
             },
@@ -299,7 +392,7 @@ impl ThreadFold {
                 at,
             } => cancel(state, request_id, fields, *at),
             ThreadCommand::Append { entries, at } => {
-                let (records, events) = append(state, entries, *at);
+                let (records, events) = append(state, entries, *at, state.next_event());
                 Ok((records, ThreadReply::Appended(events)))
             }
             ThreadCommand::Facts { facts } => {
@@ -324,7 +417,7 @@ impl ThreadFold {
                 Vec::new(),
                 ThreadReply::Pending(state.pending().map(record_of).collect::<Result<_, _>>()?),
             )),
-            ThreadCommand::Job(job) => Ok(run(state, job)),
+            ThreadCommand::Job(job) => Ok(run(state, job, self.policy.events_ahead)),
         }
     }
 }
@@ -334,6 +427,7 @@ fn admit(
     submission: &Submission,
     at: u64,
     finished_max: Option<usize>,
+    first: u64,
 ) -> Result<(Vec<Record>, Submitted), StoreError> {
     let id = submission.request_id.as_str();
     let digest = submission_digest(&submission.prompt, submission.hand.as_deref())?;
@@ -363,7 +457,6 @@ fn admit(
             )));
         }
     }
-    let first = state.next_event();
     let body = raw(&Lifecycle {
         kind: "queued",
         request_id: id,
@@ -389,6 +482,7 @@ fn start(
     state: &ThreadState,
     id: &str,
     at: u64,
+    seq: u64,
 ) -> Result<(Vec<Record>, Option<Started>), StoreError> {
     let Some(turn) = state.turn(id) else {
         return Ok((Vec::new(), None));
@@ -398,7 +492,6 @@ fn start(
         Phase::Queued { .. } => TurnState::Queued,
         Phase::Running { .. } => TurnState::Running,
     };
-    let seq = state.next_event();
     let body = raw(&Lifecycle {
         kind: "running",
         request_id: id,
@@ -422,6 +515,7 @@ fn close(
     finished: TurnState,
     fields: &Map<String, Value>,
     at: u64,
+    last: u64,
 ) -> Result<(Vec<Record>, TurnRecord, LoggedEvent), StoreError> {
     let Some(ended) = outcome(finished) else {
         return Err(StoreError::NotCommitted(format!(
@@ -435,7 +529,6 @@ fn close(
         status: finished.as_str(),
         fields,
     })?;
-    let last = state.next_event();
     let records = vec![
         event_at(at, last, Some(id), body.clone()),
         status_at(
@@ -465,7 +558,9 @@ fn cancel(state: &ThreadState, id: &str, fields: &Map<String, Value>, at: u64) -
             Ok((records, ThreadReply::Cancelled(Some((record, None)))))
         }
         Phase::Queued { .. } => {
-            let (records, record, event) = close(state, id, TurnState::Cancelled, fields, at)?;
+            let last = state.next_event();
+            let (records, record, event) =
+                close(state, id, TurnState::Cancelled, fields, at, last)?;
             Ok((records, ThreadReply::Cancelled(Some((record, Some(event))))))
         }
         Phase::Running { .. } | Phase::Finished { .. } => Ok((
@@ -475,8 +570,13 @@ fn cancel(state: &ThreadState, id: &str, fields: &Map<String, Value>, at: u64) -
     }
 }
 
-fn append(state: &ThreadState, entries: &[LogEntry], at: u64) -> (Vec<Record>, Vec<LoggedEvent>) {
-    let first = state.next_event();
+fn append(
+    state: &ThreadState,
+    entries: &[LogEntry],
+    at: u64,
+    first: u64,
+) -> (Vec<Record>, Vec<LoggedEvent>) {
+    assert!(first > state.last_event(), "appended events follow the thread's last");
     let mut records = Vec::with_capacity(entries.len());
     let mut events = Vec::with_capacity(entries.len());
     for (seq, entry) in (first..).zip(entries) {
@@ -530,7 +630,7 @@ impl Resident for ThreadFold {
     }
 
     fn apply(&self, state: &mut ThreadState, seq: u64, row: &str) -> Result<(), StoreError> {
-        state.load(seq, row)
+        state.load(seq, row, self.policy.recent_rows)
     }
 
     fn encode(&self, state: &ThreadState) -> Vec<Part> {
@@ -542,7 +642,7 @@ impl Resident for ThreadFold {
     }
 
     fn weight(&self, state: &ThreadState) -> usize {
-        state.bytes
+        state.weighed()
     }
 
     fn routable(&self, command: &ThreadCommand) -> bool {
@@ -554,19 +654,27 @@ impl Resident for ThreadFold {
         log: &'a Arc<dyn LogHost>,
         scope: &'a str,
     ) -> StoreFuture<'a, Result<Option<Adopted<ThreadState>>, StoreError>> {
-        Box::pin(adopt::adopt(log, scope, self.policy.part_rows))
+        Box::pin(adopt::adopt(log, scope))
     }
 }
 
 #[derive(Clone)]
 pub struct ThreadLogs {
     scopes: Scopes<ThreadFold>,
+    host: Arc<dyn LogHost>,
+    policy: ThreadPolicy,
 }
 
 impl ThreadLogs {
     #[must_use]
     pub fn new(wiring: Wiring<ThreadFold>) -> Self {
+        assert!(
+            wiring.fold.policy.recent_rows >= wiring.policy.checkpoint_rows,
+            "a thread keeps at least the rows its owner may hold uncommitted"
+        );
         Self {
+            host: Arc::clone(&wiring.log),
+            policy: wiring.fold.policy,
             scopes: Scopes::new(wiring),
         }
     }
@@ -579,12 +687,18 @@ impl ThreadLogs {
     pub async fn get(&self, thread: &str) -> Result<ThreadLog, ScopeError> {
         Ok(ThreadLog {
             reached: self.scopes.get(thread).await?,
+            host: Arc::clone(&self.host),
+            scope: Arc::from(thread),
+            policy: self.policy,
         })
     }
 }
 
 pub struct ThreadLog {
     reached: Reached<ThreadFold>,
+    host: Arc<dyn LogHost>,
+    scope: Arc<str>,
+    policy: ThreadPolicy,
 }
 
 fn unexpected(asked: &str, reply: &ThreadReply) -> ! {
@@ -635,16 +749,22 @@ impl ThreadLog {
     }
 
     pub async fn submit_staged(&self, submission: &Submission) -> Result<Submitted, ScopeError> {
-        let command = ThreadCommand::Submit {
-            submission: submission.clone(),
-            at: now(),
-        };
-        match self.reached.stage(command).await?.reply {
-            ThreadReply::Submitted(submitted) => Ok(submitted),
-            ThreadReply::Refused(why) => Err(ScopeError::Store(StoreError::NotCommitted(why))),
-            reply => unexpected("submit", &reply),
-        }
+        let submission = submission.clone();
+        let at = now();
+        let finished_max = self.policy.finished_max;
+        self.job_staged(move |staged| {
+            let first = match staged.state().turn(&submission.request_id) {
+                Some(_) => staged.state().next_event(),
+                None => staged.seq(1)?,
+            };
+            let (records, submitted) =
+                admit(staged.state(), &submission, at, finished_max, first)?;
+            staged.extend(records)?;
+            Ok(submitted)
+        })
+        .await
     }
+
 
     pub async fn start(&self, request_id: &str) -> Result<Option<Started>, ScopeError> {
         let command = ThreadCommand::Start {
@@ -745,18 +865,36 @@ impl ThreadLog {
     }
 
     async fn jobbed<T: Send + 'static>(&self, job: Job, staged: bool) -> Result<T, ScopeError> {
-        if let Reached::Routed(routed) = &self.reached
-            && !sim::mutated(sim::Mutation::JobForwarded)
-        {
-            return Err(ScopeError::Routed {
-                holder: routed.holder().to_owned(),
-            });
-        }
-        let command = ThreadCommand::Job(job);
+        let epoch = match &self.reached {
+            Reached::Local(scope) => Some(scope.epoch()),
+            Reached::Routed(_) if sim::mutated(sim::Mutation::JobForwarded) => None,
+            Reached::Routed(routed) => {
+                return Err(ScopeError::Routed {
+                    holder: routed.holder().to_owned(),
+                });
+            }
+        };
+        let lease = Lease {
+            epoch,
+            staged,
+            reserve: false,
+        };
         let replied = if staged {
-            self.reached.stage(command).await?.reply
+            let command = ThreadCommand::Job(job.clone().leased(lease));
+            match self.reached.stage(command).await?.reply {
+                ThreadReply::Unreserved => {
+                    let reserving = Lease {
+                        staged: false,
+                        reserve: true,
+                        ..lease
+                    };
+                    let command = ThreadCommand::Job(job.leased(reserving));
+                    self.reached.send(command).await?.reply
+                }
+                reply => reply,
+            }
         } else {
-            self.reached.send(command).await?.reply
+            self.reached.send(ThreadCommand::Job(job.leased(lease))).await?.reply
         };
         match replied {
             ThreadReply::Job(Ok(Done(done))) => match done.downcast::<T>() {
@@ -790,5 +928,53 @@ impl ThreadLog {
             ThreadReply::Pending(pending) => Ok(pending),
             reply => unexpected("pending", &reply),
         }
+    }
+
+    pub async fn page(
+        &self,
+        after: u64,
+        limit: usize,
+        bytes_max: Option<usize>,
+    ) -> Result<LogPage, ScopeError> {
+        self.paged(None, after, limit, bytes_max).await
+    }
+
+    pub async fn turn_page(
+        &self,
+        request_id: &str,
+        after: u64,
+        limit: usize,
+        bytes_max: Option<usize>,
+    ) -> Result<LogPage, ScopeError> {
+        self.paged(Some(request_id), after, limit, bytes_max).await
+    }
+
+    async fn paged(
+        &self,
+        request_id: Option<&str>,
+        after: u64,
+        limit: usize,
+        bytes_max: Option<usize>,
+    ) -> Result<LogPage, ScopeError> {
+        let Some(state) = self.state() else {
+            return Err(ScopeError::Routed {
+                holder: self.holder().unwrap_or_default().to_owned(),
+            });
+        };
+        let start = request_id
+            .and_then(|id| state.turn(id))
+            .map_or(after, |turn| after.max(turn.first.saturating_sub(1)));
+        let paging = history::Paging::new(request_id.map(str::to_owned), limit, bytes_max);
+        let paging = history::events(&self.host, &self.scope, &state, start, paging).await?;
+        let events: Vec<LoggedEvent> = paging
+            .events
+            .iter()
+            .map(|event| logged(event.seq, event.turn.as_deref(), event.at, event.event.clone()))
+            .collect();
+        Ok(LogPage {
+            next_cursor: events.last().map_or(after, |event| event.seq),
+            has_more: paging.more,
+            events,
+        })
     }
 }

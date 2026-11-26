@@ -154,7 +154,7 @@ pub mod turnlog {
         Done, Exported, Fire, Heard, Imported, Job, KeptFact, OneLog, OneLogJournals, OneLogOver, OneLogStore,
         Policy, Staged, ThreadCommand, ThreadFacts, ThreadFold, ThreadHolds, ThreadLog, ThreadLogs,
         ThreadPolicy, ThreadReply, ThreadState, ThreadTurns, ThreadWakes, WakeError, facts_sim, import_sim,
-        thread_scope_sim,
+        thread_history, thread_scope_sim,
     };
     pub use nanocode_tool_runtime::effects::{EffectCall, EffectGate};
     pub use nanocode_turnlog::*;

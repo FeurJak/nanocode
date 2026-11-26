@@ -2,21 +2,24 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use nanocode_scope::Part;
 use nanocode_sync::Vector;
-use nanocode_turnlog::{ArmedWake, Checkpoint, Event, Hold, OpenCall, Turn};
+use nanocode_turnlog::{ArmedWake, Checkpoint, Hold, OpenCall, Turn};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
 
 use super::{
     sim::{self, Mutation},
-    state::{KeptFact, ThreadState, invalid},
+    state::{KeptEvent, KeptFact, Legacy, Reserved, ThreadState, invalid},
 };
-use crate::durability::StoreError;
+use crate::durability::{StoreError, facts::Digest};
 
 #[derive(Deserialize, Serialize)]
 struct Meta {
     generation: u64,
-    #[serde(default)]
     row: u64,
+    last_event: u64,
+    reserved: Option<Reserved>,
+    fact_base: u64,
+    legacy: Option<Legacy>,
 }
 
 fn json(value: &impl Serialize) -> String {
@@ -60,6 +63,10 @@ pub(crate) fn encode(state: &ThreadState, rows: usize) -> Vec<Part> {
         body: json(&Meta {
             generation: state.generation,
             row: state.row,
+            last_event: state.last_event,
+            reserved: state.reserved,
+            fact_base: state.fact_base,
+            legacy: state.legacy,
         }),
     }];
     assert_eq!(
@@ -77,8 +84,11 @@ pub(crate) fn encode(state: &ThreadState, rows: usize) -> Vec<Part> {
             .map(|id| state.turns.get(id).expect("an admitted turn is resident"))
             .map(AsRef::as_ref),
     );
+    keyed(&mut parts, "start", state.starts.iter());
     chunked(&mut parts, "events", rows, state.events.iter().map(AsRef::as_ref));
     chunked(&mut parts, "facts", rows, state.facts.iter().map(AsRef::as_ref));
+    chunked(&mut parts, "blobs", rows, state.blobs.iter());
+    keyed(&mut parts, "cached", state.cached.iter());
     for ((session, cell), updates) in state.cells.iter() {
         parts.push(Part {
             name: format!("cell/{cell}/{session}"),
@@ -106,6 +116,7 @@ pub(crate) fn encode(state: &ThreadState, rows: usize) -> Vec<Part> {
     keyed(&mut parts, "wake", state.wakes.iter());
     keyed(&mut parts, "intent", state.intents.iter());
     keyed(&mut parts, "uncached", state.uncached.iter());
+    keyed(&mut parts, "logging", state.logging.iter());
     if sim::mutated(Mutation::PartDropped) {
         parts.pop();
     }
@@ -127,8 +138,9 @@ fn keyed<'a, V: Serialize + 'a>(
 
 #[derive(Default)]
 struct Pieces {
-    events: BTreeMap<u64, Vec<Event>>,
+    events: BTreeMap<u64, Vec<KeptEvent>>,
     facts: BTreeMap<u64, Vec<KeptFact>>,
+    blobs: BTreeMap<u64, Vec<Digest>>,
     models: BTreeMap<(Arc<str>, u64), Vec<Box<RawValue>>>,
 }
 
@@ -153,7 +165,6 @@ pub(crate) fn decode(parts: Vec<Part>) -> Result<ThreadState, StoreError> {
     let mut pieces = Pieces::default();
     let mut meta = None;
     for part in parts {
-        state.bytes += part.body.len();
         if part.name == "meta" {
             meta = Some(parsed::<Meta>(&part.name, &part.body)?);
             continue;
@@ -168,13 +179,17 @@ pub(crate) fn decode(parts: Vec<Part>) -> Result<ThreadState, StoreError> {
     };
     state.generation = meta.generation;
     state.row = meta.row;
+    state.last_event = meta.last_event;
+    state.reserved = meta.reserved;
+    state.fact_base = meta.fact_base;
+    state.legacy = meta.legacy;
     for event in ordered("events", pieces.events)? {
         state.events.push_back(Arc::new(event));
     }
     for fact in ordered("facts", pieces.facts)? {
-        state.index_blob(&fact.fact);
         state.facts.push_back(Arc::new(fact));
     }
+    state.blobs = ordered("blobs", pieces.blobs)?.into_iter().collect();
     let mut turns: BTreeMap<Arc<str>, BTreeMap<u64, Vec<Box<RawValue>>>> = BTreeMap::new();
     for ((turn, at), chunk) in pieces.models {
         turns.entry(turn).or_default().insert(at, chunk);
@@ -225,6 +240,9 @@ fn place(
         }
         "facts" => {
             pieces.facts.insert(index(name, rest)?, parsed(name, body)?);
+        }
+        "blobs" => {
+            pieces.blobs.insert(index(name, rest)?, parsed(name, body)?);
         }
         "cell" => {
             let Some((cell, session)) = rest.split_once('/') else {
@@ -286,6 +304,15 @@ fn keep(
         }
         "uncached" => {
             state.uncached.insert(key, parsed(name, body)?);
+        }
+        "logging" => {
+            state.logging.insert(key, parsed(name, body)?);
+        }
+        "start" => {
+            state.starts.insert(key, parsed(name, body)?);
+        }
+        "cached" => {
+            state.cached.insert(key, parsed(name, body)?);
         }
         kind => return Err(invalid(format!("part {name} has unknown kind {kind}"))),
     }
