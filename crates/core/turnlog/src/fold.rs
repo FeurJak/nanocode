@@ -1682,6 +1682,33 @@ impl Fold {
     }
 
     #[must_use]
+    pub fn resident_bytes(&self) -> usize {
+        let stored = self
+            .stored
+            .iter()
+            .map(|(key, value)| key.len() + value.len())
+            .sum::<usize>();
+        let hosts = self
+            .hosts
+            .iter()
+            .map(|(key, value)| key.len() + value.get().len())
+            .sum::<usize>();
+        let checkpoints = self
+            .checkpoints
+            .values()
+            .map(|checkpoint| checkpoint.payload.len())
+            .sum::<usize>();
+        let updates = self
+            .cells
+            .values()
+            .chain(self.models.values())
+            .flatten()
+            .map(|update| update.get().len())
+            .sum::<usize>();
+        stored + hosts + checkpoints + updates + self.hot_bytes
+    }
+
+    #[must_use]
     pub const fn segment_row(&self) -> u64 {
         self.segment_row
     }

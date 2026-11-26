@@ -625,6 +625,10 @@ impl OneLog {
         self.log.stats().await
     }
 
+    pub async fn reclaim(&self) -> Result<(), StoreError> {
+        self.log.reclaim().await
+    }
+
     pub async fn read<R>(&self, read: impl FnOnce(&Fold) -> R + Send + 'static) -> R
     where
         R: Send + 'static,

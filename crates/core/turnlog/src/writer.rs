@@ -1096,21 +1096,7 @@ impl Follower {
     pub async fn claim(mut self) -> Result<TurnLog, StoreError> {
         self.advance().await?;
         let log = self.finish().await?;
-        log.write(|writing| {
-            Box::pin(async move {
-                let next = writing.writer.next;
-                writing.push(Record::Host {
-                    key: CLAIM.to_owned(),
-                    value: serde_json::value::to_raw_value(&next)
-                        .map_err(|error| StoreError::Backend(format!("turn log claim: {error}")))?,
-                })?;
-                let check = std::mem::replace(&mut writing.writer.check, usize::MAX);
-                let claimed = writing.commit(Point::Recovery).await;
-                writing.writer.check = check;
-                claimed.map(drop)
-            })
-        })
-        .await?;
+        log.write(|writing| Box::pin(writing.claimed())).await?;
         Ok(log)
     }
 
@@ -1736,6 +1722,11 @@ impl TurnLog {
             })
         })
         .await?
+    }
+
+    pub async fn reclaim(&self) -> Result<(), StoreError> {
+        self.bounded(false, |writing| Box::pin(writing.claimed()))
+            .await?
     }
 
     pub async fn stats(&self) -> Stats {
@@ -2404,6 +2395,20 @@ impl Writing {
     #[must_use]
     pub fn floor_pending(&self) -> bool {
         self.writer.floor.is_some()
+    }
+
+    async fn claimed(&mut self) -> Result<(), StoreError> {
+        self.writer.live()?;
+        let next = self.writer.next;
+        self.push(Record::Host {
+            key: CLAIM.to_owned(),
+            value: serde_json::value::to_raw_value(&next)
+                .map_err(|error| StoreError::Backend(format!("turn log claim: {error}")))?,
+        })?;
+        let check = std::mem::replace(&mut self.writer.check, usize::MAX);
+        let claimed = self.commit(Point::Recovery).await;
+        self.writer.check = check;
+        claimed.map(drop)
     }
 
     pub async fn secure(&mut self) -> Result<(), StoreError> {
