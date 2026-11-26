@@ -1684,8 +1684,7 @@ mod store {
             }
             let model = checkpoint
                 .get("model")
-                .and_then(Value::as_str)
-                .and_then(|model| model.parse::<ModelSelection>().ok())
+                .and_then(|model| serde_json::from_value::<ModelSelection>(model.clone()).ok())
                 .ok_or_else(|| {
                     Error::InvalidState("stored checkpoint has no known model".into())
                 })?;

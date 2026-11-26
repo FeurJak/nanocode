@@ -197,12 +197,21 @@ pub use nanocode_subagents::{
     AgentContext, AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate,
     RunningSubagents, ScopedAgentUpdate, SubagentCompletion, SubagentControl, SubagentRuntimeId,
 };
-pub type Defaults = nanocode_agent_host::Defaults<CodexHarness, ClaudeHarness>;
+pub type Defaults =
+    nanocode_agent_host::Defaults<CodexHarness, ClaudeHarness, antigravity::AntigravityHarness>;
 pub type Nanocode = nanocode_agent::Runtime<Defaults>;
 pub use nanocode_agent::{AgentRuntime, CheckpointFormats, Runtime, RuntimeBuilder};
 pub use nanocode_agent_config::configuration::{RuntimeBackend, RuntimeDefaults};
-pub type ClaudeDefaults = nanocode_agent_host::Defaults<Absent<ClaudeHarness>, ClaudeHarness>;
-pub type CodexDefaults = nanocode_agent_host::Defaults<CodexHarness, Absent<CodexHarness>>;
+pub type ClaudeDefaults = nanocode_agent_host::Defaults<
+    Absent<ClaudeHarness>,
+    ClaudeHarness,
+    antigravity::AntigravityHarness,
+>;
+pub type CodexDefaults = nanocode_agent_host::Defaults<
+    CodexHarness,
+    Absent<CodexHarness>,
+    antigravity::AntigravityHarness,
+>;
 
 pub enum Absent<F> {
     Never(

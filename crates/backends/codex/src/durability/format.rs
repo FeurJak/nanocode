@@ -21,7 +21,7 @@ impl CheckpointFormat for CodexCheckpointFormat {
     }
 
     fn owns(&self, checkpoint: &Value) -> bool {
-        checkpoint.get("provider").is_none()
+        checkpoint.get("provider").is_none() && checkpoint.get("format").is_none()
     }
 
     fn hydrate<'a>(

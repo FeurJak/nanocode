@@ -1,5 +1,5 @@
 use nanocode_agent::configuration::{
-    DefaultRuntimeBackend, HostServices, RuntimeBackend, RuntimeDefaults,
+    BuiltinFormats, DefaultRuntimeBackend, HostServices, RuntimeBackend, RuntimeDefaults,
 };
 use nanocode_agent_core::{Agent, AgentHandle, BackendId, Result, backend::BackendFuture};
 use nanocode_durability::{SessionStore, SharedStore};
@@ -30,8 +30,8 @@ mod process_routes;
 mod runners;
 
 #[derive(Clone)]
-pub struct Defaults<C, A> {
-    backends: PhantomData<fn() -> (C, A)>,
+pub struct Defaults<C, A, F = ()> {
+    backends: PhantomData<fn() -> (C, A, F)>,
     #[cfg(not(target_family = "wasm"))]
     computer: Option<ComputerTools>,
     #[cfg(not(target_family = "wasm"))]
@@ -50,7 +50,7 @@ pub struct Defaults<C, A> {
     tool_environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 }
 
-impl<C, A> Default for Defaults<C, A> {
+impl<C, A, F> Default for Defaults<C, A, F> {
     fn default() -> Self {
         Self {
             backends: PhantomData,
@@ -86,7 +86,9 @@ pub struct Services {
     processes: nanocode_process::NativeProcessExecutors,
 }
 
-impl<C: DefaultRuntimeBackend, A: DefaultRuntimeBackend> RuntimeDefaults for Defaults<C, A> {
+impl<C: DefaultRuntimeBackend, A: DefaultRuntimeBackend, F: BuiltinFormats + Clone + 'static>
+    RuntimeDefaults for Defaults<C, A, F>
+{
     type Codex = C;
     type Claude = A;
     type Host = Services;
@@ -121,8 +123,7 @@ impl<C: DefaultRuntimeBackend, A: DefaultRuntimeBackend> RuntimeDefaults for Def
             .and_then(SessionStore::new)?;
         #[cfg(target_family = "wasm")]
         let store = SessionStore::new(nanocode_durability::MemoryStore::new()?)?;
-        store.register_format(C::builtin_format())?;
-        store.register_format(A::builtin_format())?;
+        register_formats::<C, A, F>(&store)?;
         Ok(store)
     }
 
@@ -135,8 +136,7 @@ impl<C: DefaultRuntimeBackend, A: DefaultRuntimeBackend> RuntimeDefaults for Def
                 let store =
                     nanocode_store_jsonl::JsonlStore::open_home_async(home.nanocode_home()).await?;
                 let store = SessionStore::new(store)?;
-                store.register_format(C::builtin_format())?;
-                store.register_format(A::builtin_format())?;
+                register_formats::<C, A, F>(&store)?;
                 Ok(store)
             }))
         }
@@ -196,7 +196,9 @@ impl<C: DefaultRuntimeBackend, A: DefaultRuntimeBackend> RuntimeDefaults for Def
 }
 
 #[cfg(not(target_family = "wasm"))]
-impl<C: DefaultRuntimeBackend, A: DefaultRuntimeBackend> NativeDefaults for Defaults<C, A> {
+impl<C: DefaultRuntimeBackend, A: DefaultRuntimeBackend, F: BuiltinFormats + Clone + 'static>
+    NativeDefaults for Defaults<C, A, F>
+{
     type Computer = ComputerTools;
     type Runner = Runner;
     type RunnerServerConfig = RunnerServerConfig;
@@ -428,11 +430,21 @@ pub fn run_runner_with_workspace_tools(
     })
 }
 
-impl<C: DefaultRuntimeBackend, A: DefaultRuntimeBackend> nanocode_agent::CheckpointFormats
-    for Defaults<C, A>
+impl<C: DefaultRuntimeBackend, A: DefaultRuntimeBackend, F: BuiltinFormats + Clone>
+    nanocode_agent::CheckpointFormats for Defaults<C, A, F>
 {
     fn register_formats(store: &SessionStore) -> nanocode_durability::Result<()> {
-        store.register_format(C::builtin_format())?;
-        store.register_format(A::builtin_format())
+        register_formats::<C, A, F>(store)
     }
+}
+
+fn register_formats<C: DefaultRuntimeBackend, A: DefaultRuntimeBackend, F: BuiltinFormats>(
+    store: &SessionStore,
+) -> nanocode_durability::Result<()> {
+    store.register_format(C::builtin_format())?;
+    store.register_format(A::builtin_format())?;
+    for format in F::builtin_formats() {
+        store.register_format(format)?;
+    }
+    Ok(())
 }
