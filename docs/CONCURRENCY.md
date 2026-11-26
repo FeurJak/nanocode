@@ -83,6 +83,22 @@ trait Resident           the app's fold: State, Command, Reply, empty, decide(&S
 | A checkpoint writes only the parts that changed | a landed checkpoint sends no part its scope's previous manifest names | `checkpoint_rewrites_unchanged_parts` |
 | A forward has a deadline | a forward to a holder that never answers returns before a 1 s watchdog | `forward_waits_unbounded` |
 
+### The thread log as a resident scope
+
+`ThreadLogs` (in `nanocode-agent`, re-exported as `nanocode::turnlog::ThreadLogs`) is a thread's turn log as a `Resident`. Its rows are turn log records, its state (`ThreadState`) holds turns, events, facts, cells, checkpoints, stored values, host fields, holds, open calls, model responses and wakes in persistent maps, and a checkpoint splits it into one part per turn, cell, hold, host field and wake, with events, facts and model responses in chunks of `ThreadPolicy::part_rows`, so a turn rewrites a few parts. A host wires it like any scope and calls the turn operations on the handle:
+
+```text
+let threads = ThreadLogs::new(Wiring { fold: Arc::new(ThreadFold::new(ThreadPolicy { .. })), log, leases, checkpoints, route, policy, clock, claimed });
+let thread = threads.get(thread_id).await?;          // local owner, or a route to the holder
+thread.submit(&submission).await?; thread.start(id).await?; thread.append(&entries).await?; thread.finish(id, state, &fields).await?;
+thread.turn(id).await?; thread.pending().await?;     // reads of the published state when local, commands when routed
+thread.state()                                       // Arc<ThreadState>: cells, holds, facts, wakes, ...
+```
+
+`log` is any `Arc<dyn LogHost>`, so a tiered host log works, and `claimed` is the hook that moves a thread's paged history on its first claim: the fold refuses rows that point at older rows (index, section, segment, folded and retired records) and blob references, since it holds values. `OneLog` still opens its own writer and is counted in `opens-outside-scopes.txt`.
+
+`nanocode-sim --scenario thread_scope` runs random turn, event, cell, fact, hold, wake and stored-value commands from two or three nodes with releases, crashes and evictions. After every step each handle's state equals a refold of the committed rows below its seq, a cold claim from the newest checkpoint plus its tail equals a refold of every row, and at the end the turn log's own `Fold` over the same rows agrees on turns, phases, events, cells, holds, facts and open calls. Mutation `part_dropped` (encode loses a part) turns it red.
+
 ### Proof
 
 A benchmark sized like the host that hit this: 95k scopes, 131 GB of history, a hot set of a few thousand. It measures load latency, Postgres rows read per turn and full-history scans in three cases: cold after a deploy, cold after an hour idle, and steady. The targets are p50 under 20 ms and p90 under 100 ms with cold loads included, O(1) Postgres reads per turn, and 0 full-history scans. A rolling restart must keep p99 load flat.
