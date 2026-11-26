@@ -13,7 +13,7 @@ use nanocode_sync::{Atom, OrdMap, Slot, Vector, oneshot, watch};
 use nanocode_turnlog::{LogHost, SCAN_END};
 
 use crate::{
-    Committed, Part, Policy, Resident, ScopeError,
+    Adopted, Committed, Part, Policy, Resident, ScopeError,
     checkpoint::{Checkpoints, Listing, Manifest, digest},
     lease::Leases,
     owner::{Ask, Chain, Checkpointed, Core, Life, Owner, Turn, Why},
@@ -42,6 +42,9 @@ pub struct Stats {
     pub checkpoint_listing_bytes: u64,
     pub checkpoint_listings_whole: u64,
     pub checkpoint_failures: u64,
+    pub adoptions: u64,
+    pub adoption_rows: u64,
+    pub adoption_bytes: u64,
     pub evictions: u64,
     pub over_budget: u64,
     pub releases: u64,
@@ -510,8 +513,24 @@ impl<F: Resident> Inner<F> {
             self.checkpoints.latest(scope).await?
         };
         let now = (self.clock)();
+        let mut adopted = None;
         let (mut state, next, checkpointed, parts) = match manifest {
-            None => (self.fold.empty(), 0, Checkpointed::empty(now), 0),
+            None => {
+                let fresh = Checkpointed::empty(now);
+                match self.fold.adopt(&self.log, scope).await? {
+                    None => (self.fold.empty(), 0, fresh, 0),
+                    Some(Adopted {
+                        state,
+                        next,
+                        rows,
+                        bytes,
+                    }) => {
+                        assert!(next > 0, "an adopted history of {scope} ends past row 0");
+                        adopted = Some((rows, bytes));
+                        (state, next, fresh, 0)
+                    }
+                }
+            }
             Some(manifest) => self.restore(scope, manifest, now).await?,
         };
         let tail = self.log.scan(scope, next, SCAN_END).await?;
@@ -546,6 +565,16 @@ impl<F: Resident> Inner<F> {
             weight,
             self.touch(),
         ));
+        if let Some((rows, bytes)) = adopted {
+            if !sim::mutated(Mutation::AdoptionSkipsCheckpoint) {
+                owner.seal(self).await?;
+            }
+            self.stats.update(|stats| {
+                stats.adoptions += 1;
+                stats.adoption_rows += rows;
+                stats.adoption_bytes += bytes;
+            });
+        }
         self.residents
             .update(|residents| residents.insert(Arc::clone(&owner.scope), Arc::clone(&owner)));
         Ok(owner)

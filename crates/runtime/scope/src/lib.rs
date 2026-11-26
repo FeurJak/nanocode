@@ -6,7 +6,10 @@ mod scopes;
 pub mod sim;
 mod sql;
 
-use nanocode_durability_core::StoreError;
+use std::sync::Arc;
+
+use nanocode_durability_core::{StoreError, StoreFuture};
+use nanocode_turnlog::LogHost;
 
 pub use checkpoint::{
     Checkpoints, Fence, Listing, Manifest, MemoryCheckpoints, MemoryStats, Written, assemble, digest,
@@ -36,6 +39,14 @@ pub struct Policy {
     pub forward_ms: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Adopted<S> {
+    pub state: S,
+    pub next: u64,
+    pub rows: u64,
+    pub bytes: u64,
+}
+
 pub trait Resident: Send + Sync + 'static {
     type State: Clone + Send + Sync + 'static;
     type Command: Send + 'static;
@@ -52,6 +63,14 @@ pub trait Resident: Send + Sync + 'static {
     fn decode(&self, parts: Vec<Part>) -> Result<Self::State, StoreError>;
 
     fn weight(&self, state: &Self::State) -> usize;
+
+    fn adopt<'a>(
+        &'a self,
+        _log: &'a Arc<dyn LogHost>,
+        _scope: &'a str,
+    ) -> StoreFuture<'a, Result<Option<Adopted<Self::State>>, StoreError>> {
+        Box::pin(std::future::ready(Ok(None)))
+    }
 }
 
 #[derive(Clone, Debug)]

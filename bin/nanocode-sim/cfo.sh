@@ -431,6 +431,9 @@ default_table='
 1 thread_scope_twice pass --scenario thread_scope --twice
 1 canary_thread_scope_part_dropped canary:16 --scenario thread_scope --mutation part_dropped
 1 canary_thread_scope_listing_skips_dropped canary:16 --scenario thread_scope --mutation listing_skips_dropped
+1 canary_thread_scope_adoption_skips_retired canary:16 --scenario thread_scope --mutation adoption_skips_retired
+1 canary_thread_scope_adoption_skips_blobs canary:16 --scenario thread_scope --mutation adoption_skips_blobs
+1 canary_thread_scope_adoption_skips_checkpoint canary:16 --scenario thread_scope --mutation adoption_skips_checkpoint
 8 repo_cache pass --scenario repo_cache
 2 repo_cache_twice pass --scenario repo_cache --twice
 1 canary_repo_cache_shared_head canary:8 --scenario repo_cache --mutation shared_head

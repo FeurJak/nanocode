@@ -1,4 +1,5 @@
 use std::{
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     num::NonZeroU32,
     ops::Range,
@@ -21,8 +22,8 @@ use nanocode::{
 };
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_scope::{
-    Checkpoints, Committed, MemoryCheckpoints, Part, PartedLeases, Policy, Resident, Route,
-    ScopeError, Wiring,
+    Checkpoints, Committed, Manifest, MemoryCheckpoints, Part, PartedLeases, Policy, Resident,
+    Route, ScopeError, Wiring,
     sim::{self as scope_sim, Mutation as ScopeMutation},
 };
 use nanocode_sync::{Atom, block_on};
@@ -35,6 +36,7 @@ use serde_json::{Map, json, value::RawValue};
 use crate::{
     executor::Clock,
     rng::{FNV_OFFSET, Rng, fnv},
+    threadlegacy::{self, Legacy, View},
 };
 
 const PARTS: u32 = 2;
@@ -56,11 +58,15 @@ const CELLS: u64 = 3;
 const RELEASE_PPM: u64 = 40_000;
 const CRASH_PPM: u64 = 12_000;
 const TICK_PPM: u64 = 120_000;
+const LEGACY_PPM: u64 = 500_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadScopeMutation(Mutation, ScopeMutation);
 
-const SCOPE_MUTATIONS: [ScopeMutation; 1] = [ScopeMutation::ListingSkipsDropped];
+const SCOPE_MUTATIONS: [ScopeMutation; 2] = [
+    ScopeMutation::ListingSkipsDropped,
+    ScopeMutation::AdoptionSkipsCheckpoint,
+];
 
 impl ThreadScopeMutation {
     pub const NONE: Self = Self(Mutation::None, ScopeMutation::None);
@@ -101,6 +107,14 @@ pub struct ThreadScopeStats {
     pub resident_checks: u64,
     pub cold_checks: u64,
     pub legacy_checks: u64,
+    pub legacy_threads: u64,
+    pub legacy_turns: u64,
+    pub legacy_retired: u64,
+    pub legacy_blobs: u64,
+    pub legacy_paged_rows: u64,
+    pub adopted_checks: u64,
+    pub adoptions: u64,
+    pub adoption_rows: u64,
     pub loads: u64,
     pub load_rows_max: u64,
     pub checkpoints: u64,
@@ -122,6 +136,14 @@ impl ThreadScopeStats {
         self.resident_checks += other.resident_checks;
         self.cold_checks += other.cold_checks;
         self.legacy_checks += other.legacy_checks;
+        self.legacy_threads += other.legacy_threads;
+        self.legacy_turns += other.legacy_turns;
+        self.legacy_retired += other.legacy_retired;
+        self.legacy_blobs += other.legacy_blobs;
+        self.legacy_paged_rows += other.legacy_paged_rows;
+        self.adopted_checks += other.adopted_checks;
+        self.adoptions += other.adoptions;
+        self.adoption_rows += other.adoption_rows;
         self.loads += other.loads;
         self.load_rows_max = self.load_rows_max.max(other.load_rows_max);
         self.checkpoints += other.checkpoints;
@@ -189,6 +211,9 @@ struct World {
     policy: Policy,
     count: NonZeroU32,
     threads: Vec<String>,
+    legacy: BTreeMap<String, (Legacy, View)>,
+    bases: RefCell<BTreeMap<String, (u64, ThreadState)>>,
+    gone: Cell<(u64, u64)>,
     wrong: Wrong,
 }
 
@@ -223,9 +248,12 @@ impl World {
         block_on(self.reader.scan(thread, 0, SCAN_END)).expect("the model store answers every scan")
     }
 
-    fn refold(&self, rows: &[(u64, String)]) -> Result<ThreadState, StoreError> {
-        let mut state = self.fold.empty();
-        for (seq, row) in rows {
+    fn refold(&self, thread: &str, rows: &[(u64, String)]) -> Result<ThreadState, StoreError> {
+        let (from, mut state) = match self.bases.borrow().get(thread) {
+            Some((seq, base)) => (*seq, base.clone()),
+            None => (0, self.fold.empty()),
+        };
+        for (seq, row) in rows.iter().filter(|(seq, _)| *seq >= from) {
             self.fold.apply(&mut state, *seq, row)?;
         }
         Ok(state)
@@ -419,6 +447,9 @@ fn send(
         stats.refused += 1;
         return;
     };
+    if log.state().is_some() {
+        adopted(world, &thread, stats);
+    }
     let state = log.state();
     let counter = turns.entry(thread.clone()).or_insert(0);
     let command = command(rng, counter, state.as_deref());
@@ -444,7 +475,7 @@ fn resident(world: &World, nodes: &[Node], stats: &mut ThreadScopeStats) {
                 .filter(|(seq, _)| *seq < next)
                 .collect();
             stats.resident_checks += 1;
-            match world.refold(&rows) {
+            match world.refold(thread, &rows) {
                 Ok(refold) if refold.digest() == state.digest() => {}
                 Ok(_) => flag(
                     &world.wrong,
@@ -462,26 +493,75 @@ fn resident(world: &World, nodes: &[Node], stats: &mut ThreadScopeStats) {
     }
 }
 
-fn cold(world: &World, thread: &str) -> Option<Result<ThreadState, String>> {
-    let manifest = world.witness.manifests(thread).last().cloned()?;
+fn decoded(world: &World, manifest: &Manifest) -> Result<ThreadState, String> {
     let digests: Vec<String> = manifest.parts.iter().map(|(_, at)| at.clone()).collect();
     let found: BTreeMap<String, String> = match block_on(world.witness.parts(&digests)) {
         Ok(found) => found.into_iter().collect(),
-        Err(error) => return Some(Err(error.to_string())),
+        Err(error) => return Err(error.to_string()),
     };
     let mut parts = Vec::with_capacity(manifest.parts.len());
     for (name, at) in &manifest.parts {
         let Some(body) = found.get(at) else {
-            return Some(Err(format!("part {name} has no body")));
+            return Err(format!("part {name} has no body"));
         };
         parts.push(Part {
             name: name.clone(),
             body: body.clone(),
         });
     }
-    let mut state = match world.fold.decode(parts) {
+    world.fold.decode(parts).map_err(|error| error.to_string())
+}
+
+fn adopted(world: &World, thread: &str, stats: &mut ThreadScopeStats) {
+    let Some((legacy, theirs)) = world.legacy.get(thread) else {
+        return;
+    };
+    if world.bases.borrow().contains_key(thread) {
+        return;
+    }
+    let Some(first) = world.witness.manifests(thread).first().cloned() else {
+        flag(
+            &world.wrong,
+            format!("{thread} was claimed over its turn log history with no checkpoint after it"),
+        );
+        return;
+    };
+    if first.seq != legacy.next {
+        flag(
+            &world.wrong,
+            format!(
+                "the first checkpoint of {thread} is at row {}, not at its turn log's head {}",
+                first.seq, legacy.next
+            ),
+        );
+        return;
+    }
+    let state = match decoded(world, &first) {
         Ok(state) => state,
-        Err(error) => return Some(Err(error.to_string())),
+        Err(error) => {
+            flag(&world.wrong, format!("the adopted checkpoint of {thread} does not decode: {error}"));
+            return;
+        }
+    };
+    stats.adopted_checks += 1;
+    if let Some(difference) = threadlegacy::differs(theirs, &threadlegacy::ours(&state, legacy)) {
+        flag(
+            &world.wrong,
+            format!("the adopted state of {thread} differs from its turn log's own view: {difference}"),
+        );
+        return;
+    }
+    world
+        .bases
+        .borrow_mut()
+        .insert(thread.to_owned(), (first.seq, state));
+}
+
+fn cold(world: &World, thread: &str) -> Option<Result<ThreadState, String>> {
+    let manifest = world.witness.manifests(thread).last().cloned()?;
+    let mut state = match decoded(world, &manifest) {
+        Ok(state) => state,
+        Err(error) => return Some(Err(error)),
     };
     for (seq, row) in world
         .rows(thread)
@@ -497,11 +577,14 @@ fn cold(world: &World, thread: &str) -> Option<Result<ThreadState, String>> {
 
 fn colds(world: &World, stats: &mut ThreadScopeStats) {
     for thread in &world.threads {
+        if !world.witness.manifests(thread).is_empty() {
+            adopted(world, thread, stats);
+        }
         let Some(loaded) = cold(world, thread) else {
             continue;
         };
         stats.cold_checks += 1;
-        let refold = world.refold(&world.rows(thread));
+        let refold = world.refold(thread, &world.rows(thread));
         match (loaded, refold) {
             (Ok(loaded), Ok(refold)) if loaded.digest() == refold.digest() => {}
             (Ok(_), Ok(_)) => flag(
@@ -535,6 +618,9 @@ fn phase(phase: &Phase) -> &'static str {
 
 fn legacy(world: &World, stats: &mut ThreadScopeStats) {
     for thread in &world.threads {
+        if world.legacy.contains_key(thread) {
+            continue;
+        }
         let rows = world.rows(thread);
         let mut fold = Fold::default();
         for (seq, row) in &rows {
@@ -546,7 +632,7 @@ fn legacy(world: &World, stats: &mut ThreadScopeStats) {
                 return;
             }
         }
-        let Ok(ours) = world.refold(&rows) else {
+        let Ok(ours) = world.refold(thread, &rows) else {
             return;
         };
         stats.legacy_checks += 1;
@@ -600,6 +686,11 @@ fn step(
     if rng.chance(CRASH_PPM) && nodes.len() > 1 {
         let at = rng.pick(nodes.len());
         let gone = nodes.remove(at);
+        let runtime = gone.logs.scopes().stats();
+        let (adoptions, rows) = world.gone.get();
+        world
+            .gone
+            .set((adoptions + runtime.adoptions, rows + runtime.adoption_rows));
         stats.crashes += 1;
         *generation += 1;
         nodes.push(world.node(&format!("n{at}g{generation}")));
@@ -671,7 +762,56 @@ fn world(rng: &mut Rng, time: &Arc<Clock>) -> World {
         threads: (0..rng.range(THREADS.start, THREADS.end))
             .map(|at| format!("thread-{at}"))
             .collect(),
+        legacy: BTreeMap::new(),
+        bases: RefCell::default(),
+        gone: Cell::new((0, 0)),
         wrong: Arc::default(),
+    }
+}
+
+fn history(rng: &mut Rng, world: &mut World, stats: &mut ThreadScopeStats) {
+    let host: Arc<dyn LogHost> = Arc::new(PartedLog::new(Arc::clone(&world.store), world.count));
+    for thread in world.threads.clone() {
+        if !rng.chance(LEGACY_PPM) {
+            continue;
+        }
+        let written = driven(
+            world,
+            "a legacy history",
+            threadlegacy::write(rng, Arc::clone(&host), &thread),
+        );
+        let legacy = match written {
+            Some(Ok(legacy)) => legacy,
+            Some(Err(error)) => {
+                flag(&world.wrong, format!("the legacy history of {thread}: {error}"));
+                return;
+            }
+            None => return,
+        };
+        let next = world.rows(&thread).last().map_or(0, |(seq, _)| seq + 1);
+        let legacy = legacy.at(next);
+        let theirs = match driven(
+            world,
+            "a legacy view",
+            threadlegacy::expected(Arc::clone(&host), &thread, &legacy),
+        ) {
+            Some(Ok(theirs)) => theirs,
+            Some(Err(error)) => {
+                flag(&world.wrong, format!("the legacy view of {thread}: {error}"));
+                return;
+            }
+            None => return,
+        };
+        stats.legacy_threads += 1;
+        stats.legacy_turns += legacy.turns() as u64;
+        stats.legacy_retired += theirs.retired;
+        stats.legacy_blobs += theirs.blobs;
+        stats.legacy_paged_rows += world
+            .rows(&thread)
+            .iter()
+            .filter(|(_, body)| !body.starts_with('{'))
+            .count() as u64;
+        world.legacy.insert(thread, (legacy, theirs));
     }
 }
 
@@ -681,7 +821,8 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
         seeds: 1,
         ..ThreadScopeStats::default()
     };
-    let world = world(&mut rng, time);
+    let mut world = world(&mut rng, time);
+    history(&mut rng, &mut world, &mut stats);
     let mut nodes: Vec<Node> = (0..rng.range(NODES.start, NODES.end))
         .map(|at| world.node(&format!("n{at}g0")))
         .collect();
@@ -708,8 +849,13 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
     legacy(&world, &mut stats);
     thread_scope_sim::mutate(Mutation::None);
     scope_sim::mutate(ScopeMutation::None);
+    let (adoptions, adoption_rows) = world.gone.get();
+    stats.adoptions += adoptions;
+    stats.adoption_rows += adoption_rows;
     for node in &nodes {
         let runtime = node.logs.scopes().stats();
+        stats.adoptions += runtime.adoptions;
+        stats.adoption_rows += runtime.adoption_rows;
         stats.loads += runtime.loads;
         stats.load_rows_max = stats.load_rows_max.max(runtime.load_rows_max);
         stats.checkpoints += runtime.checkpoints;
@@ -717,6 +863,16 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
         stats.checkpoint_parts_kept += runtime.checkpoint_parts_kept;
         stats.evictions += runtime.evictions;
         stats.forwards += runtime.forwards;
+    }
+    if stats.adoptions > world.legacy.len() as u64 {
+        flag(
+            &world.wrong,
+            format!(
+                "{} turn log histories were adopted {} times; a claim after the first read the history again",
+                world.legacy.len(),
+                stats.adoptions
+            ),
+        );
     }
     world.net.nodes.set(Vec::new());
     let mut digest = fnv(FNV_OFFSET, &seed.to_le_bytes());

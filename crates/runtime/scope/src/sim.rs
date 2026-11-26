@@ -13,6 +13,7 @@ pub enum Mutation {
     ForwardWaitsUnbounded,
     ListingSkipsDropped,
     ListingChainUnbounded,
+    AdoptionSkipsCheckpoint,
 }
 
 impl Mutation {
@@ -41,6 +42,7 @@ impl Mutation {
             Self::ForwardWaitsUnbounded => "forward_waits_unbounded",
             Self::ListingSkipsDropped => "listing_skips_dropped",
             Self::ListingChainUnbounded => "listing_chain_unbounded",
+            Self::AdoptionSkipsCheckpoint => "adoption_skips_checkpoint",
         }
     }
 

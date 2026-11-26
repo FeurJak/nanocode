@@ -49,6 +49,7 @@ mod machines;
 mod memory;
 mod kvlease;
 mod scope;
+mod threadlegacy;
 mod threadscope;
 mod migrated;
 mod model;

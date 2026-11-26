@@ -5,16 +5,24 @@ use std::sync::atomic::{AtomicU8, Ordering};
 pub enum Mutation {
     None,
     PartDropped,
+    AdoptionSkipsRetired,
+    AdoptionSkipsBlobs,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 1] = [Self::PartDropped];
+    pub const ALL: [Self; 3] = [
+        Self::PartDropped,
+        Self::AdoptionSkipsRetired,
+        Self::AdoptionSkipsBlobs,
+    ];
 
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::PartDropped => "part_dropped",
+            Self::AdoptionSkipsRetired => "adoption_skips_retired",
+            Self::AdoptionSkipsBlobs => "adoption_skips_blobs",
         }
     }
 

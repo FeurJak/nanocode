@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use nanocode_scope::{Part, Reached, Resident, ScopeError, Scopes, Wiring};
-use nanocode_turnlog::{Phase, Record, input_digest};
+use nanocode_scope::{Adopted, Part, Reached, Resident, ScopeError, Scopes, Wiring};
+use nanocode_turnlog::{LogHost, Phase, Record, input_digest, tag};
 use serde_json::{Map, Value, value::RawValue};
 
 use crate::{
     durability::{
-        StoreError,
+        StoreError, StoreFuture,
         facts::{Fact, Input, InputKind, Marker, OwnedFact, StoredFact, TurnStatus, Value as Stored},
     },
     one_log::{Finished, Lifecycle, fact_outcome, logged, outcome, raw, record_of},
@@ -16,6 +16,7 @@ use crate::{
     },
 };
 
+mod adopt;
 mod parts;
 pub mod sim;
 mod state;
@@ -201,7 +202,13 @@ impl ThreadFold {
         let derived = input_digest(&prompt, submission.hand.as_deref());
         if let Some(turn) = state.turn(id) {
             let record = record_of(turn)?;
-            let same = turn.digest == digest || turn.digest == derived;
+            let same = match turn.digest.strip_prefix(adopt::RETIRED_DIGEST) {
+                Some(retired) => {
+                    *retired == format!("{:032x}", tag(&digest))
+                        || *retired == format!("{:032x}", tag(&derived))
+                }
+                None => turn.digest == digest || turn.digest == derived,
+            };
             let submitted = if same {
                 Submitted::Existing(record)
             } else {
@@ -397,6 +404,14 @@ impl Resident for ThreadFold {
 
     fn weight(&self, state: &ThreadState) -> usize {
         state.bytes
+    }
+
+    fn adopt<'a>(
+        &'a self,
+        log: &'a Arc<dyn LogHost>,
+        scope: &'a str,
+    ) -> StoreFuture<'a, Result<Option<Adopted<ThreadState>>, StoreError>> {
+        Box::pin(adopt::adopt(log, scope, self.policy.part_rows))
     }
 }
 

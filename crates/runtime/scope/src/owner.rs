@@ -452,6 +452,15 @@ impl<F: Resident> Owner<F> {
         Ok(seq)
     }
 
+    pub(crate) async fn seal(&self, inner: &Inner<F>) -> Result<(), ScopeError> {
+        let Some(mut core) = self.core.take() else {
+            panic!("scope {} is sealed before anyone leads it", self.scope);
+        };
+        let sealed = self.checkpoint(&mut core, inner).await;
+        self.core.put(core);
+        sealed
+    }
+
     pub(crate) async fn checkpoint(
         &self,
         core: &mut Core<F>,

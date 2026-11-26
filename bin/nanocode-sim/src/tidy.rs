@@ -756,7 +756,10 @@ fn rust_sources(
             || path
                 .file_name()
                 .is_some_and(|name| skipped_dirs.iter().any(|skipped| name == *skipped));
-        if path.is_dir() && !skipped {
+        if skipped {
+            continue;
+        }
+        if path.is_dir() {
             rust_sources(root, &path, skipped_paths, skipped_dirs, found)?;
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             found.push((relative, std::fs::read_to_string(&path)?));
@@ -815,6 +818,7 @@ const OPENS_ROOTS: &[&str] = &["crates", "bin", "examples"];
 const OPENS_SKIPPED: &[&str] = &[
     "crates/patches",
     "crates/runtime/scope",
+    "crates/runtime/agent/src/thread_scope/adopt.rs",
     "crates/core/turnlog/src/parted",
     "bin/nanocode-sim",
 ];
