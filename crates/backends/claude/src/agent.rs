@@ -57,7 +57,7 @@ use nanocode_sync::{Atom, Slot};
 use nanocode_sync::{Notify, oneshot, watch};
 use nanocode_tool_host::image::{ImageHistory, ImageWindow};
 use nanocode_trace::Instrument as _;
-use owner::Owner;
+use owner::{Desk, Owner};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -3714,7 +3714,7 @@ struct State {
     parallel_tools: bool,
 
     parallel_safe_tools: HashSet<String>,
-    conversation: Owner<Conversation>,
+    conversation: Desk<Conversation>,
     developer_notices: Atom<Vec<(String, String)>>,
     persistence_ready: Notify,
     paging: Slot<durable::Paging>,
@@ -3985,14 +3985,14 @@ async fn fail_begun(
         let _ = policy.release(id).await;
         return;
     }
-    let shared = state.shared();
-    let checkpoint = state
-        .conversation
-        .run(move |conversation| Box::pin(async move { shared.snapshot(conversation).await }))
-        .await
-        .and_then(std::convert::identity)
-        .ok()
-        .and_then(|snapshot| serde_json::to_value(snapshot).ok());
+    let checkpoint = match state.conversation.lend().await {
+        Ok(mut conversation) => state
+            .snapshot(&mut conversation)
+            .await
+            .ok()
+            .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
+        Err(_) => None,
+    };
     let settled = match checkpoint {
         Some(checkpoint) => policy
             .fail(id.clone(), checkpoint, error.to_string())
@@ -4557,16 +4557,11 @@ impl State {
     }
 
     async fn latest_boundary(&self) -> Result<Snapshot> {
-        let state = self.shared();
-        if let Some(snapshot) = self.conversation.try_run(move |conversation| {
-            Box::pin(async move {
-                if state.life.stopped() {
-                    return Err(NanocodeError::AgentStopped);
-                }
-                state.snapshot(conversation).await
-            })
-        }) {
-            return snapshot.await.and_then(std::convert::identity);
+        if let Some(mut conversation) = self.conversation.try_lend().await? {
+            if self.life.stopped() {
+                return Err(NanocodeError::AgentStopped);
+            }
+            return self.snapshot(&mut conversation).await;
         }
         if self.boundary_stale.load(Ordering::SeqCst) {
             return Err(unsupported(
@@ -5778,18 +5773,15 @@ impl State {
         let waits = self.policy.is_none();
         let claim = Arc::new(AtomicBool::new(false));
         let claimed = Arc::clone(&claim);
-        let state = self.shared();
         let held = Arc::clone(&cancel);
-        let turn = self.conversation.run(move |conversation| {
-            Box::pin(async move {
-                if claimed.swap(true, Ordering::SeqCst) || (waits && held.is_cancelled()) {
-                    return Err(NanocodeError::TurnCancelled);
-                }
-                state
-                    .run_held(conversation, request, speed, &held, started)
-                    .await
-            })
-        });
+        let turn = async move {
+            let mut conversation = self.conversation.lend().await?;
+            if claimed.swap(true, Ordering::SeqCst) || (waits && held.is_cancelled()) {
+                return Err(NanocodeError::TurnCancelled);
+            }
+            self.run_held(&mut conversation, request, speed, &held, started)
+                .await
+        };
         let mut turn = std::pin::pin!(turn);
         if waits {
             nanocode_sync::select! {
@@ -5798,10 +5790,10 @@ impl State {
                         return Err(NanocodeError::TurnCancelled);
                     }
                 },
-                result = turn.as_mut() => return result.and_then(std::convert::identity),
+                result = turn.as_mut() => return result,
             }
         }
-        turn.await.and_then(std::convert::identity)
+        turn.await
     }
 
     async fn run_held(
@@ -6605,8 +6597,13 @@ impl Driver {
             if state.life.stopped() {
                 return Err(NanocodeError::AgentStopped);
             }
+            let borrowed = if crate::sim::mutated(crate::sim::Mutation::SteerWaitsConversation) {
+                Some(state.conversation.lend().await?)
+            } else {
+                None
+            };
             let owner = Arc::clone(&state);
-            state
+            let steered = state
                 .steering
                 .run(move |turns| {
                     Box::pin(async move {
@@ -6614,7 +6611,9 @@ impl Driver {
                         owner.steer_turn(turn, id, prompt).await
                     })
                 })
-                .await?
+                .await?;
+            drop(borrowed);
+            steered
         })
     }
 }

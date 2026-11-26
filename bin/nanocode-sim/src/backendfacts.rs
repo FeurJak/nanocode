@@ -27,6 +27,7 @@ use crate::rng::{FNV_OFFSET, Rng, fnv};
 mod abandoned;
 mod prefetch;
 mod session;
+mod stream;
 
 const SCOPE: &str = "backend-facts";
 const LEGACY_STATE: &str = "session";
@@ -57,10 +58,12 @@ pub enum BackendFactsMutation {
     PersistenceOnAdmissionLane,
     PersistIgnoresRevision,
     AbandonedPersistKeepsRevision,
+    LendBlocksOwner,
+    SteerWaitsConversation,
 }
 
 impl BackendFactsMutation {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::ResultWithoutIntent,
         Self::MediaUnrendered,
         Self::UndecidedNotice,
@@ -69,6 +72,8 @@ impl BackendFactsMutation {
         Self::PersistenceOnAdmissionLane,
         Self::PersistIgnoresRevision,
         Self::AbandonedPersistKeepsRevision,
+        Self::LendBlocksOwner,
+        Self::SteerWaitsConversation,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -82,6 +87,8 @@ impl BackendFactsMutation {
             Self::PersistenceOnAdmissionLane => "persistence_on_admission_lane",
             Self::PersistIgnoresRevision => "persist_ignores_revision",
             Self::AbandonedPersistKeepsRevision => "abandoned_persist_keeps_revision",
+            Self::LendBlocksOwner => "lend_blocks_owner",
+            Self::SteerWaitsConversation => "steer_waits_conversation",
         }
     }
 
@@ -847,6 +854,14 @@ fn owned_mutation(mutation: BackendFactsMutation) {
             nanocode::claude::sim::Mutation::AbandonedPersistKeepsRevision,
             nanocode_backend_codex::sim::Mutation::None,
         ),
+        BackendFactsMutation::LendBlocksOwner => (
+            nanocode::claude::sim::Mutation::LendBlocksOwner,
+            nanocode_backend_codex::sim::Mutation::None,
+        ),
+        BackendFactsMutation::SteerWaitsConversation => (
+            nanocode::claude::sim::Mutation::SteerWaitsConversation,
+            nanocode_backend_codex::sim::Mutation::None,
+        ),
         _ => (
             nanocode::claude::sim::Mutation::None,
             nanocode_backend_codex::sim::Mutation::None,
@@ -870,9 +885,13 @@ fn run_seed(seed: u64, mutation: BackendFactsMutation) -> Result<u64, String> {
         let owned = abandoned::run(seed, claude)?;
         let prefetched = prefetch::run(seed)?;
         let session = session::run(seed)?;
+        let streamed = stream::run(seed)?;
         Ok(fnv(
-            fnv(fnv(digest, &owned.to_le_bytes()), &prefetched.to_le_bytes()),
-            &session.to_le_bytes(),
+            fnv(
+                fnv(fnv(digest, &owned.to_le_bytes()), &prefetched.to_le_bytes()),
+                &session.to_le_bytes(),
+            ),
+            &streamed.to_le_bytes(),
         ))
     });
     MUTATION.store(BackendFactsMutation::None as u8, Ordering::SeqCst);

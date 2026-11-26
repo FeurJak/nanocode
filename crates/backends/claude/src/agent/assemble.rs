@@ -601,7 +601,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         developer_notices: Atom::new(restored.developer_notices),
         persistence_ready: Notify::new(),
         paging: Slot::default(),
-        conversation: Owner::spawn(restored.conversation)?,
+        conversation: Desk::spawn(restored.conversation)?,
         round_boundary: Atom::new(round_boundary),
         side_view: Atom::default(),
         side_request: Atom::default(),
