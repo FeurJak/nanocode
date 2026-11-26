@@ -25,15 +25,19 @@ mod adopt;
 mod facts;
 mod holds;
 pub mod history;
+mod journals;
 mod parts;
 pub mod sim;
 mod state;
+mod store;
 mod turns;
 pub(crate) mod wakes;
 
 pub use facts::ThreadFacts;
 pub use holds::ThreadHolds;
+pub use journals::ThreadJournals;
 pub use state::{KeptEvent, KeptFact, Legacy, Reserved, ThreadState};
+pub use store::ThreadStore;
 pub use turns::ThreadTurns;
 pub use wakes::ThreadWakes;
 

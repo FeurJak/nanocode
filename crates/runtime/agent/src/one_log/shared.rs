@@ -14,9 +14,27 @@ const ENCODED: &str = "encoded";
 const SHARED: &str = "stored";
 const CONTENT: &str = "b3:";
 
-pub(super) struct Shared {
-    pub(super) update: Box<RawValue>,
-    pub(super) values: Vec<(String, String)>,
+pub(crate) struct Shared {
+    pub(crate) update: Box<RawValue>,
+    pub(crate) values: Vec<(String, String)>,
+}
+
+pub(crate) trait Held {
+    fn held(&self, key: &str) -> Option<&str>;
+
+    fn holds(&self, key: &str) -> bool {
+        self.held(key).is_some()
+    }
+}
+
+impl Held for Fold {
+    fn held(&self, key: &str) -> Option<&str> {
+        self.stored(key)
+    }
+
+    fn holds(&self, key: &str) -> bool {
+        self.contains(key)
+    }
 }
 
 fn content(record: &StoreRecord) -> bool {
@@ -27,7 +45,7 @@ fn spliced(key: &str, value: &str) -> bool {
     key.starts_with(CONTENT) && EncodedPayload::is_spliced(value)
 }
 
-pub(super) fn candidates(state: &str, records: &[StoreRecord]) -> Vec<String> {
+pub(crate) fn candidates(state: &str, records: &[StoreRecord]) -> Vec<String> {
     records
         .iter()
         .filter(|record| content(record))
@@ -36,15 +54,15 @@ pub(super) fn candidates(state: &str, records: &[StoreRecord]) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn staged<'a>(fold: &Fold, state: &str, record: &'a StoreRecord) -> Cow<'a, str> {
+pub(crate) fn staged<'a>(fold: &impl Held, state: &str, record: &'a StoreRecord) -> Cow<'a, str> {
     if !content(record) {
         return Cow::Borrowed(&record.value);
     }
-    let held = |key: &str| fold.contains(&stored_key(state, key));
+    let held = |key: &str| fold.holds(&stored_key(state, key));
     EncodedPayload::splice(&record.value, &held).map_or(Cow::Borrowed(&record.value), Cow::Owned)
 }
 
-pub(super) fn spliced_keys<'a>(
+pub(crate) fn spliced_keys<'a>(
     state: &str,
     records: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Result<Vec<String>, StoreError> {
@@ -61,8 +79,8 @@ pub(super) fn spliced_keys<'a>(
     Ok(keys)
 }
 
-pub(super) fn whole(
-    fold: &Fold,
+pub(crate) fn whole(
+    fold: &impl Held,
     state: &str,
     key: &str,
     value: String,
@@ -70,10 +88,10 @@ pub(super) fn whole(
     if !spliced(key, &value) {
         return Ok(value);
     }
-    EncodedPayload::unspliced(&value, &|key| fold.stored(&stored_key(state, key))).map_err(invalid)
+    EncodedPayload::unspliced(&value, &|key| fold.held(&stored_key(state, key))).map_err(invalid)
 }
 
-pub(super) fn shared_results(update: &CellJournalUpdate) -> Result<Option<Shared>, StoreError> {
+pub(crate) fn shared_results(update: &CellJournalUpdate) -> Result<Option<Shared>, StoreError> {
     let sharing = update.entries.iter().any(|entry| {
         matches!(entry, JournalEntry::Result { encoded, .. } if EncodedPayload::shared_value(encoded).is_some())
     });
@@ -125,7 +143,7 @@ fn shared_entries(update: &RawValue) -> Result<Option<Value>, StoreError> {
     Ok(shares.then_some(value))
 }
 
-pub(super) fn result_keys(
+pub(crate) fn result_keys(
     session: &str,
     updates: &[Box<RawValue>],
 ) -> Result<Vec<String>, StoreError> {
@@ -146,7 +164,7 @@ pub(super) fn result_keys(
     Ok(keys)
 }
 
-pub(super) fn catalog(update: &RawValue, mark: &str) -> Result<Option<String>, StoreError> {
+pub(crate) fn catalog(update: &RawValue, mark: &str) -> Result<Option<String>, StoreError> {
     #[derive(serde::Deserialize)]
     struct Update {
         #[serde(default)]
@@ -170,7 +188,7 @@ pub(super) fn catalog(update: &RawValue, mark: &str) -> Result<Option<String>, S
         }))
 }
 
-pub(super) fn finished(updates: &[Box<RawValue>]) -> Result<bool, StoreError> {
+pub(crate) fn finished(updates: &[Box<RawValue>]) -> Result<bool, StoreError> {
     #[derive(serde::Deserialize)]
     struct Finished {
         #[serde(default)]
@@ -186,7 +204,7 @@ pub(super) fn finished(updates: &[Box<RawValue>]) -> Result<bool, StoreError> {
     Ok(false)
 }
 
-pub(super) fn without_results(update: &RawValue) -> Result<Cow<'_, str>, StoreError> {
+pub(crate) fn without_results(update: &RawValue) -> Result<Cow<'_, str>, StoreError> {
     let Some(mut value) = shared_entries(update)? else {
         return Ok(Cow::Borrowed(update.get()));
     };
@@ -205,8 +223,8 @@ pub(super) fn without_results(update: &RawValue) -> Result<Cow<'_, str>, StoreEr
         .map_err(|error| invalid(format!("cell journal update: {error}")))
 }
 
-pub(super) fn with_results<'a>(
-    fold: &Fold,
+pub(crate) fn with_results<'a>(
+    fold: &impl Held,
     session: &str,
     update: &'a RawValue,
 ) -> Result<Cow<'a, str>, StoreError> {
@@ -226,7 +244,7 @@ pub(super) fn with_results<'a>(
             .as_str()
             .ok_or_else(|| invalid("a cell journal result names a non-string stored value"))?;
         let stored = fold
-            .stored(&stored_key(session, key))
+            .held(&stored_key(session, key))
             .ok_or_else(|| invalid(format!("cell journal result {key} is missing")))?;
         let encoded = stored
             .strip_prefix('=')

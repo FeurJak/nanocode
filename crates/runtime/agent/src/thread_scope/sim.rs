@@ -19,10 +19,12 @@ pub enum Mutation {
     LostUnretried,
     KeepAllEvents,
     ReservationSkipped,
+    StoreSkipsFence,
+    JournalLoadsFinished,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
         Self::PartDropped,
         Self::AdoptionSkipsRetired,
         Self::AdoptionSkipsBlobs,
@@ -38,6 +40,8 @@ impl Mutation {
         Self::LostUnretried,
         Self::KeepAllEvents,
         Self::ReservationSkipped,
+        Self::StoreSkipsFence,
+        Self::JournalLoadsFinished,
     ];
 
     #[must_use]
@@ -59,6 +63,8 @@ impl Mutation {
             Self::LostUnretried => "lost_unretried",
             Self::KeepAllEvents => "keep_all_events",
             Self::ReservationSkipped => "reservation_skipped",
+            Self::StoreSkipsFence => "store_skips_fence",
+            Self::JournalLoadsFinished => "journal_loads_finished",
         }
     }
 

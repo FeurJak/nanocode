@@ -47,7 +47,7 @@ mod export;
 mod facts;
 mod import;
 mod over;
-mod shared;
+pub(crate) mod shared;
 mod wakes;
 
 pub use export::Exported;
@@ -57,8 +57,8 @@ pub use import::{Imported, sim as import_sim};
 pub use over::OneLogOver;
 pub use wakes::{Fire, Heard, WakeError};
 
-const TOOLS_MARK: &str = "$nanocode_tools";
-const STORED_MARK: &str = "$nanocode_stored";
+pub(crate) const TOOLS_MARK: &str = "$nanocode_tools";
+pub(crate) const STORED_MARK: &str = "$nanocode_stored";
 
 #[derive(Clone, Debug)]
 pub struct Policy {
@@ -425,7 +425,7 @@ pub(crate) const fn fact_outcome(outcome: Outcome) -> FactOutcome {
     }
 }
 
-fn stored_key(state: &str, key: &str) -> String {
+pub(crate) fn stored_key(state: &str, key: &str) -> String {
     format!("{state}\n{key}")
 }
 

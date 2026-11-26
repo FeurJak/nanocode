@@ -123,6 +123,10 @@ pub struct ThreadScopeStats {
     pub claim_bytes_max: u64,
     pub claim_rows_max: u64,
     pub history_bytes_max: u64,
+    pub store_ops: u64,
+    pub store_reopens: u64,
+    pub journal_ops: u64,
+    pub journal_reopens: u64,
     pub seeds: u64,
     pub steps: u64,
     pub sends: u64,
@@ -171,6 +175,10 @@ impl ThreadScopeStats {
         self.claim_bytes_max = self.claim_bytes_max.max(other.claim_bytes_max);
         self.claim_rows_max = self.claim_rows_max.max(other.claim_rows_max);
         self.history_bytes_max = self.history_bytes_max.max(other.history_bytes_max);
+        self.store_ops += other.store_ops;
+        self.store_reopens += other.store_reopens;
+        self.journal_ops += other.journal_ops;
+        self.journal_reopens += other.journal_reopens;
         self.seeds += other.seeds;
         self.steps += other.steps;
         self.sends += other.sends;
@@ -1348,6 +1356,22 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
         crate::threadwakes::run(&mut rng, &wakes, &mut stats);
         wakes.net.nodes.set(Vec::new());
         if let Some(wrong) = wakes.wrong.read(Clone::clone) {
+            flag(&world.wrong, wrong);
+        }
+    }
+    if world.wrong.read(Option::is_none) {
+        let store = self::world(&mut rng, time);
+        crate::threadstore::run(&mut rng, &store, &mut stats);
+        store.net.nodes.set(Vec::new());
+        if let Some(wrong) = store.wrong.read(Clone::clone) {
+            flag(&world.wrong, wrong);
+        }
+    }
+    if world.wrong.read(Option::is_none) {
+        let journals = self::world(&mut rng, time);
+        crate::threadjournals::run(&mut rng, &journals, &mut stats);
+        journals.net.nodes.set(Vec::new());
+        if let Some(wrong) = journals.wrong.read(Clone::clone) {
             flag(&world.wrong, wrong);
         }
     }
