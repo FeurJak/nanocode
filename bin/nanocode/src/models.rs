@@ -123,7 +123,7 @@ pub fn model_picker(
             .flatten()
             .collect::<Vec<_>>()
             .join(" · ");
-            let mut item = PickerItem::choice(offered.label(&model))
+            let mut item = PickerItem::choice(model.to_string())
                 .detail(detail)
                 .current(model == *current && offered == route);
             let features = features(&model);
