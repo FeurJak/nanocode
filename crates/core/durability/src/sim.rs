@@ -8,6 +8,9 @@ pub enum Mutation {
     KvClaimSkipsGrace,
     CheckMissesFormats,
     ConcurrentSkipsLockTimeout,
+    PurgeUnbatched,
+    PurgeSkipsDeadline,
+    PurgeFinishesEarly,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

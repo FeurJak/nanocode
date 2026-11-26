@@ -609,9 +609,10 @@ const COLLECT_STAMP: Dialects = [
     "UPDATE records SET orphaned = CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) FROM (SELECT dead.key FROM jsonb_array_elements_text($5::text::jsonb) AS dead (key) ORDER BY dead.key) AS dead, owners WHERE records.key = dead.key AND records.holder IS NULL AND records.orphaned IS NULL AND NOT EXISTS (SELECT 1 FROM state_records WHERE state_records.record = records.id) AND owners.id = $1::text AND owners.owner = $2::text AND owners.fence = $3::text AND owners.revision = $4::text RETURNING CAST(records.id AS TEXT)",
 ];
 const PURGE: Dialects = [
-    "DELETE FROM records WHERE id IN (SELECT id FROM records WHERE orphaned IS NOT NULL AND orphaned < CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) - CAST(?1 AS INTEGER) AND holder IS NULL AND NOT EXISTS (SELECT 1 FROM state_records WHERE state_records.record = records.id) ORDER BY key LIMIT CAST(?2 AS INTEGER)) RETURNING id",
-    "DELETE FROM records USING (SELECT id FROM records WHERE orphaned IS NOT NULL AND orphaned < CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) - CAST($1::text AS BIGINT) AND holder IS NULL AND NOT EXISTS (SELECT 1 FROM state_records WHERE state_records.record = records.id) ORDER BY key LIMIT CAST($2::text AS BIGINT)) AS dead WHERE records.id = dead.id AND records.holder IS NULL AND records.orphaned < CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) - CAST($1::text AS BIGINT) RETURNING CAST(records.id AS TEXT)",
+    "DELETE FROM records WHERE id IN (SELECT id FROM records WHERE holder IS NULL AND orphaned IS NOT NULL AND orphaned < CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) - CAST(?1 AS INTEGER) AND NOT EXISTS (SELECT 1 FROM state_records WHERE state_records.record = records.id) LIMIT CAST(?2 AS INTEGER)) RETURNING id",
+    "DELETE FROM records USING (SELECT picked.id FROM (SELECT id, key FROM records WHERE holder IS NULL AND orphaned IS NOT NULL AND orphaned < CAST(EXTRACT(EPOCH FROM statement_timestamp()) * 1000 AS BIGINT) - CAST($1::text AS BIGINT) AND NOT EXISTS (SELECT 1 FROM state_records WHERE state_records.record = records.id) LIMIT CAST($2::text AS BIGINT)) AS picked ORDER BY picked.key) AS dead WHERE records.id = dead.id AND records.holder IS NULL AND records.orphaned < CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) - CAST($1::text AS BIGINT) RETURNING CAST(records.id AS TEXT)",
 ];
+const PURGE_DEADLINE_PG: &str = "SELECT set_config('statement_timeout', $1::text, true)";
 
 struct Text<T>(T);
 
@@ -712,6 +713,13 @@ pub struct Unreachable {
     pub revision: u64,
     pub keys: Vec<String>,
     pub reachable: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Purged {
+    pub deleted: u64,
+    pub batches: u64,
+    pub finished: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1521,16 +1529,70 @@ impl<H: Sql + ?Sized> SqlStore<H> {
     }
 
     pub async fn purge(&mut self, grace_ms: u64, limit: usize) -> Result<u64, StoreError> {
+        self.purge_batch(grace_ms, limit, None).await
+    }
+
+    pub async fn purge_within(
+        &mut self,
+        grace_ms: u64,
+        batch: usize,
+        budget: Duration,
+    ) -> Result<Purged, StoreError> {
+        if batch == 0 {
+            return Err(invalid("a purge batch of 0 records deletes nothing"));
+        }
+        let deadline = nanocode_platform::now() + budget;
+        let mut purged = Purged::default();
+        loop {
+            let left = deadline.saturating_duration_since(nanocode_platform::now());
+            if left.is_zero() {
+                return Ok(purged);
+            }
+            let limit = if crate::sim::mutated(crate::sim::Mutation::PurgeUnbatched) {
+                usize::MAX
+            } else {
+                batch
+            };
+            let deadline =
+                (!crate::sim::mutated(crate::sim::Mutation::PurgeSkipsDeadline)).then_some(left);
+            let deleted = self.purge_batch(grace_ms, limit, deadline).await?;
+            purged.deleted += deleted;
+            purged.batches += 1;
+            if deleted < batch as u64
+                || crate::sim::mutated(crate::sim::Mutation::PurgeFinishesEarly)
+            {
+                purged.finished = true;
+                return Ok(purged);
+            }
+        }
+    }
+
+    async fn purge_batch(
+        &mut self,
+        grace_ms: u64,
+        limit: usize,
+        deadline: Option<Duration>,
+    ) -> Result<u64, StoreError> {
         let grace = grace_ms.to_string();
         let limit = limit_param(limit);
         let dialect = self.host.dialect();
-        let results = self
-            .transaction(
-                "purge",
-                vec![statement(dialect, &PURGE, vec![&grace, &limit])],
-            )
-            .await?;
-        Ok(results[0].len() as u64)
+        let deadline_ms = deadline.map(|left| left.as_millis().max(1).to_string());
+        let mut statements = Vec::with_capacity(2);
+        if let (Some(deadline_ms), SqlDialect::Postgres) = (&deadline_ms, dialect) {
+            statements.push(SqlStatement {
+                sql: PURGE_DEADLINE_PG,
+                params: vec![deadline_ms.as_str()],
+            });
+        }
+        statements.push(statement(dialect, &PURGE, vec![&grace, &limit]));
+        let results = self.transaction("purge", statements).await?;
+        let deleted = results.last().map_or(0, Vec::len) as u64;
+        if limit.parse::<u64>().is_ok_and(|limit| deleted > limit) {
+            return Err(invalid(format!(
+                "a purge with a limit of {limit} deleted {deleted} records"
+            )));
+        }
+        Ok(deleted)
     }
 
     async fn refusal(&mut self, replacement: &Replacement<'_>) -> StoreError {

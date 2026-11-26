@@ -8,6 +8,8 @@ use nanocode_durability_core::Lease;
 
 use crate::rng::{FNV_OFFSET, Rng, fnv};
 
+mod purge;
+
 const STATES: usize = 3;
 const OWNERS_MIN: u64 = 3;
 const OWNERS_MAX: u64 = 5;
@@ -43,10 +45,13 @@ pub enum DurableMutation {
     PurgeSkipsGrace,
     CommitSkipsRevive,
     CollectFencesOwner,
+    PurgeUnbatched,
+    PurgeSkipsDeadline,
+    PurgeFinishesEarly,
 }
 
 impl DurableMutation {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 10] = [
         Self::None,
         Self::WriteSkipsFence,
         Self::ClaimStealsLive,
@@ -54,6 +59,9 @@ impl DurableMutation {
         Self::PurgeSkipsGrace,
         Self::CommitSkipsRevive,
         Self::CollectFencesOwner,
+        Self::PurgeUnbatched,
+        Self::PurgeSkipsDeadline,
+        Self::PurgeFinishesEarly,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -71,6 +79,9 @@ impl DurableMutation {
             Self::PurgeSkipsGrace => "purge_skips_grace",
             Self::CommitSkipsRevive => "commit_skips_revive",
             Self::CollectFencesOwner => "collect_fences_owner",
+            Self::PurgeUnbatched => "purge_unbatched",
+            Self::PurgeSkipsDeadline => "purge_skips_deadline",
+            Self::PurgeFinishesEarly => "purge_finishes_early",
         }
     }
 
@@ -104,10 +115,13 @@ pub struct DurableStats {
     pub stalls: u64,
     pub crashes: u64,
     pub releases: u64,
+    pub purge_batches: u64,
+    pub purges_finished: u64,
+    pub purges_cut: u64,
 }
 
 impl DurableStats {
-    const fn counters(&self) -> [(&'static str, u64); 17] {
+    const fn counters(&self) -> [(&'static str, u64); 20] {
         [
             ("steps", self.steps),
             ("claimed", self.claimed),
@@ -126,6 +140,9 @@ impl DurableStats {
             ("stalls", self.stalls),
             ("crashes", self.crashes),
             ("releases", self.releases),
+            ("purge_batches", self.purge_batches),
+            ("purges_finished", self.purges_finished),
+            ("purges_cut", self.purges_cut),
         ]
     }
 
@@ -150,6 +167,9 @@ impl DurableStats {
             stalls: sum(self.stalls, other.stalls),
             crashes: sum(self.crashes, other.crashes),
             releases: sum(self.releases, other.releases),
+            purge_batches: sum(self.purge_batches, other.purge_batches),
+            purges_finished: sum(self.purges_finished, other.purges_finished),
+            purges_cut: sum(self.purges_cut, other.purges_cut),
         };
     }
 
@@ -1080,6 +1100,11 @@ fn run_seed(seed: u64, mutation: DurableMutation) -> Outcome {
         if world.wrong.is_some() {
             break;
         }
+    }
+    if world.wrong.is_none()
+        && let Err(wrong) = purge::run(seed, mutation, &mut world.stats)
+    {
+        world.wrong = Some(wrong);
     }
     Outcome {
         digest: world.digest(),

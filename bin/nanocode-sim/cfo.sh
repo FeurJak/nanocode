@@ -550,6 +550,9 @@ default_table='
 1 canary_durable_purge_skips_grace canary:2000 --scenario durable --mutation purge_skips_grace
 1 canary_durable_commit_skips_revive canary:400 --scenario durable --mutation commit_skips_revive
 1 canary_durable_collect_fences_owner canary:16 --scenario durable --mutation collect_fences_owner
+1 canary_durable_purge_unbatched canary:16 --scenario durable --mutation purge_unbatched
+1 canary_durable_purge_skips_deadline canary:64 --scenario durable --mutation purge_skips_deadline
+1 canary_durable_purge_finishes_early canary:16 --scenario durable --mutation purge_finishes_early
 4 scale pass --scenario scale
 1 scale_twice pass --scenario scale --twice
 1 canary_scale_global_lock canary:16 --scenario scale --mutation global_lock
