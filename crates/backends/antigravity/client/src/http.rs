@@ -258,6 +258,21 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::Transport(_) => true,
+            Self::Status { status, body, .. } => {
+                classify(*status, body) != Failure::FreeTier
+                    && matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+            }
+            Self::Decode(_)
+            | Self::InvalidRequest(_)
+            | Self::Blocked(_)
+            | Self::Auth(_)
+            | Self::SubscriptionAuth(_) => false,
+        }
+    }
+
     pub fn failure(&self) -> Failure {
         match self {
             Self::Status { status, body, .. } => classify(*status, body),

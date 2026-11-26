@@ -89,6 +89,7 @@ struct Inner {
     web: Option<Arc<dyn WebSearch>>,
     tasks: Atom<Vec<Arc<Task>>>,
     messages: Atom<Vec<Message>>,
+    discard_steps: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -144,6 +145,7 @@ impl Engine {
                 web,
                 tasks: Atom::default(),
                 messages: Atom::default(),
+                discard_steps: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
@@ -173,12 +175,34 @@ impl Engine {
             .join(format!("task-{step}.log"))
     }
 
+    pub fn keep_step_files(&self, keep: bool) {
+        self.inner
+            .discard_steps
+            .store(!keep, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub async fn finish_output(&self, tool: &str, step: u64, full: &str) -> String {
+        if tool == "read_file" {
+            if !self
+                .inner
+                .discard_steps
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                let _ = self.inner.files.write(&self.step_file(step), full).await;
+            }
+            return full.to_owned();
+        }
+        if self
+            .inner
+            .discard_steps
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return crate::format::truncate(full, None);
+        }
         let file = self.step_file(step);
-        let _ = self.inner.files.write(&file, full).await;
-        match tool {
-            "read_file" => full.to_owned(),
-            _ => crate::format::truncate_output(full, &file.to_string_lossy()),
+        match self.inner.files.write(&file, full).await {
+            Ok(()) => crate::format::truncate(full, Some(&file.to_string_lossy())),
+            Err(_) => crate::format::truncate(full, None),
         }
     }
 

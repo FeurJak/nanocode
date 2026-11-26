@@ -19,11 +19,18 @@ pub fn with_header(created: SystemTime, completed: SystemTime, body: &str) -> St
 }
 
 pub fn truncate_output(full: &str, file: &str) -> String {
+    truncate(full, Some(file))
+}
+
+pub fn truncate(full: &str, file: Option<&str>) -> String {
     if full.len() <= TRUNCATE_LIMIT {
         return full.to_owned();
     }
+    let saved = file
+        .map(|file| format!(" You can find the full output in a file at file://{file}."))
+        .unwrap_or_default();
     let prefix = format!(
-        "The tool's output was truncated due to being too long. You can find the full output in a file at file://{file}.\n\nHere is a preview with the middle of the output truncated:\n"
+        "The tool's output was truncated due to being too long.{saved}\n\nHere is a preview with the middle of the output truncated:\n"
     );
     let total = full.len();
     let mut half = 0;
