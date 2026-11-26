@@ -234,9 +234,13 @@ impl AntigravityHarness {
             || session.clone(),
             |parent| parent.root_session_id().to_owned(),
         );
-        let handle = AgentHandle::new(session.clone(), model.clone(), spec.spawn_factory.clone())
-            .with_root_session_id(root)
-            .with_spawn_factory(spec.spawn_factory.clone());
+        let handle = AgentHandle::new(
+            session.clone(),
+            model.clone(),
+            Arc::new(nanocode_agent_core::backend::CrossHarnessOnly),
+        )
+        .with_root_session_id(root)
+        .with_spawn_factory(spec.spawn_factory.clone());
         let selected = match &settings.tools {
             Some(tools) => tools.materialize(handle.clone()),
             None => Tools::builder().without_defaults().build(),
