@@ -1016,6 +1016,10 @@ pub(super) fn run_rounds<'a>(
             state.publish_boundary(fork_snapshot);
             let mut results = vec![None; tool_calls.len()];
             let mut interrupted = false;
+            let steer_boundary = index
+                .saturating_add(1)
+                .saturating_add(cursor.model_step_offset);
+            let mut read_between = Vec::new();
 
             let batches = tool_batches(
                 tool_calls.iter().map(|(_, name, _, _)| name.as_str()),
@@ -1023,7 +1027,12 @@ pub(super) fn run_rounds<'a>(
                 &state.parallel_safe_tools,
             );
             if state.policy.is_some() {
-                for batch in batches {
+                for (number, batch) in batches.into_iter().enumerate() {
+                    if number > 0 && !replaying_boundary {
+                        state
+                            .steers_between(request, steer_boundary, &mut read_between)
+                            .await?;
+                    }
                     let timing = nanocode_durability::ResultTiming::of_batch(batch.len());
                     let mut writes = journal.take();
                     let mut calls = nanocode_sync::InOrder::new();
@@ -1056,10 +1065,15 @@ pub(super) fn run_rounds<'a>(
                 }
                 interrupted = cancel.is_cancelled();
             } else {
-                for batch in batches {
+                for (number, batch) in batches.into_iter().enumerate() {
                     if cancel.is_cancelled() {
                         interrupted = true;
                         break;
+                    }
+                    if number > 0 && !replaying_boundary {
+                        state
+                            .steers_between(request, steer_boundary, &mut read_between)
+                            .await?;
                     }
                     let mut calls = nanocode_sync::InOrder::new();
                     let mut remaining = batch.len();
@@ -1144,6 +1158,9 @@ pub(super) fn run_rounds<'a>(
                     }
                 }
                 pending.push(Message::tool_results(results).into());
+                for steered in read_between {
+                    State::read_steers(&mut cursor, &mut pending, steered);
+                }
                 let mut parts = Vec::new();
                 if state.upstream_context {
                     parts.extend(state.round_notices.iter().flat_map(|notices| notices()));

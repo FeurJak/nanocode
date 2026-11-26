@@ -6287,12 +6287,27 @@ impl State {
         pending: &mut Vec<HistoryMessage>,
         replaying_boundary: bool,
     ) -> Result<bool> {
+        let boundary = cursor.index.saturating_add(cursor.model_step_offset);
+        let Some(steered) = self
+            .steers_before(request, boundary, replaying_boundary)
+            .await?
+        else {
+            return Ok(false);
+        };
+        Self::read_steers(cursor, pending, steered);
+        Ok(true)
+    }
+
+    async fn steers_before(
+        &self,
+        request: &BackendPrompt,
+        boundary: u32,
+        replaying_boundary: bool,
+    ) -> Result<Option<Steered>> {
         let state = self.shared();
         let key = request.key;
         let events = request.events.clone();
-        let boundary = cursor.index.saturating_add(cursor.model_step_offset);
-        let steered = self
-            .steering
+        self.steering
             .run(move |turns| {
                 Box::pin(async move {
                     state
@@ -6300,14 +6315,26 @@ impl State {
                         .await
                 })
             })
-            .await??;
-        let Some(steered) = steered else {
-            return Ok(false);
-        };
+            .await?
+    }
+
+    async fn steers_between(
+        &self,
+        request: &BackendPrompt,
+        boundary: u32,
+        read: &mut Vec<Steered>,
+    ) -> Result<()> {
+        if crate::sim::mutated(crate::sim::Mutation::SteerWaitsRound) {
+            return Ok(());
+        }
+        read.extend(self.steers_before(request, boundary, false).await?);
+        Ok(())
+    }
+
+    fn read_steers(cursor: &mut Cursor, pending: &mut Vec<HistoryMessage>, steered: Steered) {
         cursor.instruction_revision = steered.revision;
         cursor.steers = cursor.steers.max(steered.through);
         pending.extend(steered.messages);
-        Ok(true)
     }
 
     async fn take_steers(

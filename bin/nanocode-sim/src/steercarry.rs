@@ -52,16 +52,18 @@ pub enum CarryMutation {
     IgnoresPrunedReceipts,
     CodexFactDropped,
     GateDropped,
+    SteerWaitsRound,
 }
 
 impl CarryMutation {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::None,
         Self::CarryAsText,
         Self::IgnoresEarlierRead,
         Self::IgnoresPrunedReceipts,
         Self::CodexFactDropped,
         Self::GateDropped,
+        Self::SteerWaitsRound,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -78,6 +80,7 @@ impl CarryMutation {
             Self::IgnoresPrunedReceipts => "carry_ignores_pruned_receipts",
             Self::CodexFactDropped => "codex_fact_dropped",
             Self::GateDropped => "carry_gate_dropped",
+            Self::SteerWaitsRound => "steer_waits_round",
         }
     }
 
@@ -87,9 +90,18 @@ impl CarryMutation {
             Self::IgnoresPrunedReceipts => {
                 nanocode_durability::sim::Mutation::CarryIgnoresPrunedReceipts
             }
-            Self::None | Self::CarryAsText | Self::CodexFactDropped | Self::GateDropped => {
-                nanocode_durability::sim::Mutation::None
-            }
+            Self::None
+            | Self::CarryAsText
+            | Self::CodexFactDropped
+            | Self::GateDropped
+            | Self::SteerWaitsRound => nanocode_durability::sim::Mutation::None,
+        }
+    }
+
+    const fn claude(self) -> nanocode::claude::sim::Mutation {
+        match self {
+            Self::SteerWaitsRound => nanocode::claude::sim::Mutation::SteerWaitsRound,
+            _ => nanocode::claude::sim::Mutation::None,
         }
     }
 
@@ -338,7 +350,7 @@ fn json_headers() -> nanocode_http::types::HeaderMap {
     headers
 }
 
-fn event_stream() -> nanocode_http::types::HeaderMap {
+pub(crate) fn event_stream() -> nanocode_http::types::HeaderMap {
     let mut headers = nanocode_http::types::HeaderMap::new();
     headers.insert(
         nanocode_http::types::header::CONTENT_TYPE,
@@ -478,7 +490,10 @@ async fn carry_turn(
     wire.plan(&[false]);
     wire.hang.store(hang, Ordering::Release);
     let request = match mutation {
-        CarryMutation::None | CarryMutation::CodexFactDropped | CarryMutation::GateDropped => {
+        CarryMutation::None
+        | CarryMutation::CodexFactDropped
+        | CarryMutation::GateDropped
+        | CarryMutation::SteerWaitsRound => {
             PromptRequest::new("NEXTTURN continue").carry_steer(STEER_ID, Prompt::new(STEER_TEXT))
         }
         CarryMutation::IgnoresEarlierRead | CarryMutation::IgnoresPrunedReceipts => {
@@ -649,7 +664,7 @@ async fn epoch_work(
     Ok(())
 }
 
-fn epoch<T>(
+pub(crate) fn epoch<T>(
     seed: u64,
     clock: &Arc<Clock>,
     label: &str,
@@ -835,6 +850,7 @@ struct Outcome {
 
 fn simulate(seed: u64, mutation: CarryMutation) -> Outcome {
     nanocode_durability::sim::mutate(mutation.durability());
+    nanocode::claude::sim::mutate(mutation.claude());
     let mut stats = CarryStats {
         seeds: 1,
         ..CarryStats::default()
@@ -882,6 +898,16 @@ fn simulate(seed: u64, mutation: CarryMutation) -> Outcome {
         if !run.wrong.is_empty() {
             wrong.push(format!("{name}: {}", run.wrong.join("; ")));
         }
+    }
+    let clock = Clock::new();
+    crate::host::enter(seed, &clock);
+    stats.cases += 1;
+    match crate::steerorder::check(seed, &clock) {
+        Ok(calls) => {
+            stats.model_calls += calls;
+            digest = fnv(digest, format!("steer_order {calls}").as_bytes());
+        }
+        Err(error) => wrong.push(error),
     }
     Outcome {
         digest,

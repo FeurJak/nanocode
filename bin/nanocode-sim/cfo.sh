@@ -259,6 +259,7 @@ default_table='
 1 canary_steer_carry_ignores_pruned_receipts canary:40 --scenario steer_carry --mutation carry_ignores_pruned_receipts
 1 canary_steer_carry_codex_fact_dropped canary:20 --scenario steer_carry --mutation codex_fact_dropped
 1 canary_steer_carry_gate_dropped canary:8 --scenario steer_carry --mutation carry_gate_dropped
+1 canary_steer_waits_round canary:8 --scenario steer_carry --mutation steer_waits_round
 8 board_brief pass --scenario board_brief
 2 board_brief_twice pass --scenario board_brief --twice
 1 canary_board_brief_over_budget canary:40 --scenario board_brief --mutation brief_over_budget

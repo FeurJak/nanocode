@@ -74,6 +74,7 @@ mod slog;
 mod socket;
 mod stall;
 mod steercarry;
+mod steerorder;
 mod store;
 mod streams;
 mod sync;
