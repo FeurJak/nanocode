@@ -59,12 +59,21 @@ pub(crate) fn encode(state: &ThreadState, rows: usize) -> Vec<Part> {
             generation: state.generation,
         }),
     }];
-    for (id, turn) in state.turns.iter() {
-        parts.push(Part {
-            name: format!("turn/{id}"),
-            body: json(turn.as_ref()),
-        });
-    }
+    assert_eq!(
+        state.admitted.len(),
+        state.turns.len(),
+        "every resident turn is admitted at one event"
+    );
+    chunked(
+        &mut parts,
+        "turns",
+        rows,
+        state
+            .admitted
+            .values()
+            .map(|id| state.turns.get(id).expect("an admitted turn is resident"))
+            .map(AsRef::as_ref),
+    );
     chunked(&mut parts, "events", rows, state.events.iter().map(AsRef::as_ref));
     chunked(&mut parts, "facts", rows, state.facts.iter().map(AsRef::as_ref));
     for ((session, cell), updates) in state.cells.iter() {
@@ -193,6 +202,16 @@ fn place(
                 return Err(invalid(format!("part {name} holds turn {}", turn.id)));
             }
             state.turns.insert(key, Arc::new(turn));
+        }
+        "turns" => {
+            index(name, rest)?;
+            for turn in parsed::<Vec<Turn>>(name, body)? {
+                let id: Arc<str> = Arc::from(turn.id.as_str());
+                if state.turns.contains_key(&id) {
+                    return Err(invalid(format!("part {name} holds turn {id} twice")));
+                }
+                state.turns.insert(id, Arc::new(turn));
+            }
         }
         "events" => {
             pieces.events.insert(index(name, rest)?, parsed(name, body)?);
