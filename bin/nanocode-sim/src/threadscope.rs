@@ -33,6 +33,7 @@ use nanocode_scope::{
 use nanocode_sync::{Atom, block_on};
 use nanocode_turnlog::{
     Fold, Hold, LogHost, Phase, Record, SCAN_END, Wake,
+    sim::Mutation as TurnLogMutation,
     parted::{ModelParts, PartStore, PartedLog},
 };
 use serde::{Deserialize, Serialize};
@@ -73,24 +74,35 @@ const STAGED_CRASH_PPM: u64 = 300_000;
 const EVENTS_AHEAD: Range<u64> = 0..6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ThreadScopeMutation(Mutation, ScopeMutation);
+pub struct ThreadScopeMutation(Mutation, ScopeMutation, TurnLogMutation);
 
 const SCOPE_MUTATIONS: [ScopeMutation; 2] = [
     ScopeMutation::ListingSkipsDropped,
     ScopeMutation::AdoptionSkipsCheckpoint,
 ];
 
+const TURN_LOG_MUTATIONS: [(&str, TurnLogMutation); 1] = [(
+    "snapshot_resets_recovery",
+    TurnLogMutation::SnapshotResetsRecovery,
+)];
+
 impl ThreadScopeMutation {
-    pub const NONE: Self = Self(Mutation::None, ScopeMutation::None);
+    pub const NONE: Self = Self(Mutation::None, ScopeMutation::None, TurnLogMutation::None);
 
     pub fn parse(name: &str) -> Option<Self> {
         if let Some(mutation) = SCOPE_MUTATIONS.into_iter().find(|scope| scope.name() == name) {
-            return Some(Self(Mutation::None, mutation));
+            return Some(Self(Mutation::None, mutation, TurnLogMutation::None));
         }
-        Mutation::parse(name).map(|mutation| Self(mutation, ScopeMutation::None))
+        if let Some((_, mutation)) = TURN_LOG_MUTATIONS.into_iter().find(|(named, _)| *named == name) {
+            return Some(Self(Mutation::None, ScopeMutation::None, mutation));
+        }
+        Mutation::parse(name).map(|mutation| Self(mutation, ScopeMutation::None, TurnLogMutation::None))
     }
 
-    pub const fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
+        if let Some((name, _)) = TURN_LOG_MUTATIONS.into_iter().find(|(_, mutation)| *mutation == self.2) {
+            return name;
+        }
         match self.1 {
             ScopeMutation::None => self.0.name(),
             scope => scope.name(),
@@ -102,6 +114,7 @@ impl ThreadScopeMutation {
             .iter()
             .map(|mutation| mutation.name())
             .chain(SCOPE_MUTATIONS.iter().map(|mutation| mutation.name()))
+            .chain(TURN_LOG_MUTATIONS.iter().map(|(name, _)| *name))
             .collect::<Vec<_>>()
             .join("|")
     }
@@ -111,7 +124,6 @@ impl ThreadScopeMutation {
 pub struct ThreadScopeStats {
     pub turn_ops: u64,
     pub turn_reopens: u64,
-    pub turn_lenient: u64,
     pub hold_ops: u64,
     pub hold_reopens: u64,
     pub hold_settles: u64,
@@ -163,7 +175,6 @@ impl ThreadScopeStats {
     pub fn add(&mut self, other: &Self) {
         self.turn_ops += other.turn_ops;
         self.turn_reopens += other.turn_reopens;
-        self.turn_lenient += other.turn_lenient;
         self.hold_ops += other.hold_ops;
         self.hold_reopens += other.hold_reopens;
         self.hold_settles += other.hold_settles;
@@ -1326,6 +1337,7 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
     );
     thread_scope_sim::mutate(mutation.0);
     scope_sim::mutate(mutation.1);
+    nanocode_turnlog::sim::mutate(mutation.2);
     let mut generation = 0;
     let mut turns = BTreeMap::new();
     for _ in 0..steps {
@@ -1385,6 +1397,7 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
     }
     thread_scope_sim::mutate(Mutation::None);
     scope_sim::mutate(ScopeMutation::None);
+    nanocode_turnlog::sim::mutate(TurnLogMutation::None);
     let (adoptions, adoption_rows) = world.gone.get();
     stats.adoptions += adoptions;
     stats.adoption_rows += adoption_rows;

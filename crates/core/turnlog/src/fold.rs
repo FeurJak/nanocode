@@ -190,6 +190,7 @@ pub struct Retired {
 
 pub const RETIRED_KEY: &str = "$turnlog_retired";
 pub const FOLD_SNAPSHOT_KEY: &str = "$fold_snapshot";
+pub const UNPINNED_RECOVERY_ROW: u64 = u64::MAX;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -3215,8 +3216,14 @@ impl Fold {
                 }))?,
             }
             if let Some(recovered) = turn.recovered {
+                let at = match recovered.at {
+                    None if !crate::sim::mutated(crate::sim::Mutation::SnapshotResetsRecovery) => {
+                        Some(UNPINNED_RECOVERY_ROW)
+                    }
+                    at => at,
+                };
                 take(Record::Recovery {
-                    at: recovered.at,
+                    at,
                     attempt: recovered.attempt,
                     turn: turn.id.clone(),
                     unknown: Vec::new(),

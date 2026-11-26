@@ -29,6 +29,7 @@ pub enum Mutation {
     ConflictSkipsReadBack,
     RetrySkipsReadBack,
     ScansUnbatched,
+    SnapshotResetsRecovery,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

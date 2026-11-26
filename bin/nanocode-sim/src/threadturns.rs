@@ -367,7 +367,6 @@ fn started(
     sides: &mut Sides,
     attempts: &mut BTreeMap<String, u64>,
     restart: &Restart<'_>,
-    stats: &mut ThreadScopeStats,
 ) -> bool {
     let Restart {
         turn,
@@ -404,32 +403,6 @@ fn started(
                 ),
             );
             return false;
-        }
-        if matches!(ours, Some(Ok(Some(_)))) {
-            stats.turn_lenient += 1;
-            let fields = Map::from_iter([(
-                "error".to_owned(),
-                json!(format!(
-                    "the turn restarted {} times without progress",
-                    attempt - 1
-                )),
-            )]);
-            let finished = driven(
-                world,
-                "a finish",
-                sides.one.finish(turn, TurnState::Failed, &fields),
-            );
-            if !matches!(finished, Some(Ok(Some(_)))) {
-                flag(
-                    &world.wrong,
-                    format!(
-                        "turns: step {step} the turn log does not fail {turn} past its restarts: {}",
-                        shown(&finished)
-                    ),
-                );
-                return false;
-            }
-            return true;
         }
     } else if recovering {
         let counted = kept
@@ -489,7 +462,7 @@ pub(crate) fn run(rng: &mut Rng, world: &World, stats: &mut ThreadScopeStats) {
                 restarts: policy.restarts,
                 step,
             };
-            if !started(world, &mut sides, &mut attempts, &restart, stats) {
+            if !started(world, &mut sides, &mut attempts, &restart) {
                 return;
             }
             compared(world, &sides, step);
