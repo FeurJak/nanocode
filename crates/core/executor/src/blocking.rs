@@ -1,4 +1,5 @@
 use std::{
+    io,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, OnceLock,
@@ -14,6 +15,7 @@ use nanocode_sys::{AtomicBox, AtomicWaker, SwapOption};
 use crate::{
     queue::Shared,
     runtime::Handle,
+    sim::{self, Mutation},
     task::{Abortable, Current, Id, JoinError, JoinHandle, Joinable},
 };
 
@@ -21,7 +23,12 @@ const BLOCKING_THREAD: &str = "nanocode-blocking";
 pub(crate) const MAX_BLOCKING_THREADS: usize = 512;
 pub(crate) const KEEP_ALIVE: Duration = Duration::from_secs(10);
 
-type Job = Box<dyn FnOnce() + Send + 'static>;
+pub(crate) trait Work: Send + 'static {
+    fn run(self: Box<Self>);
+    fn refuse(self: Box<Self>, kind: io::ErrorKind);
+}
+
+type Job = Box<dyn Work>;
 
 struct Idle {
     thread: Thread,
@@ -74,11 +81,38 @@ impl Pool {
         }
         let pool = self.clone();
         let handle = handle.cloned();
-        let spawned = std::thread::Builder::new()
-            .name(self.name.clone())
-            .spawn(move || pool.work(handle.as_ref()));
-        if spawned.is_err() {
-            self.threads.fetch_sub(1, Ordering::SeqCst);
+        let spawned = if sim::refuses_thread() {
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
+        } else {
+            std::thread::Builder::new()
+                .name(self.name.clone())
+                .spawn(move || pool.work(handle.as_ref()))
+                .map(drop)
+        };
+        if let Err(error) = spawned {
+            self.unstarted(error.kind());
+        }
+    }
+
+    fn unstarted(&self, kind: io::ErrorKind) {
+        let left = self.threads.fetch_sub(1, Ordering::SeqCst) - 1;
+        if left > 0 {
+            if sim::mutated(Mutation::RefusesServed) {
+                self.refuse_queued(kind);
+            }
+            return;
+        }
+        if !sim::mutated(Mutation::StrandsRefused) {
+            self.refuse_queued(kind);
+        }
+        if let Some(waiter) = self.waiter.load_full() {
+            waiter.unpark();
+        }
+    }
+
+    fn refuse_queued(&self, kind: io::ErrorKind) {
+        while let Some(job) = self.jobs.pop() {
+            job.refuse(kind);
         }
     }
 
@@ -109,7 +143,7 @@ impl Pool {
     fn serve(&self) {
         loop {
             while let Some(job) = self.jobs.pop() {
-                job();
+                job.run();
             }
             if self.shutdown.load(Ordering::SeqCst) {
                 break;
@@ -241,6 +275,34 @@ impl<T: Send + 'static, F> Drop for Run<T, F> {
     }
 }
 
+impl<T, F> Work for Run<T, F>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    fn run(mut self: Box<Self>) {
+        let Some(work) = self.work.take() else {
+            return;
+        };
+        if self.task.aborted.load(Ordering::Acquire) {
+            return;
+        }
+        let _current = Current::enter(Some(self.task.id));
+        let output = catch_unwind(AssertUnwindSafe(work))
+            .map_err(|payload| JoinError::panic(self.task.id, payload));
+        self.task.complete(output);
+    }
+
+    fn refuse(self: Box<Self>, kind: io::ErrorKind) {
+        assert!(
+            !self.task.finished.load(Ordering::Acquire),
+            "a queued blocking task has not finished"
+        );
+        self.task
+            .complete(Err(JoinError::refused(self.task.id, kind)));
+    }
+}
+
 static GLOBAL: OnceLock<Arc<Pool>> = OnceLock::new();
 
 pub(crate) fn spawn_anywhere<F, T>(work: F) -> JoinHandle<T>
@@ -270,24 +332,10 @@ where
         aborted: AtomicBool::new(false),
         joiner: AtomicWaker::new(),
     });
-    let mut run = Run {
+    let run = Run {
         task: task.clone(),
         work: Some(work),
     };
-    pool.spawn(
-        handle,
-        Box::new(move || {
-            let Some(work) = run.work.take() else {
-                return;
-            };
-            if run.task.aborted.load(Ordering::Acquire) {
-                return;
-            }
-            let _current = Current::enter(Some(run.task.id));
-            let output = catch_unwind(AssertUnwindSafe(work))
-                .map_err(|payload| JoinError::panic(run.task.id, payload));
-            run.task.complete(output);
-        }),
-    );
+    pool.spawn(handle, Box::new(run));
     JoinHandle::new(task.clone(), task)
 }

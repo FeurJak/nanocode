@@ -10,10 +10,13 @@ pub enum Mutation {
     UncountedPolls,
     UncheckedDrive,
     StaleWaiters,
+    StrandsRefused,
+    RefusesServed,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
 static PAUSE_NS: AtomicU64 = AtomicU64::new(0);
+static THREADS_REFUSED: AtomicU64 = AtomicU64::new(0);
 
 pub fn mutate(mutation: Mutation) {
     MUTATION.store(mutation as u8, Ordering::SeqCst);
@@ -33,4 +36,17 @@ pub(crate) fn pause() {
     if nanos > 0 {
         std::thread::sleep(Duration::from_nanos(nanos));
     }
+}
+
+pub fn refuse_threads(count: u64) {
+    THREADS_REFUSED.store(count, Ordering::SeqCst);
+}
+
+pub(crate) fn refuses_thread() -> bool {
+    THREADS_REFUSED.load(Ordering::Relaxed) > 0
+        && THREADS_REFUSED
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
 }

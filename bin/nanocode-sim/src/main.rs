@@ -58,6 +58,7 @@ mod onelogfacts;
 mod partitions;
 mod pgpool;
 mod plog;
+mod refusals;
 mod repocache;
 mod requestclose;
 mod resident;

@@ -70,6 +70,7 @@ impl Drop for Current {
 
 enum Repr {
     Cancelled,
+    Refused(io::ErrorKind),
     Panic(Exclusive<Box<dyn Any + Send + 'static>>, Option<String>),
 }
 
@@ -83,6 +84,13 @@ impl JoinError {
         Self {
             id,
             repr: Repr::Cancelled,
+        }
+    }
+
+    pub(crate) const fn refused(id: Id, kind: io::ErrorKind) -> Self {
+        Self {
+            id,
+            repr: Repr::Refused(kind),
         }
     }
 
@@ -100,6 +108,11 @@ impl JoinError {
     }
 
     #[must_use]
+    pub const fn is_refused(&self) -> bool {
+        matches!(self.repr, Repr::Refused(_))
+    }
+
+    #[must_use]
     pub const fn is_panic(&self) -> bool {
         matches!(self.repr, Repr::Panic(..))
     }
@@ -113,7 +126,7 @@ impl JoinError {
     pub fn try_into_panic(self) -> Result<Box<dyn Any + Send + 'static>, Self> {
         match self.repr {
             Repr::Panic(payload, _) => Ok(payload.into_inner()),
-            Repr::Cancelled => Err(self),
+            Repr::Cancelled | Repr::Refused(_) => Err(self),
         }
     }
 
@@ -134,6 +147,11 @@ impl fmt::Display for JoinError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.repr {
             Repr::Cancelled => write!(formatter, "task {} was cancelled", self.id),
+            Repr::Refused(kind) => write!(
+                formatter,
+                "task {} was refused: the blocking pool has no thread and starting one failed ({kind})",
+                self.id
+            ),
             Repr::Panic(_, message) => match message {
                 Some(message) => {
                     write!(
@@ -152,6 +170,7 @@ impl fmt::Debug for JoinError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.repr {
             Repr::Cancelled => write!(formatter, "JoinError::Cancelled({:?})", self.id),
+            Repr::Refused(kind) => write!(formatter, "JoinError::Refused({:?}, {kind:?})", self.id),
             Repr::Panic(_, message) => match message {
                 Some(message) => {
                     write!(
@@ -170,10 +189,14 @@ impl std::error::Error for JoinError {}
 
 impl From<JoinError> for io::Error {
     fn from(error: JoinError) -> Self {
-        Self::other(match error.repr {
-            Repr::Cancelled => "task was cancelled",
-            Repr::Panic(..) => "task panicked",
-        })
+        match error.repr {
+            Repr::Cancelled => Self::other("task was cancelled"),
+            Repr::Refused(kind) => Self::new(
+                kind,
+                "the blocking pool has no thread and starting one failed",
+            ),
+            Repr::Panic(..) => Self::other("task panicked"),
+        }
     }
 }
 

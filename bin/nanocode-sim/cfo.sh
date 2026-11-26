@@ -219,6 +219,8 @@ default_table='
 1 canary_executor_uncounted_polls canary:100 --scenario executor --mutation uncounted_polls
 1 canary_executor_unchecked_drive canary:40 --scenario executor --mutation unchecked_drive
 1 canary_executor_stale_waiters canary:100:21 --scenario executor --mutation stale_waiters
+1 canary_executor_strands_refused canary --scenario executor --mutation strands_refused
+1 canary_executor_refuses_served canary --scenario executor --mutation refuses_served
 8 board pass --scenario board
 2 board_twice pass --scenario board --twice
 1 board_pinned_squatted_ids pass --scenario board --seed 1795147396000000556

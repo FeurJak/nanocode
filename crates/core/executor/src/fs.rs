@@ -24,6 +24,7 @@ where
 {
     match blocking::spawn_anywhere(work).await {
         Ok(result) => result,
+        Err(error) if error.is_refused() => Err(error.into()),
         Err(_) => Err(background_failed()),
     }
 }
