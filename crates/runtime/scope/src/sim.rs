@@ -11,10 +11,12 @@ pub enum Mutation {
     EvictWithoutCheckpoint,
     CheckpointRewritesUnchangedParts,
     ForwardWaitsUnbounded,
+    ListingSkipsDropped,
+    ListingChainUnbounded,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::CheckpointIndexesOnly,
         Self::ReadThroughWriter,
         Self::PublishBeforeCommit,
@@ -22,6 +24,8 @@ impl Mutation {
         Self::EvictWithoutCheckpoint,
         Self::CheckpointRewritesUnchangedParts,
         Self::ForwardWaitsUnbounded,
+        Self::ListingSkipsDropped,
+        Self::ListingChainUnbounded,
     ];
 
     #[must_use]
@@ -35,6 +39,8 @@ impl Mutation {
             Self::EvictWithoutCheckpoint => "evict_without_checkpoint",
             Self::CheckpointRewritesUnchangedParts => "checkpoint_rewrites_unchanged_parts",
             Self::ForwardWaitsUnbounded => "forward_waits_unbounded",
+            Self::ListingSkipsDropped => "listing_skips_dropped",
+            Self::ListingChainUnbounded => "listing_chain_unbounded",
         }
     }
 

@@ -5,7 +5,7 @@ use nanocode_durability_core::{
 };
 
 use crate::{
-    checkpoint::{Checkpoints, Fence, Manifest, Written},
+    checkpoint::{Checkpoints, Fence, Listing, Manifest, Written, assemble},
     sim::{self, Mutation},
 };
 
@@ -29,8 +29,8 @@ const MIGRATIONS: [Migration; 1] = [Migration {
     adopt: None,
 }];
 const LATEST: Dialects = [
-    "SELECT CAST(seq AS TEXT), CAST(epoch AS TEXT), parts FROM nanocode_checkpoint_manifest WHERE scope = ?1 ORDER BY seq DESC LIMIT 1",
-    "SELECT CAST(seq AS TEXT), CAST(epoch AS TEXT), parts FROM nanocode_checkpoint_manifest WHERE scope = $1::text ORDER BY seq DESC LIMIT 1",
+    "SELECT CAST(seq AS TEXT), CAST(epoch AS TEXT), parts FROM nanocode_checkpoint_manifest WHERE scope = ?1 AND seq >= COALESCE((SELECT seq FROM nanocode_checkpoint_manifest WHERE scope = ?1 AND parts LIKE '[%' ORDER BY seq DESC LIMIT 1), 0) ORDER BY seq",
+    "SELECT CAST(seq AS TEXT), CAST(epoch AS TEXT), parts FROM nanocode_checkpoint_manifest WHERE scope = $1::text AND seq >= COALESCE((SELECT seq FROM nanocode_checkpoint_manifest WHERE scope = $1::text AND parts LIKE '[%' ORDER BY seq DESC LIMIT 1), 0) ORDER BY seq",
 ];
 const PARTS: Dialects = [
     "SELECT digest, body FROM nanocode_checkpoint_part WHERE digest IN (SELECT value FROM json_each(?1))",
@@ -52,12 +52,12 @@ const PUT_PART: [Dialects; 2] = [
 ];
 const PUT_MANIFEST: [Dialects; 2] = [
     [
-        "INSERT INTO nanocode_checkpoint_manifest (scope, seq, epoch, parts) SELECT ?1, CAST(?2 AS INTEGER), CAST(?4 AS INTEGER), ?6 WHERE EXISTS (SELECT 1 FROM nanocode_log_fence WHERE part = CAST(?3 AS INTEGER) AND epoch = CAST(?4 AS INTEGER) AND holder = ?5) AND NOT EXISTS (SELECT 1 FROM nanocode_checkpoint_manifest WHERE scope = ?1 AND (seq >= CAST(?2 AS INTEGER) OR epoch > CAST(?4 AS INTEGER)))",
-        "INSERT INTO nanocode_checkpoint_manifest (scope, seq, epoch, parts) SELECT $1::text, CAST($2::text AS BIGINT), CAST($4::text AS BIGINT), $6::text WHERE EXISTS (SELECT 1 FROM nanocode_log_fence WHERE part = CAST($3::text AS INTEGER) AND epoch = CAST($4::text AS BIGINT) AND holder = $5::text) AND NOT EXISTS (SELECT 1 FROM nanocode_checkpoint_manifest WHERE scope = $1::text AND (seq >= CAST($2::text AS BIGINT) OR epoch > CAST($4::text AS BIGINT)))",
+        "INSERT INTO nanocode_checkpoint_manifest (scope, seq, epoch, parts) SELECT ?1, CAST(?2 AS INTEGER), CAST(?4 AS INTEGER), ?6 WHERE EXISTS (SELECT 1 FROM nanocode_log_fence WHERE part = CAST(?3 AS INTEGER) AND epoch = CAST(?4 AS INTEGER) AND holder = ?5) AND NOT EXISTS (SELECT 1 FROM nanocode_checkpoint_manifest WHERE scope = ?1 AND (seq >= CAST(?2 AS INTEGER) OR epoch > CAST(?4 AS INTEGER))) AND (?7 = '' OR (EXISTS (SELECT 1 FROM nanocode_checkpoint_manifest WHERE scope = ?1 AND seq = CAST(?7 AS INTEGER)) AND NOT EXISTS (SELECT 1 FROM nanocode_checkpoint_manifest WHERE scope = ?1 AND seq > CAST(?7 AS INTEGER))))",
+        "INSERT INTO nanocode_checkpoint_manifest (scope, seq, epoch, parts) SELECT $1::text, CAST($2::text AS BIGINT), CAST($4::text AS BIGINT), $6::text WHERE EXISTS (SELECT 1 FROM nanocode_log_fence WHERE part = CAST($3::text AS INTEGER) AND epoch = CAST($4::text AS BIGINT) AND holder = $5::text) AND NOT EXISTS (SELECT 1 FROM nanocode_checkpoint_manifest WHERE scope = $1::text AND (seq >= CAST($2::text AS BIGINT) OR epoch > CAST($4::text AS BIGINT))) AND ($7::text = '' OR (EXISTS (SELECT 1 FROM nanocode_checkpoint_manifest WHERE scope = $1::text AND seq = CAST(NULLIF($7::text, '') AS BIGINT)) AND NOT EXISTS (SELECT 1 FROM nanocode_checkpoint_manifest WHERE scope = $1::text AND seq > CAST(NULLIF($7::text, '') AS BIGINT))))",
     ],
     [
-        "INSERT INTO nanocode_checkpoint_manifest (scope, seq, epoch, parts) SELECT ?1, CAST(?2 AS INTEGER), CAST(?4 AS INTEGER), ?6 WHERE ?3 IS NOT NULL AND ?5 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nanocode_checkpoint_manifest WHERE scope = ?1 AND seq >= CAST(?2 AS INTEGER))",
-        "INSERT INTO nanocode_checkpoint_manifest (scope, seq, epoch, parts) SELECT $1::text, CAST($2::text AS BIGINT), CAST($4::text AS BIGINT), $6::text WHERE $3::text IS NOT NULL AND $5::text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nanocode_checkpoint_manifest WHERE scope = $1::text AND seq >= CAST($2::text AS BIGINT))",
+        "INSERT INTO nanocode_checkpoint_manifest (scope, seq, epoch, parts) SELECT ?1, CAST(?2 AS INTEGER), CAST(?4 AS INTEGER), ?6 WHERE ?3 IS NOT NULL AND ?5 IS NOT NULL AND ?7 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nanocode_checkpoint_manifest WHERE scope = ?1 AND seq >= CAST(?2 AS INTEGER))",
+        "INSERT INTO nanocode_checkpoint_manifest (scope, seq, epoch, parts) SELECT $1::text, CAST($2::text AS BIGINT), CAST($4::text AS BIGINT), $6::text WHERE $3::text IS NOT NULL AND $5::text IS NOT NULL AND $7::text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM nanocode_checkpoint_manifest WHERE scope = $1::text AND seq >= CAST($2::text AS BIGINT))",
     ],
 ];
 const LANDED: Dialects = [
@@ -122,21 +122,13 @@ impl<H: Sql + ?Sized> SqlCheckpoints<H> {
                 params: vec![scope],
             })
             .await?;
-        let Some(row) = rows.first() else {
-            return Ok(None);
-        };
-        let encoded = text(row, 2, "parts")?;
-        let parts: Vec<(String, String)> = serde_json::from_str(&encoded).map_err(|error| {
-            StoreError::Backend(format!(
-                "checkpoint parts of {scope} do not decode: {error}"
-            ))
-        })?;
-        Ok(Some(Manifest {
-            scope: scope.to_owned(),
-            seq: number(row, 0, "seq")?,
-            epoch: number(row, 1, "epoch")?,
-            parts,
-        }))
+        let mut chain = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let seq = number(row, 0, "seq")?;
+            let listing = Listing::decoded(scope, seq, &text(row, 2, "parts")?)?;
+            chain.push((seq, number(row, 1, "epoch")?, listing));
+        }
+        assemble(scope, chain)
     }
 
     async fn parts_of(&self, digests: &[String]) -> Result<Vec<(String, String)>, StoreError> {
@@ -161,15 +153,18 @@ impl<H: Sql + ?Sized> SqlCheckpoints<H> {
         &self,
         fence: &Fence,
         manifest: &Manifest,
+        listing: &Listing,
         parts: &[(String, String)],
     ) -> Result<Written, StoreError> {
         let skip = usize::from(sim::mutated(Mutation::CheckpointSkipsEpoch));
         let seq = manifest.seq.to_string();
         let part = fence.part.0.to_string();
         let epoch = fence.epoch.to_string();
-        let listed = serde_json::to_string(&manifest.parts).map_err(|error| {
-            StoreError::Backend(format!("checkpoint parts do not encode: {error}"))
-        })?;
+        let listed = listing.encoded();
+        let base = match listing {
+            Listing::Whole(_) => String::new(),
+            Listing::Changed { base, .. } => base.to_string(),
+        };
         let _ = FENCED;
         let mut statements = Vec::with_capacity(parts.len() + 2);
         for (digest, body) in parts {
@@ -180,7 +175,15 @@ impl<H: Sql + ?Sized> SqlCheckpoints<H> {
         }
         statements.push(SqlStatement {
             sql: self.pick(&PUT_MANIFEST[skip]),
-            params: vec![&manifest.scope, &seq, &part, &epoch, &fence.holder, &listed],
+            params: vec![
+                &manifest.scope,
+                &seq,
+                &part,
+                &epoch,
+                &fence.holder,
+                &listed,
+                &base,
+            ],
         });
         statements.push(SqlStatement {
             sql: self.pick(&LANDED),
@@ -221,8 +224,9 @@ impl<H: Sql + Send + Sync + ?Sized> Checkpoints for SqlCheckpoints<H> {
         &'a self,
         fence: &'a Fence,
         manifest: &'a Manifest,
+        listing: &'a Listing,
         parts: &'a [(String, String)],
     ) -> StoreFuture<'a, Result<Written, StoreError>> {
-        Box::pin(self.written(fence, manifest, parts))
+        Box::pin(self.written(fence, manifest, listing, parts))
     }
 }

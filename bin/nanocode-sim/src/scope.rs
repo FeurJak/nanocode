@@ -15,7 +15,7 @@ use std::{
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_partitions::{Partition, Row};
 use nanocode_scope::{
-    Checkpoints, Committed, Fence, Manifest, MemoryCheckpoints, Part, PartedLeases, Policy,
+    Checkpoints, Committed, Fence, Listing, Manifest, MemoryCheckpoints, Part, PartedLeases, Policy,
     Reached, Resident, Route, Routed, Scope, ScopeError, Scopes, Stats, Wiring, Written,
     sim::{self as scope_sim, Mutation},
 };
@@ -306,6 +306,43 @@ impl Witness {
     }
 }
 
+impl Witness {
+    fn listed(&self, manifest: &Manifest) {
+        let Some(landed) = self.inner.manifests(&manifest.scope).last().cloned() else {
+            return;
+        };
+        if landed.seq != manifest.seq {
+            return;
+        }
+        let mut expected = manifest.parts.clone();
+        expected.sort();
+        let mut assembled = landed.parts.clone();
+        assembled.sort();
+        if assembled != expected {
+            flag(
+                &self.wrong,
+                format!(
+                    "listing: the checkpoint of {} at row {} assembles to {} parts, but its state encodes {}",
+                    manifest.scope,
+                    manifest.seq,
+                    assembled.len(),
+                    expected.len()
+                ),
+            );
+        }
+        let whole = Listing::Whole(landed.parts).encoded().len();
+        if landed.changed_bytes > whole {
+            flag(
+                &self.wrong,
+                format!(
+                    "listing: the checkpoint of {} at row {} chains {} bytes of changes since its whole listing, more than the {whole} bytes a whole listing takes",
+                    manifest.scope, manifest.seq, landed.changed_bytes
+                ),
+            );
+        }
+    }
+}
+
 impl Checkpoints for Witness {
     fn latest<'a>(
         &'a self,
@@ -325,12 +362,13 @@ impl Checkpoints for Witness {
         &'a self,
         fence: &'a Fence,
         manifest: &'a Manifest,
+        listing: &'a Listing,
         parts: &'a [(String, String)],
     ) -> StoreFuture<'a, Result<Written, StoreError>> {
         Box::pin(async move {
             let previous = self.inner.manifests(&manifest.scope).last().cloned();
             let row = self.store.fence_row(fence.part);
-            let written = self.inner.write(fence, manifest, parts).await?;
+            let written = self.inner.write(fence, manifest, listing, parts).await?;
             if written == Written::Stale {
                 self.stale.fetch_add(1, Ordering::Relaxed);
                 return Ok(written);
@@ -345,6 +383,7 @@ impl Checkpoints for Witness {
                     ),
                 );
             }
+            self.listed(manifest);
             if let Some(previous) = previous
                 && previous.seq != manifest.seq
             {

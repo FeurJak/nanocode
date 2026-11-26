@@ -14,9 +14,9 @@ use nanocode_turnlog::{LogHost, SCAN_END};
 
 use crate::{
     Committed, Part, Policy, Resident, ScopeError,
-    checkpoint::{Checkpoints, Manifest, digest},
+    checkpoint::{Checkpoints, Listing, Manifest, digest},
     lease::Leases,
-    owner::{Ask, Checkpointed, Core, Life, Owner, Turn, Why},
+    owner::{Ask, Chain, Checkpointed, Core, Life, Owner, Turn, Why},
     route::Route,
     sim::{self, Mutation},
 };
@@ -39,6 +39,8 @@ pub struct Stats {
     pub checkpoint_parts: u64,
     pub checkpoint_parts_kept: u64,
     pub checkpoint_part_bytes: u64,
+    pub checkpoint_listing_bytes: u64,
+    pub checkpoint_listings_whole: u64,
     pub checkpoint_failures: u64,
     pub evictions: u64,
     pub over_budget: u64,
@@ -509,16 +511,7 @@ impl<F: Resident> Inner<F> {
         };
         let now = (self.clock)();
         let (mut state, next, checkpointed, parts) = match manifest {
-            None => (
-                self.fold.empty(),
-                0,
-                Checkpointed {
-                    next: 0,
-                    at_ms: now,
-                    digests: BTreeSet::new(),
-                },
-                0,
-            ),
+            None => (self.fold.empty(), 0, Checkpointed::empty(now), 0),
             Some(manifest) => self.restore(scope, manifest, now).await?,
         };
         let tail = self.log.scan(scope, next, SCAN_END).await?;
@@ -596,10 +589,16 @@ impl<F: Resident> Inner<F> {
             });
         }
         let state = self.fold.decode(parts)?;
+        let whole_bytes = Listing::Whole(manifest.parts.clone()).encoded().len();
         let checkpointed = Checkpointed {
             next: manifest.seq,
             at_ms: now,
-            digests,
+            parts: manifest.parts.into_iter().collect(),
+            chain: Some(Chain {
+                base: manifest.seq,
+                whole_bytes,
+                changed_bytes: manifest.changed_bytes,
+            }),
         };
         Ok((state, manifest.seq, checkpointed, wanted.len() as u64))
     }

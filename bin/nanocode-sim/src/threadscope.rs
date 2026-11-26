@@ -23,6 +23,7 @@ use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_scope::{
     Checkpoints, Committed, MemoryCheckpoints, Part, PartedLeases, Policy, Resident, Route,
     ScopeError, Wiring,
+    sim::{self as scope_sim, Mutation as ScopeMutation},
 };
 use nanocode_sync::{Atom, block_on};
 use nanocode_turnlog::{
@@ -57,23 +58,32 @@ const CRASH_PPM: u64 = 12_000;
 const TICK_PPM: u64 = 120_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ThreadScopeMutation(Mutation);
+pub struct ThreadScopeMutation(Mutation, ScopeMutation);
+
+const SCOPE_MUTATIONS: [ScopeMutation; 1] = [ScopeMutation::ListingSkipsDropped];
 
 impl ThreadScopeMutation {
-    pub const NONE: Self = Self(Mutation::None);
+    pub const NONE: Self = Self(Mutation::None, ScopeMutation::None);
 
     pub fn parse(name: &str) -> Option<Self> {
-        Mutation::parse(name).map(Self)
+        if let Some(mutation) = SCOPE_MUTATIONS.into_iter().find(|scope| scope.name() == name) {
+            return Some(Self(Mutation::None, mutation));
+        }
+        Mutation::parse(name).map(|mutation| Self(mutation, ScopeMutation::None))
     }
 
     pub const fn name(self) -> &'static str {
-        self.0.name()
+        match self.1 {
+            ScopeMutation::None => self.0.name(),
+            scope => scope.name(),
+        }
     }
 
     pub fn names() -> String {
         Mutation::ALL
             .iter()
             .map(|mutation| mutation.name())
+            .chain(SCOPE_MUTATIONS.iter().map(|mutation| mutation.name()))
             .collect::<Vec<_>>()
             .join("|")
     }
@@ -686,6 +696,7 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
         world.policy.resident_bytes_max
     );
     thread_scope_sim::mutate(mutation.0);
+    scope_sim::mutate(mutation.1);
     let mut generation = 0;
     let mut turns = BTreeMap::new();
     for _ in 0..steps {
@@ -696,6 +707,7 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
     }
     legacy(&world, &mut stats);
     thread_scope_sim::mutate(Mutation::None);
+    scope_sim::mutate(ScopeMutation::None);
     for node in &nodes {
         let runtime = node.logs.scopes().stats();
         stats.loads += runtime.loads;

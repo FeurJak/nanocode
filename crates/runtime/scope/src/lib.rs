@@ -9,7 +9,7 @@ mod sql;
 use nanocode_durability_core::StoreError;
 
 pub use checkpoint::{
-    Checkpoints, Fence, Manifest, MemoryCheckpoints, MemoryStats, Written, digest,
+    Checkpoints, Fence, Listing, Manifest, MemoryCheckpoints, MemoryStats, Written, assemble, digest,
 };
 pub use lease::{Leases, PartedLeases};
 pub use route::Route;

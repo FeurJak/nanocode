@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -12,7 +12,7 @@ use nanocode_sync::{Atom, Slot, Vector, oneshot, watch};
 
 use crate::{
     Committed, Resident, ScopeError,
-    checkpoint::{Fence, Manifest, Written, digest},
+    checkpoint::{Fence, Listing, Manifest, Written, digest},
     scopes::Inner,
     sim::{self, Mutation},
 };
@@ -103,7 +103,73 @@ impl<F: Resident> Clone for Published<F> {
 pub(crate) struct Checkpointed {
     pub(crate) next: u64,
     pub(crate) at_ms: u64,
-    pub(crate) digests: BTreeSet<String>,
+    pub(crate) parts: BTreeMap<String, String>,
+    pub(crate) chain: Option<Chain>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Chain {
+    pub(crate) base: u64,
+    pub(crate) whole_bytes: usize,
+    pub(crate) changed_bytes: usize,
+}
+
+impl Checkpointed {
+    pub(crate) fn empty(at_ms: u64) -> Self {
+        Self {
+            next: 0,
+            at_ms,
+            parts: BTreeMap::new(),
+            chain: None,
+        }
+    }
+
+    fn listing(&self, named: &[(String, String)], next: u64) -> (Listing, Chain) {
+        let whole = Listing::Whole(named.to_vec());
+        let whole_bytes = whole.encoded().len();
+        let fresh = Chain {
+            base: next,
+            whole_bytes,
+            changed_bytes: 0,
+        };
+        let Some(chain) = self.chain else {
+            return (whole, fresh);
+        };
+        let put: Vec<(String, String)> = named
+            .iter()
+            .filter(|(name, at)| self.parts.get(name) != Some(at))
+            .cloned()
+            .collect();
+        let kept: BTreeSet<&str> = named.iter().map(|(name, _)| name.as_str()).collect();
+        let dropped: Vec<String> = if sim::mutated(Mutation::ListingSkipsDropped) {
+            Vec::new()
+        } else {
+            self.parts
+                .keys()
+                .filter(|name| !kept.contains(name.as_str()))
+                .cloned()
+                .collect()
+        };
+        let changed = Listing::Changed {
+            base: chain.base,
+            put,
+            dropped,
+        };
+        let changed_bytes = chain.changed_bytes + changed.encoded().len();
+        let bounded = changed_bytes <= chain.whole_bytes
+            || sim::mutated(Mutation::ListingChainUnbounded);
+        if !bounded {
+            return (whole, fresh);
+        }
+        (
+            changed,
+            Chain {
+                base: next,
+                whole_bytes: chain.whole_bytes,
+                changed_bytes,
+            },
+        )
+    }
 }
 
 pub(crate) struct Core<F: Resident> {
@@ -399,6 +465,7 @@ impl<F: Resident> Owner<F> {
         let parts = inner.fold.encode(&core.state);
         let mut names = BTreeSet::new();
         let mut digests = BTreeSet::new();
+        let held: BTreeSet<&String> = core.checkpointed.parts.values().collect();
         let mut named = Vec::with_capacity(parts.len());
         let mut fresh = Vec::new();
         let mut kept = 0_u64;
@@ -411,7 +478,7 @@ impl<F: Resident> Owner<F> {
             );
             let at = digest(&part.body);
             if digests.insert(at.clone()) {
-                if rewrite || !core.checkpointed.digests.contains(&at) {
+                if rewrite || !held.contains(&at) {
                     fresh.push((at.clone(), part.body));
                 } else {
                     kept += 1;
@@ -419,18 +486,24 @@ impl<F: Resident> Owner<F> {
             }
             named.push((part.name, at));
         }
+        drop(held);
+        let (listing, chain) = core.checkpointed.listing(&named, core.next);
         let manifest = Manifest {
             scope: self.scope.as_ref().to_owned(),
             epoch: self.epoch,
             seq: core.next,
             parts: named,
+            changed_bytes: chain.changed_bytes,
         };
         let fence = Fence {
             part: self.part,
             epoch: self.epoch,
             holder: inner.leases.node().to_owned(),
         };
-        let written = inner.checkpoints.write(&fence, &manifest, &fresh).await;
+        let written = inner
+            .checkpoints
+            .write(&fence, &manifest, &listing, &fresh)
+            .await;
         match written {
             Ok(Written::Landed) => {
                 let bytes: usize = fresh.iter().map(|(_, body)| body.len()).sum();
@@ -439,11 +512,16 @@ impl<F: Resident> Owner<F> {
                     stats.checkpoint_parts += fresh.len() as u64;
                     stats.checkpoint_parts_kept += kept;
                     stats.checkpoint_part_bytes += bytes as u64;
+                    stats.checkpoint_listing_bytes += listing.encoded().len() as u64;
+                    if matches!(listing, Listing::Whole(_)) {
+                        stats.checkpoint_listings_whole += 1;
+                    }
                 });
                 core.checkpointed = Checkpointed {
                     next: core.next,
                     at_ms: (inner.clock)(),
-                    digests,
+                    parts: manifest.parts.into_iter().collect(),
+                    chain: Some(chain),
                 };
                 core.since = 0;
                 Ok(())
