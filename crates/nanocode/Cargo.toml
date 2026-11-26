@@ -21,6 +21,7 @@ nanocode-tool-runtime.workspace = true
 nanocode-platform.workspace = true
 nanocode-process-contracts.workspace = true
 nanocode-agent.workspace = true
+nanocode-scope.workspace = true
 nanocode-agent-host.workspace = true
 nanocode-backend-codex.workspace = true
 nanocode-tools.workspace = true

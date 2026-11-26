@@ -273,7 +273,8 @@ impl Hold {
         settled && self.turn().is_some_and(|turn| !retained(turn))
     }
 
-    pub(crate) fn follows(&self, previous: Option<&Self>) -> bool {
+    #[must_use]
+    pub fn follows(&self, previous: Option<&Self>) -> bool {
         let Some(previous) = previous else {
             return true;
         };

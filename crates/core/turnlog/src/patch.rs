@@ -127,7 +127,7 @@ pub(crate) fn diff(base: &str, new: &str) -> Result<Option<Box<RawValue>>, Store
     Ok((edits.get().len() < new.len()).then_some(edits))
 }
 
-pub(crate) fn apply(base: &str, edits: &RawValue) -> Result<String, StoreError> {
+pub fn apply(base: &str, edits: &RawValue) -> Result<String, StoreError> {
     let edits: Vec<Edit<'_>> = serde_json::from_str(edits.get()).map_err(invalid)?;
     let mut payload = String::new();
     for edit in &edits {

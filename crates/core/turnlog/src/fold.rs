@@ -14,13 +14,13 @@ use serde_json::value::RawValue;
 
 use crate::{ArmedWake, EffectClass, Hold, Outcome, Record, Status, Wakes};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Checkpoint {
     pub payload: String,
     pub revision: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Event {
     pub at: u64,
     pub event: Box<RawValue>,
@@ -28,7 +28,7 @@ pub struct Event {
     pub turn: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OpenCall {
     pub effect: EffectClass,
     pub input: Box<RawValue>,
@@ -43,7 +43,7 @@ pub struct Segment {
     pub row: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Retry {
     pub attempts: u64,
     pub error: String,
@@ -51,7 +51,7 @@ pub struct Retry {
     pub retry_at: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Phase {
     Finished {
         last: u64,
@@ -245,13 +245,13 @@ fn outcome_of(code: &str) -> Option<Outcome> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Recovered {
     pub at: Option<u64>,
     pub attempt: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Turn {
     pub digest: String,
     pub edits: BTreeMap<String, String>,
@@ -3269,7 +3269,8 @@ impl Fold {
     }
 }
 
-fn internal_host(key: &str) -> bool {
+#[must_use]
+pub fn internal_host(key: &str) -> bool {
     key == RETIRED_KEY || key == FOLD_SNAPSHOT_KEY || cached_state_of(key).is_some()
 }
 

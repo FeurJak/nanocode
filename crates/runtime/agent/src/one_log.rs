@@ -121,20 +121,20 @@ pub struct OneLogStore(Arc<OneLog>);
 pub struct OneLogJournals(Arc<OneLog>);
 
 #[derive(Serialize)]
-struct Lifecycle<'a> {
+pub(crate) struct Lifecycle<'a> {
     #[serde(rename = "type")]
-    kind: &'static str,
-    request_id: &'a str,
+    pub(crate) kind: &'static str,
+    pub(crate) request_id: &'a str,
 }
 
 #[derive(Serialize)]
-struct Finished<'a> {
+pub(crate) struct Finished<'a> {
     #[serde(rename = "type")]
-    kind: &'static str,
-    request_id: &'a str,
-    status: &'static str,
+    pub(crate) kind: &'static str,
+    pub(crate) request_id: &'a str,
+    pub(crate) status: &'static str,
     #[serde(flatten)]
-    fields: &'a Map<String, Value>,
+    pub(crate) fields: &'a Map<String, Value>,
 }
 
 #[derive(Serialize)]
@@ -161,7 +161,7 @@ fn encoding(error: serde_json::Error) -> StoreError {
     StoreError::NotCommitted(format!("encode turn log record: {error}"))
 }
 
-fn raw(value: &impl Serialize) -> Result<Box<RawValue>, StoreError> {
+pub(crate) fn raw(value: &impl Serialize) -> Result<Box<RawValue>, StoreError> {
     serde_json::value::to_raw_value(value).map_err(encoding)
 }
 
@@ -203,7 +203,7 @@ fn invalid(detail: impl std::fmt::Display) -> StoreError {
     StoreError::Backend(format!("turn log state is invalid: {detail}"))
 }
 
-const fn outcome(state: TurnState) -> Option<Outcome> {
+pub(crate) const fn outcome(state: TurnState) -> Option<Outcome> {
     match state {
         TurnState::Cancelled => Some(Outcome::Cancelled),
         TurnState::Completed => Some(Outcome::Completed),
@@ -276,7 +276,7 @@ fn retired_record(
     })
 }
 
-fn record_of(turn: &Turn) -> Result<TurnRecord, StoreError> {
+pub(crate) fn record_of(turn: &Turn) -> Result<TurnRecord, StoreError> {
     let prompt = || {
         serde_json::from_str::<Prompt>(turn.prompt.get())
             .map(Some)
@@ -339,7 +339,7 @@ fn record_of(turn: &Turn) -> Result<TurnRecord, StoreError> {
     })
 }
 
-fn logged(seq: u64, request_id: Option<&str>, at: u64, event: Box<RawValue>) -> LoggedEvent {
+pub(crate) fn logged(seq: u64, request_id: Option<&str>, at: u64, event: Box<RawValue>) -> LoggedEvent {
     LoggedEvent {
         seq,
         request_id: request_id.map(str::to_owned),
@@ -408,7 +408,7 @@ fn status_fact(turn: &str, status: TurnStatus) -> RuntimeFact {
     })
 }
 
-const fn fact_outcome(outcome: Outcome) -> FactOutcome {
+pub(crate) const fn fact_outcome(outcome: Outcome) -> FactOutcome {
     match outcome {
         Outcome::Cancelled => FactOutcome::Cancelled,
         Outcome::Completed => FactOutcome::Completed,

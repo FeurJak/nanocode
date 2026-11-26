@@ -127,7 +127,7 @@ impl Wake {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ArmedWake {
     pub generation: u64,
     pub heard: Vec<Box<RawValue>>,

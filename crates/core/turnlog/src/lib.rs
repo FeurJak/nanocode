@@ -21,7 +21,7 @@ pub use effect::{EffectClass, Effects};
 pub use file::{FileLog, FileOptions};
 pub use fold::{
     CachedAt, CachedFold, Checkpoint, Event, FOLD_SNAPSHOT_KEY, Fold, OpenCall, Phase, RETIRED_KEY,
-    Recovered, Retired, Retry, Segment, Turn, cache_key, input_digest, tag,
+    Recovered, Retired, Retry, Segment, Turn, cache_key, input_digest, internal_host, tag,
 };
 pub use hold::{Answer, Answered, HeldCall, Hold, HoldError, Resumption};
 pub use host::{
@@ -29,6 +29,7 @@ pub use host::{
     SCAN_END, ScopeRows, SqlLog, StoredCheckpoint, Write, host_id,
 };
 pub use image::{FileIo, Header, Image, ImageOptions, Medium};
+pub use patch::apply as apply_patch;
 pub use record::{Outcome, Record, Status, decode, encode};
 pub use wake::{ArmedWake, Trigger, Unfit, Wake, Wakes, sim as wake_sim};
 pub use wake_index::{Statements, WakeIndex, WakeRider, WakeSummary};

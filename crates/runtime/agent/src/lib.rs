@@ -11,6 +11,7 @@ mod runtime;
 mod session_events;
 mod session_log;
 mod stored_event;
+mod thread_scope;
 mod turn_inbox;
 mod turn_log;
 pub use handoff::{
@@ -36,5 +37,9 @@ pub use session_log::{
 pub use turn_inbox::{
     Attach, Delivery, Driven, Halt, InboxError, InboxHost, MovedQueued, Next, PassEnd, TurnInbox,
     Wake,
+};
+pub use thread_scope::{
+    KeptFact, ThreadCommand, ThreadFold, ThreadLog, ThreadLogs, ThreadPolicy, ThreadReply,
+    ThreadState, sim as thread_scope_sim,
 };
 pub use turn_log::{EventLog, Recording, TurnLog, Verdict};

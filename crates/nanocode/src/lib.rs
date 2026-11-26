@@ -151,8 +151,9 @@ pub fn session_store<S: durability::StateStore + 'static>(
 
 pub mod turnlog {
     pub use nanocode_agent::{
-        Exported, Fire, Heard, Imported, OneLog, OneLogJournals, OneLogStore, Policy, WakeError,
-        facts_sim, import_sim,
+        Exported, Fire, Heard, Imported, KeptFact, OneLog, OneLogJournals, OneLogStore, Policy,
+        ThreadCommand, ThreadFold, ThreadLog, ThreadLogs, ThreadPolicy, ThreadReply, ThreadState,
+        WakeError, facts_sim, import_sim, thread_scope_sim,
     };
     pub use nanocode_tool_runtime::effects::{EffectCall, EffectGate};
     pub use nanocode_turnlog::*;
@@ -269,6 +270,8 @@ pub use nanocode_agent::{
     DurableOutcome, EventSink, PromptRejection, SessionEvent, SessionEvents, SpawnBuilder,
     SubagentUpdates, Unselected, admit_prompt,
 };
+
+pub use nanocode_scope as scope;
 
 pub mod session_host {
     pub use nanocode_agent::{
