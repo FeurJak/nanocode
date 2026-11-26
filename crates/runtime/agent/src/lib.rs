@@ -39,7 +39,7 @@ pub use turn_inbox::{
     Wake,
 };
 pub use thread_scope::{
-    KeptFact, ThreadCommand, ThreadFold, ThreadLog, ThreadLogs, ThreadPolicy, ThreadReply,
-    ThreadState, sim as thread_scope_sim,
+    Done, Job, KeptFact, Staged, ThreadCommand, ThreadFold, ThreadLog, ThreadLogs, ThreadPolicy,
+    ThreadReply, ThreadState, sim as thread_scope_sim,
 };
 pub use turn_log::{EventLog, Recording, TurnLog, Verdict};

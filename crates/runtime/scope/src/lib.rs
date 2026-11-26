@@ -64,6 +64,10 @@ pub trait Resident: Send + Sync + 'static {
 
     fn weight(&self, state: &Self::State) -> usize;
 
+    fn routable(&self, _command: &Self::Command) -> bool {
+        true
+    }
+
     fn adopt<'a>(
         &'a self,
         _log: &'a Arc<dyn LogHost>,
@@ -77,6 +81,9 @@ pub trait Resident: Send + Sync + 'static {
 pub enum ScopeError {
     Busy,
     Unreachable {
+        holder: String,
+    },
+    Routed {
         holder: String,
     },
     Moved,
@@ -98,6 +105,10 @@ impl std::fmt::Display for ScopeError {
             Self::Unreachable { holder } => write!(
                 formatter,
                 "the scope's holder {holder} did not answer within the forward deadline; the command may have reached it"
+            ),
+            Self::Routed { holder } => write!(
+                formatter,
+                "the command runs only on the scope's owner, and {holder} holds the scope; nothing was written"
             ),
             Self::Moved => formatter.write_str(
                 "the scope's owner stopped before the command was written; nothing was written",

@@ -7,13 +7,17 @@ pub enum Mutation {
     PartDropped,
     AdoptionSkipsRetired,
     AdoptionSkipsBlobs,
+    JobForwarded,
+    JobRowsDropped,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 5] = [
         Self::PartDropped,
         Self::AdoptionSkipsRetired,
         Self::AdoptionSkipsBlobs,
+        Self::JobForwarded,
+        Self::JobRowsDropped,
     ];
 
     #[must_use]
@@ -23,6 +27,8 @@ impl Mutation {
             Self::PartDropped => "part_dropped",
             Self::AdoptionSkipsRetired => "adoption_skips_retired",
             Self::AdoptionSkipsBlobs => "adoption_skips_blobs",
+            Self::JobForwarded => "job_forwarded",
+            Self::JobRowsDropped => "job_rows_dropped",
         }
     }
 

@@ -59,6 +59,7 @@ const RELEASE_PPM: u64 = 40_000;
 const CRASH_PPM: u64 = 12_000;
 const TICK_PPM: u64 = 120_000;
 const LEGACY_PPM: u64 = 500_000;
+const JOB_PPM: u64 = 150_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadScopeMutation(Mutation, ScopeMutation);
@@ -122,6 +123,8 @@ pub struct ThreadScopeStats {
     pub checkpoint_parts_kept: u64,
     pub evictions: u64,
     pub forwards: u64,
+    pub jobs: u64,
+    pub jobs_routed: u64,
 }
 
 impl ThreadScopeStats {
@@ -151,6 +154,8 @@ impl ThreadScopeStats {
         self.checkpoint_parts_kept += other.checkpoint_parts_kept;
         self.evictions += other.evictions;
         self.forwards += other.forwards;
+        self.jobs += other.jobs;
+        self.jobs_routed += other.jobs_routed;
     }
 }
 
@@ -431,6 +436,59 @@ fn command(rng: &mut Rng, turns: &mut u64, state: Option<&ThreadState>) -> Threa
     }
 }
 
+fn job_landed(world: &World, thread: &str, note: u64, event: u64, fact: u64) -> bool {
+    let Ok(state) = world.refold(thread, &world.rows(thread)) else {
+        return false;
+    };
+    let event = state
+        .events()
+        .find(|held| held.seq == event)
+        .and_then(|held| serde_json::from_str::<serde_json::Value>(held.event.get()).ok());
+    let fact = state.facts().find(|(seq, _)| *seq == fact).map(|(_, kept)| &kept.fact);
+    let host = matches!(
+        fact,
+        Some(Fact::Decision(Decision::Host { key, value }))
+            if key == "job" && value.get() == note.to_string()
+    );
+    event.is_some_and(|event| event["n"] == note) && host
+}
+
+fn job(rng: &mut Rng, world: &World, log: &ThreadLog, thread: &str, stats: &mut ThreadScopeStats) {
+    let note = rng.below(1_000_000);
+    let at = rng.below(1_000_000);
+    let routed = log.state().is_none();
+    let ran = log.job(move |staged| {
+        let event = staged.event(at, None, raw(&json!({ "type": "job", "n": note })))?;
+        let host = Fact::Decision(Decision::Host {
+            key: "job".to_owned(),
+            value: raw(&json!(note)),
+        });
+        let fact = staged.fact(&host, None)?;
+        Ok((event, fact))
+    });
+    stats.sends += 1;
+    match driven(world, "a job", ran) {
+        Some(Ok(_)) if routed => flag(
+            &world.wrong,
+            format!("a job on {thread} ran through a node that routes the thread to its holder"),
+        ),
+        Some(Ok((event, fact))) => {
+            stats.committed += 1;
+            stats.jobs += 1;
+            if !job_landed(world, thread, note, event, fact) {
+                flag(
+                    &world.wrong,
+                    format!(
+                        "a job on {thread} answered event {event} and fact {fact}, which its committed rows do not hold"
+                    ),
+                );
+            }
+        }
+        Some(Err(ScopeError::Routed { .. })) => stats.jobs_routed += 1,
+        Some(Err(_)) | None => stats.refused += 1,
+    }
+}
+
 fn send(
     rng: &mut Rng,
     world: &World,
@@ -449,6 +507,13 @@ fn send(
     };
     if log.state().is_some() {
         adopted(world, &thread, stats);
+    }
+    if rng.chance(JOB_PPM) {
+        job(rng, world, &log, &thread, stats);
+        if log.state().is_some() {
+            nodes[at].handles.insert(thread, log);
+        }
+        return;
     }
     let state = log.state();
     let counter = turns.entry(thread.clone()).or_insert(0);

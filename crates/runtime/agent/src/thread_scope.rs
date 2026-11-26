@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 
 use nanocode_scope::{Adopted, Part, Reached, Resident, ScopeError, Scopes, Wiring};
 use nanocode_turnlog::{LogHost, Phase, Record, input_digest, tag};
@@ -22,6 +22,90 @@ pub mod sim;
 mod state;
 
 pub use state::{KeptFact, ThreadState};
+
+type Run = dyn Fn(&mut Staged) -> Result<Box<dyn Any + Send>, StoreError> + Send + Sync;
+
+#[derive(Clone)]
+pub struct Job(Arc<Run>);
+
+impl Job {
+    pub fn new<T: Send + 'static>(
+        run: impl Fn(&mut Staged) -> Result<T, StoreError> + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(move |staged| {
+            run(staged).map(|value| Box::new(value) as Box<dyn Any + Send>)
+        }))
+    }
+}
+
+pub struct Done(Box<dyn Any + Send>);
+
+impl std::fmt::Debug for Done {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Done")
+    }
+}
+
+pub struct Staged {
+    state: ThreadState,
+    records: Vec<Record>,
+}
+
+impl Staged {
+    #[must_use]
+    pub const fn state(&self) -> &ThreadState {
+        &self.state
+    }
+
+    #[must_use]
+    pub const fn staged(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn push(&mut self, record: Record) -> Result<(), StoreError> {
+        self.state.take(&record, None)?;
+        self.records.push(record);
+        Ok(())
+    }
+
+    pub fn fact(
+        &mut self,
+        fact: &OwnedFact<Box<RawValue>>,
+        state: Option<String>,
+    ) -> Result<u64, StoreError> {
+        let seq = self.state.next_fact();
+        self.push(fact_at(seq, fact, state))?;
+        Ok(seq)
+    }
+
+    pub fn event(
+        &mut self,
+        at: u64,
+        turn: Option<&str>,
+        event: Box<RawValue>,
+    ) -> Result<u64, StoreError> {
+        let seq = self.state.next_event();
+        self.push(event_at(at, seq, turn, event))?;
+        Ok(seq)
+    }
+}
+
+fn run(state: &ThreadState, job: &Job) -> (Vec<Record>, ThreadReply) {
+    let mut staged = Staged {
+        state: state.clone(),
+        records: Vec::new(),
+    };
+    match (job.0)(&mut staged) {
+        Ok(done) => {
+            let mut records = staged.records;
+            if sim::mutated(sim::Mutation::JobRowsDropped) {
+                records.pop();
+            }
+            (records, ThreadReply::Job(Ok(Done(done))))
+        }
+        Err(error) => (Vec::new(), ThreadReply::Job(Err(error))),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadPolicy {
@@ -76,6 +160,7 @@ pub enum ThreadCommand {
         request_id: String,
     },
     Pending,
+    Job(Job),
 }
 
 #[derive(Debug)]
@@ -89,6 +174,7 @@ pub enum ThreadReply {
     Wrote,
     Turn(Option<TurnRecord>),
     Pending(Vec<TurnRecord>),
+    Job(Result<Done, StoreError>),
     Refused(String),
 }
 
@@ -192,6 +278,7 @@ impl ThreadFold {
                 Vec::new(),
                 ThreadReply::Pending(state.pending().map(record_of).collect::<Result<_, _>>()?),
             )),
+            ThreadCommand::Job(job) => Ok(run(state, job)),
         }
     }
 
@@ -406,6 +493,10 @@ impl Resident for ThreadFold {
         state.bytes
     }
 
+    fn routable(&self, command: &ThreadCommand) -> bool {
+        !matches!(command, ThreadCommand::Job(_)) || sim::mutated(sim::Mutation::JobForwarded)
+    }
+
     fn adopt<'a>(
         &'a self,
         log: &'a Arc<dyn LogHost>,
@@ -561,6 +652,27 @@ impl ThreadLog {
         match self.send(ThreadCommand::Write { records }).await? {
             ThreadReply::Wrote => Ok(()),
             reply => unexpected("write", &reply),
+        }
+    }
+
+    pub async fn job<T: Send + 'static>(
+        &self,
+        run: impl Fn(&mut Staged) -> Result<T, StoreError> + Send + Sync + 'static,
+    ) -> Result<T, ScopeError> {
+        if let Reached::Routed(routed) = &self.reached
+            && !sim::mutated(sim::Mutation::JobForwarded)
+        {
+            return Err(ScopeError::Routed {
+                holder: routed.holder().to_owned(),
+            });
+        }
+        match self.send(ThreadCommand::Job(Job::new(run))).await? {
+            ThreadReply::Job(Ok(Done(done))) => match done.downcast::<T>() {
+                Ok(value) => Ok(*value),
+                Err(_) => panic!("a thread job answers with the type its closure returns"),
+            },
+            ThreadReply::Job(Err(error)) => Err(ScopeError::Store(error)),
+            reply => unexpected("job", &reply),
         }
     }
 

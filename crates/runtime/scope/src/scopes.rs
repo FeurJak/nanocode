@@ -268,6 +268,11 @@ impl<F: Resident> Routed<F> {
     }
 
     pub async fn send(&self, command: F::Command) -> Result<Committed<F::Reply>, ScopeError> {
+        if !self.inner.fold.routable(&command) {
+            return Err(ScopeError::Routed {
+                holder: self.holder.clone(),
+            });
+        }
         self.inner.forward(&self.holder, &self.scope, command).await
     }
 }
