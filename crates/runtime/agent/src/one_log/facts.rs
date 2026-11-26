@@ -101,7 +101,7 @@ const fn point_of(fact: &StoredFact) -> Point {
     }
 }
 
-fn in_scope(scope: &Scope, held: Option<&str>, fact: &StoredFact) -> bool {
+pub(crate) fn in_scope(scope: &Scope, held: Option<&str>, fact: &StoredFact) -> bool {
     if sim::mutated(sim::Mutation::ScopeLeaks) {
         return true;
     }
@@ -142,9 +142,9 @@ pub(super) fn intended(fold: &Fold, call_id: &str) -> Option<String> {
 }
 
 #[derive(Clone)]
-struct Scope {
-    state: String,
-    turns: bool,
+pub(crate) struct Scope {
+    pub(crate) state: String,
+    pub(crate) turns: bool,
 }
 
 struct Scoped {

@@ -16,11 +16,15 @@ use nanocode::{
     durability::facts::{Decision, EffectResult, Fact, Intent, IntentTarget},
     session_host::{LogEntry, Submission, TurnState},
     turnlog::{
-        ThreadCommand, ThreadFold, ThreadLog, ThreadLogs, ThreadPolicy, ThreadReply, ThreadState,
+        ThreadCommand, ThreadFacts, ThreadFold, ThreadLog, ThreadLogs, ThreadPolicy, ThreadReply,
+        ThreadState,
         thread_scope_sim::{self, Mutation},
     },
 };
-use nanocode_durability_core::{StoreError, StoreFuture};
+use nanocode_durability_core::{
+    DurableFold, FactLogs, FoldError, Input, InputKind, OwnedFact, Seen, StoreError, StoreFuture,
+    VALUE_INLINE_BYTES, commit_fact, fold_facts,
+};
 use nanocode_scope::{
     Checkpoints, Committed, Manifest, MemoryCheckpoints, Part, PartedLeases, Policy, Resident,
     Route, ScopeError, Wiring,
@@ -31,6 +35,7 @@ use nanocode_turnlog::{
     Fold, Hold, LogHost, Phase, Record, SCAN_END, Wake,
     parted::{ModelParts, PartStore, PartedLog},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, json, value::RawValue};
 
 use crate::{
@@ -60,6 +65,9 @@ const CRASH_PPM: u64 = 12_000;
 const TICK_PPM: u64 = 120_000;
 const LEGACY_PPM: u64 = 500_000;
 const JOB_PPM: u64 = 150_000;
+const FACT_LOG_PPM: u64 = 100_000;
+const FACT_BLOB_PPM: u64 = 300_000;
+const FACT_STATES: u64 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadScopeMutation(Mutation, ScopeMutation);
@@ -125,6 +133,9 @@ pub struct ThreadScopeStats {
     pub forwards: u64,
     pub jobs: u64,
     pub jobs_routed: u64,
+    pub fact_logs: u64,
+    pub fact_logs_routed: u64,
+    pub fact_commits: u64,
 }
 
 impl ThreadScopeStats {
@@ -156,6 +167,9 @@ impl ThreadScopeStats {
         self.forwards += other.forwards;
         self.jobs += other.jobs;
         self.jobs_routed += other.jobs_routed;
+        self.fact_logs += other.fact_logs;
+        self.fact_logs_routed += other.fact_logs_routed;
+        self.fact_commits += other.fact_commits;
     }
 }
 
@@ -508,6 +522,112 @@ fn job_landed(world: &World, thread: &str, note: u64, event: u64, fact: u64) -> 
     event.is_some_and(|event| event["n"] == note) && host
 }
 
+#[derive(Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+struct Tally {
+    inputs: u64,
+    bytes: u64,
+    decisions: Vec<u64>,
+}
+
+impl DurableFold for Tally {
+    const FAMILY: &'static str = "sim.tally";
+    const FORMAT: u32 = 1;
+    type Decision = u64;
+
+    fn apply(&mut self, _seq: u64, fact: Seen<'_, u64>) -> Result<(), FoldError> {
+        match fact {
+            Fact::Input(input) => {
+                self.inputs += 1;
+                self.bytes += input.value.get().len() as u64;
+            }
+            Fact::Decision(Decision::Backend(value)) => self.decisions.push(*value),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn request(&self) -> Result<Vec<u8>, FoldError> {
+        Ok(Vec::new())
+    }
+}
+
+fn fact_input(rng: &mut Rng) -> OwnedFact<u64> {
+    let bytes = if rng.chance(FACT_BLOB_PPM) {
+        VALUE_INLINE_BYTES + usize::try_from(rng.below(64)).expect("a length fits")
+    } else {
+        1 + usize::try_from(rng.below(32)).expect("a length fits")
+    };
+    Fact::Input(Input {
+        turn: "tally".to_owned(),
+        kind: InputKind::Prompt,
+        value: raw(&json!("x".repeat(bytes))),
+        metadata: raw(&json!(null)),
+        hand: None,
+        first: None,
+    })
+}
+
+fn fact_log(
+    rng: &mut Rng,
+    world: &World,
+    log: ThreadLog,
+    thread: &str,
+    stats: &mut ThreadScopeStats,
+) {
+    let routed = log.state().is_none();
+    let facts = ThreadFacts::new(Arc::new(log));
+    let scoped = facts.scoped(&format!("state{}", rng.below(FACT_STATES)), rng.chance(500_000));
+    stats.fact_logs += 1;
+    let first = driven(world, "a fact replay", fold_facts::<Tally>(&*scoped));
+    let second = driven(world, "a fact replay", fold_facts::<Tally>(&*scoped));
+    let (Some(Ok(first)), Some(Ok(second))) = (first, second) else {
+        if routed {
+            stats.fact_logs_routed += 1;
+        } else {
+            stats.refused += 1;
+        }
+        return;
+    };
+    if routed {
+        flag(
+            &world.wrong,
+            format!("facts: a fact log of {thread} replayed through a node that routes the thread"),
+        );
+        return;
+    }
+    let ahead: OwnedFact<u64> = Fact::Decision(Decision::Backend(rng.below(1_000)));
+    let behind = fact_input(rng);
+    let Some(Ok(_)) = driven(world, "a fact commit", commit_fact(&*scoped, first, ahead)) else {
+        stats.refused += 1;
+        return;
+    };
+    let committed = driven(
+        world,
+        "a stale fact commit",
+        commit_fact(&*scoped, second, behind),
+    );
+    let Some(Ok((caught, seq))) = committed else {
+        stats.refused += 1;
+        return;
+    };
+    stats.fact_commits += 2;
+    let Some(Ok(fresh)) = driven(world, "a fact replay", fold_facts::<Tally>(&*scoped)) else {
+        return;
+    };
+    if fresh.seq() != caught.seq() || fresh.state() != caught.state() {
+        flag(
+            &world.wrong,
+            format!(
+                "facts: an append on {thread} behind the log's last fact committed fact {seq} and folds {:?} at {}, but a replay folds {:?} at {}",
+                caught.state(),
+                caught.seq(),
+                fresh.state(),
+                fresh.seq()
+            ),
+        );
+    }
+}
+
 fn job(rng: &mut Rng, world: &World, log: &ThreadLog, thread: &str, stats: &mut ThreadScopeStats) {
     let note = rng.below(1_000_000);
     let at = rng.below(1_000_000);
@@ -562,6 +682,10 @@ fn send(
     };
     if log.state().is_some() {
         adopted(world, &thread, stats);
+    }
+    if rng.chance(FACT_LOG_PPM) {
+        fact_log(rng, world, log, &thread, stats);
+        return;
     }
     if rng.chance(JOB_PPM) {
         job(rng, world, &log, &thread, stats);

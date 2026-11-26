@@ -344,8 +344,10 @@ fn facts(
                 state.next_fact() - 1
             )));
         }
+        let fact = inlined(*seq, fact, values)?;
+        state.index_blob(&fact);
         state.facts.push_back(Arc::new(KeptFact {
-            fact: inlined(*seq, fact, values)?,
+            fact,
             state: owner.clone(),
         }));
     }

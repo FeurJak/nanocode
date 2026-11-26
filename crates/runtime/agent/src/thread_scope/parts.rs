@@ -172,6 +172,7 @@ pub(crate) fn decode(parts: Vec<Part>) -> Result<ThreadState, StoreError> {
         state.events.push_back(Arc::new(event));
     }
     for fact in ordered("facts", pieces.facts)? {
+        state.index_blob(&fact.fact);
         state.facts.push_back(Arc::new(fact));
     }
     let mut turns: BTreeMap<Arc<str>, BTreeMap<u64, Vec<Box<RawValue>>>> = BTreeMap::new();

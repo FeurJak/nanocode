@@ -50,6 +50,7 @@ mod wakes;
 
 pub use export::Exported;
 pub use facts::sim as facts_sim;
+pub(crate) use facts::{Scope as FactScope, in_scope};
 pub use import::{Imported, sim as import_sim};
 pub use wakes::{Fire, Heard, WakeError};
 

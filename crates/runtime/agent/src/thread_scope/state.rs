@@ -11,7 +11,9 @@ use serde_json::value::RawValue;
 
 use crate::durability::{
     StoreError,
-    facts::{Decision, Fact, Input, InputKind, Marker, StoredFact, TurnStatus, Value},
+    facts::{
+        BlobRef, Decision, Digest, Fact, Input, InputKind, Marker, StoredFact, TurnStatus, Value,
+    },
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -36,6 +38,7 @@ pub struct ThreadState {
     pub(crate) wakes: OrdMap<Arc<str>, Arc<ArmedWake>>,
     pub(crate) intents: OrdMap<Arc<str>, Option<Arc<str>>>,
     pub(crate) uncached: OrdMap<Arc<str>, u64>,
+    pub(crate) blobs: Vector<Digest>,
     pub(crate) generation: u64,
     pub(crate) row: u64,
     pub(crate) bytes: usize,
@@ -92,6 +95,31 @@ impl ThreadState {
 
     pub fn facts(&self) -> impl Iterator<Item = (u64, &KeptFact)> {
         (1..).zip(self.facts.iter().map(AsRef::as_ref))
+    }
+
+    pub fn facts_after(&self, after: u64) -> impl Iterator<Item = (u64, &KeptFact)> {
+        let first = usize::try_from(after).map_or(self.facts.len(), |after| after.min(self.facts.len()));
+        (first..self.facts.len()).filter_map(move |at| {
+            self.facts
+                .get(at)
+                .map(|kept| (at as u64 + 1, kept.as_ref()))
+        })
+    }
+
+    #[must_use]
+    pub fn blob_digest(&self, blob: BlobRef) -> Option<&Digest> {
+        self.blobs.get(blob.index() as usize)
+    }
+
+    #[must_use]
+    pub fn blob_body(&self, digest: &Digest) -> Option<&str> {
+        self.stored(digest.key().as_str())
+    }
+
+    pub(crate) fn index_blob(&mut self, fact: &StoredFact) {
+        if let Fact::Marker(Marker::Blob { digest, .. }) = fact {
+            self.blobs.push_back(*digest);
+        }
     }
 
     pub fn cells(&self) -> impl Iterator<Item = (&str, u64, &Vector<Box<RawValue>>)> {
@@ -504,6 +532,7 @@ impl ThreadState {
             )));
         }
         self.lower(seq, fact, state)?;
+        self.index_blob(fact);
         if let Some(state) = state {
             let bytes = serde_json::to_string(fact).map_err(invalid)?.len() as u64;
             let held = self.uncached.get(state).copied().unwrap_or_default();

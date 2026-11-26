@@ -20,10 +20,12 @@ use crate::{
 };
 
 mod adopt;
+mod facts;
 mod parts;
 pub mod sim;
 mod state;
 
+pub use facts::ThreadFacts;
 pub use state::{KeptFact, ThreadState};
 
 type Run = dyn Fn(&mut Staged) -> Result<Box<dyn Any + Send>, StoreError> + Send + Sync;
