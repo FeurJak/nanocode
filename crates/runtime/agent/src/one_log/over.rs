@@ -19,7 +19,7 @@ use crate::{
     durability::{StoreError, StoreRecord},
     session_log::{LogEntry, LoggedEvent, Started, Submission, Submitted, TurnRecord, TurnState},
     thread_scope::{
-        ThreadBinding, ThreadHolds, ThreadJournals, ThreadLog, ThreadLogs, ThreadState,
+        HoldsError, ThreadBinding, ThreadHolds, ThreadJournals, ThreadLog, ThreadLogs, ThreadState,
         ThreadStore, ThreadTurns, ThreadWakes, sim, wakes,
     },
 };
@@ -70,23 +70,13 @@ impl Refusal for WakeError {
     }
 }
 
-impl Refusal for String {
+impl Refusal for HoldsError {
     fn lost(&self) -> bool {
-        *self == StoreError::Fenced.to_string()
+        HoldsError::lost(self)
     }
 
     fn of(error: StoreError) -> Self {
-        error.to_string()
-    }
-}
-
-impl Refusal for LedgerError {
-    fn lost(&self) -> bool {
-        matches!(self, Self::Journal(why) if why.lost())
-    }
-
-    fn of(error: StoreError) -> Self {
-        Self::Journal(error.to_string())
+        Self::Scope(ScopeError::Store(error))
     }
 }
 
@@ -435,28 +425,40 @@ impl EffectGate for OneLogOver {
             tool,
             turn_id,
         } = call;
-        Box::pin(self.retried(move |bound| async move {
-            let call = EffectCall {
-                call_id,
-                effect,
-                input,
-                session_id,
-                tool,
-                turn_id,
-            };
-            bound.holds.before(call).await
-        }))
+        Box::pin(async move {
+            self.retried(move |bound| async move {
+                let call = EffectCall {
+                    call_id,
+                    effect,
+                    input,
+                    session_id,
+                    tool,
+                    turn_id,
+                };
+                bound.holds.before_call(call).await
+            })
+            .await
+            .map_err(HoldsError::said)
+        })
     }
 
     fn settle(&self) -> HostFuture<'_, Result<(), String>> {
-        Box::pin(self.retried(|bound| async move { EffectGate::settle(&bound.holds).await }))
+        Box::pin(async move {
+            self.retried(|bound| async move { bound.holds.settled().await })
+                .await
+                .map_err(HoldsError::said)
+        })
     }
 
     fn abandon<'a>(
         &'a self,
         call_id: &'a str,
     ) -> HostFuture<'a, Result<Option<ToolOutput>, String>> {
-        Box::pin(self.retried(move |bound| async move { bound.holds.abandon(call_id).await }))
+        Box::pin(async move {
+            self.retried(move |bound| async move { bound.holds.abandon_call(call_id).await })
+                .await
+                .map_err(HoldsError::said)
+        })
     }
 
     fn after<'a>(&'a self, call_id: &'a str, output: &'a ToolOutput) -> HostFuture<'a, ()> {
@@ -478,16 +480,20 @@ impl HoldLedger for OneLogOver {
             tool,
             turn_id,
         } = call;
-        Box::pin(self.retried(move |bound| async move {
-            let call = HoldCall {
-                call_id,
-                input,
-                session_id,
-                tool,
-                turn_id,
-            };
-            bound.holds.hold(key, call, card).await
-        }))
+        Box::pin(async move {
+            self.retried(move |bound| async move {
+                let call = HoldCall {
+                    call_id,
+                    input,
+                    session_id,
+                    tool,
+                    turn_id,
+                };
+                bound.holds.hold_call(key, call, card).await
+            })
+            .await
+            .map_err(HoldsError::ledger)
+        })
     }
 
     fn resolve<'a>(
@@ -495,10 +501,14 @@ impl HoldLedger for OneLogOver {
         key: &'a str,
         answer: Answer,
     ) -> HostFuture<'a, Result<Resumption, LedgerError>> {
-        Box::pin(self.retried(move |bound| {
-            let answer = answer.clone();
-            async move { bound.holds.resolve(key, answer).await }
-        }))
+        Box::pin(async move {
+            self.retried(move |bound| {
+                let answer = answer.clone();
+                async move { bound.holds.resolve_hold(key, answer).await }
+            })
+            .await
+            .map_err(HoldsError::ledger)
+        })
     }
 
     fn running<'a>(&'a self, call_id: &'a str) -> HostFuture<'a, Option<Running>> {
@@ -510,13 +520,21 @@ impl HoldLedger for OneLogOver {
     }
 
     fn release<'a>(&'a self, key: &'a str) -> HostFuture<'a, Result<(), LedgerError>> {
-        Box::pin(self.retried(move |bound| async move { bound.holds.release(key).await }))
+        Box::pin(async move {
+            self.retried(move |bound| async move { bound.holds.release_hold(key).await })
+                .await
+                .map_err(HoldsError::ledger)
+        })
     }
 }
 
 impl RemoteBarrier for OneLogOver {
     fn settle(&self) -> HostFuture<'_, Result<(), String>> {
-        Box::pin(self.retried(|bound| async move { RemoteBarrier::settle(&bound.holds).await }))
+        Box::pin(async move {
+            self.retried(|bound| async move { bound.holds.settled().await })
+                .await
+                .map_err(HoldsError::said)
+        })
     }
 
     fn carry(&self, carried: Carried) -> HostFuture<'_, Result<bool, String>> {

@@ -37,6 +37,7 @@ pub(crate) mod wakes;
 
 pub(crate) use binding::ThreadBinding;
 pub use facts::ThreadFacts;
+pub(crate) use holds::HoldsError;
 pub use holds::ThreadHolds;
 pub use journals::ThreadJournals;
 pub use state::{

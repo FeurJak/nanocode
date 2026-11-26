@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use nanocode_scope::Carry;
+use nanocode_scope::{Carry, ScopeError};
 use nanocode_sync::Atom;
 use nanocode_tool_host::{
     ToolOutput,
@@ -23,6 +23,33 @@ use crate::{
 };
 
 type Decided<T> = Result<(Option<Hold>, T), HoldError>;
+
+pub(crate) enum HoldsError {
+    Scope(ScopeError),
+    Gate(String),
+    Hold(HoldError),
+}
+
+impl HoldsError {
+    pub(crate) const fn lost(&self) -> bool {
+        matches!(self, Self::Scope(ScopeError::Lost))
+    }
+
+    pub(crate) fn said(self) -> String {
+        match self {
+            Self::Scope(error) => refused(error).to_string(),
+            Self::Gate(why) => why,
+            Self::Hold(error) => error.to_string(),
+        }
+    }
+
+    pub(crate) fn ledger(self) -> LedgerError {
+        match self {
+            Self::Hold(error) => LedgerError::Hold(error),
+            refusal => LedgerError::Journal(refusal.said()),
+        }
+    }
+}
 
 pub struct ThreadHolds {
     log: Arc<ThreadLog>,
@@ -157,7 +184,7 @@ impl ThreadHolds {
         &self,
         key: &str,
         next: impl Fn(Option<&Hold>) -> Decided<T> + Send + Sync + 'static,
-    ) -> Result<T, LedgerError> {
+    ) -> Result<T, HoldsError> {
         let key = key.to_owned();
         let job = move |staged: &mut Staged| {
             let (hold, decided) = match next(staged.state().hold(&key)) {
@@ -178,22 +205,19 @@ impl ThreadHolds {
             self.log.job(job).await
         };
         journaled
-            .map_err(|error| LedgerError::Journal(refused(error).to_string()))?
-            .map_err(LedgerError::Hold)
+            .map_err(HoldsError::Scope)?
+            .map_err(HoldsError::Hold)
     }
 
-    async fn settled(&self) -> Result<(), String> {
+    pub(crate) async fn settled(&self) -> Result<(), HoldsError> {
         if *self.owed.get() {
-            self.log
-                .flush(None)
-                .await
-                .map_err(|error| refused(error).to_string())?;
+            self.log.flush(None).await.map_err(HoldsError::Scope)?;
         }
         self.owed.set(false);
         Ok(())
     }
 
-    async fn carried(&self, carried: Carried) -> Result<bool, String> {
+    pub(crate) async fn carried(&self, carried: Carried) -> Result<bool, HoldsError> {
         if !*self.owed.get() {
             return Ok(false);
         }
@@ -205,16 +229,16 @@ impl ThreadHolds {
             .log
             .flush(Some(carry))
             .await
-            .map_err(|error| refused(error).to_string())?;
+            .map_err(HoldsError::Scope)?;
         self.owed.set(false);
         Ok(flushed.carried)
     }
 
-    async fn before_call(&self, call: EffectCall<'_>) -> Result<(), String> {
+    pub(crate) async fn before_call(&self, call: EffectCall<'_>) -> Result<(), HoldsError> {
         let gated_call = Gated {
             call_id: call.call_id.to_owned(),
             effect: call.effect,
-            input: tool_input(call.input).map_err(|error| error.to_string())?,
+            input: tool_input(call.input).map_err(|error| HoldsError::Gate(error.to_string()))?,
             session_id: call.session_id.to_owned(),
             tool: call.tool.to_owned(),
             turn: call.turn_id.map(str::to_owned),
@@ -222,9 +246,74 @@ impl ThreadHolds {
         self.log
             .job(move |staged| gated(staged, &gated_call))
             .await
-            .map_err(|error| refused(error).to_string())??;
+            .map_err(HoldsError::Scope)?
+            .map_err(HoldsError::Gate)?;
         self.owed.set(false);
         Ok(())
+    }
+
+    pub(crate) async fn abandon_call(
+        &self,
+        call_id: &str,
+    ) -> Result<Option<ToolOutput>, HoldsError> {
+        let id = call_id.to_owned();
+        self.log
+            .job(move |staged| abandoned(staged, &id))
+            .await
+            .map_err(HoldsError::Scope)
+    }
+
+    pub(crate) async fn hold_call(
+        &self,
+        key: &str,
+        call: HoldCall<'_>,
+        card: &RawValue,
+    ) -> Result<(), HoldsError> {
+        let owned = key.to_owned();
+        let call_id = call.call_id.to_owned();
+        let card = card.to_owned();
+        let input = call.input.to_owned();
+        let tool = call.tool.to_owned();
+        let turn = call.turn_id.map(str::to_owned);
+        self.journal(key, move |existing| {
+            let held = HeldCall {
+                call_id: &call_id,
+                card: &card,
+                input: &input,
+                tool: &tool,
+                turn: turn.as_deref(),
+            };
+            Hold::hold(existing, &owned, &held).map(|hold| (hold, ()))
+        })
+        .await
+    }
+
+    pub(crate) async fn resolve_hold(
+        &self,
+        key: &str,
+        answer: Answer,
+    ) -> Result<Resumption, HoldsError> {
+        let owned = key.to_owned();
+        let resumption = self
+            .journal(key, move |existing| {
+                let (hold, resumed) = Hold::resolve(existing, &owned, answer.clone())?;
+                Ok((Some(hold), resumed))
+            })
+            .await?;
+        if matches!(resumption, Resumption::Run { .. }) {
+            self.resolved.update(|resolved| {
+                resolved.insert(key.to_owned());
+            });
+        }
+        Ok(resumption)
+    }
+
+    pub(crate) async fn release_hold(&self, key: &str) -> Result<(), HoldsError> {
+        let owned = key.to_owned();
+        self.journal(key, move |existing| {
+            Hold::release(existing, &owned).map(|hold| (Some(hold), ()))
+        })
+        .await
     }
 
     async fn after_call(&self, call_id: &str, output: &ToolOutput) {
@@ -256,24 +345,18 @@ impl EffectGate for ThreadHolds {
     }
 
     fn before<'a>(&'a self, call: EffectCall<'a>) -> HostFuture<'a, Result<(), String>> {
-        Box::pin(self.before_call(call))
+        Box::pin(async move { self.before_call(call).await.map_err(HoldsError::said) })
     }
 
     fn settle(&self) -> HostFuture<'_, Result<(), String>> {
-        Box::pin(self.settled())
+        Box::pin(async move { self.settled().await.map_err(HoldsError::said) })
     }
 
     fn abandon<'a>(
         &'a self,
         call_id: &'a str,
     ) -> HostFuture<'a, Result<Option<ToolOutput>, String>> {
-        let id = call_id.to_owned();
-        Box::pin(async move {
-            self.log
-                .job(move |staged| abandoned(staged, &id))
-                .await
-                .map_err(|error| refused(error).to_string())
-        })
+        Box::pin(async move { self.abandon_call(call_id).await.map_err(HoldsError::said) })
     }
 
     fn after<'a>(&'a self, call_id: &'a str, output: &'a ToolOutput) -> HostFuture<'a, ()> {
@@ -288,22 +371,11 @@ impl HoldLedger for ThreadHolds {
         call: HoldCall<'a>,
         card: &'a RawValue,
     ) -> HostFuture<'a, Result<(), LedgerError>> {
-        let owned = key.to_owned();
-        let call_id = call.call_id.to_owned();
-        let card = card.to_owned();
-        let input = call.input.to_owned();
-        let tool = call.tool.to_owned();
-        let turn = call.turn_id.map(str::to_owned);
-        Box::pin(self.journal(key, move |existing| {
-            let held = HeldCall {
-                call_id: &call_id,
-                card: &card,
-                input: &input,
-                tool: &tool,
-                turn: turn.as_deref(),
-            };
-            Hold::hold(existing, &owned, &held).map(|hold| (hold, ()))
-        }))
+        Box::pin(async move {
+            self.hold_call(key, call, card)
+                .await
+                .map_err(HoldsError::ledger)
+        })
     }
 
     fn resolve<'a>(
@@ -312,19 +384,9 @@ impl HoldLedger for ThreadHolds {
         answer: Answer,
     ) -> HostFuture<'a, Result<Resumption, LedgerError>> {
         Box::pin(async move {
-            let owned = key.to_owned();
-            let resumption = self
-                .journal(key, move |existing| {
-                    let (hold, resumed) = Hold::resolve(existing, &owned, answer.clone())?;
-                    Ok((Some(hold), resumed))
-                })
-                .await?;
-            if matches!(resumption, Resumption::Run { .. }) {
-                self.resolved.update(|resolved| {
-                    resolved.insert(key.to_owned());
-                });
-            }
-            Ok(resumption)
+            self.resolve_hold(key, answer)
+                .await
+                .map_err(HoldsError::ledger)
         })
     }
 
@@ -351,19 +413,16 @@ impl HoldLedger for ThreadHolds {
     }
 
     fn release<'a>(&'a self, key: &'a str) -> HostFuture<'a, Result<(), LedgerError>> {
-        let owned = key.to_owned();
-        Box::pin(self.journal(key, move |existing| {
-            Hold::release(existing, &owned).map(|hold| (Some(hold), ()))
-        }))
+        Box::pin(async move { self.release_hold(key).await.map_err(HoldsError::ledger) })
     }
 }
 
 impl RemoteBarrier for ThreadHolds {
     fn settle(&self) -> HostFuture<'_, Result<(), String>> {
-        Box::pin(self.settled())
+        Box::pin(async move { self.settled().await.map_err(HoldsError::said) })
     }
 
     fn carry(&self, carried: Carried) -> HostFuture<'_, Result<bool, String>> {
-        Box::pin(self.carried(carried))
+        Box::pin(async move { self.carried(carried).await.map_err(HoldsError::said) })
     }
 }
