@@ -15,6 +15,7 @@ Status (2026-11-25): nanocode-sync has no exclusive guard type left (`Sequencer`
 5. **Liveness is lease expiry, judged on the database clock.** A dropped connection, proxy cut or failover is a transport event. It doesn't mean ownership is lost. Ownership is lost only when a fenced write or a renewal compare-and-set says the epoch moved. Membership heartbeats may rank who claims next. They never authorize taking a lease.
 6. **Every wait has a deadline.** Pool checkout, connect, `lock_timeout`, `statement_timeout` and `idle_in_transaction_session_timeout` are set for every transaction class. When a deadline passes, the caller gets a typed refusal (`Busy`, `Lost`, `SchemaBehind`), never a hang. In store-sql, `PgLimits` (given to `PgPool::limited`) holds one deadline for pool acquire plus connect, and the three server timeouts for each `SqlAccess` class. Each batch sets its class's timeouts local to its transaction (`Autocommit` sets them for the session and resets it after), a lock or statement timeout answers `Busy`, and a batch the server doesn't answer within its statement timeout is cancelled on the server with a `CancelRequest` and its connection dropped.
 7. **Capacity is not ownership.** A `Semaphore` bounds resources (CPU, memory, connections), and its permit is acquired with a deadline. It never serializes access to state.
+8. **State is owned and resident; a log is never opened per request.** A scope's folded state lives in its lease owner's memory for the whole lease. Apps reach a scope through `Scopes::get`, write commands to it and read its published state. Nothing outside the scope runtime opens, claims or replays a log. A cold claim loads a materialized checkpoint of the folded values plus a bounded tail, so its cost is O(state + N) and never O(history).
 
 ## Invariants
 
@@ -31,6 +32,49 @@ Each invariant has a check in `bin/nanocode-sim` and a mutation that breaks it. 
 | **I7** GC never deletes a record a committed state references, and never fences an owner | `--scenario durable`: after every commit, each state's committed head references only records that exist and that it holds; a collect or a row store compaction never moves a fence; `--scenario workspace_sql`: after every commit and collect, each committed workspace manifest has one `(workspace, digest)` reference row per blob it names and no other, and each of those blobs exists with its bytes | `durable`: `purge_skips_grace`, `commit_skips_revive`, `collect_fences_owner`; `workspace_sql`: `sweep_ignores_refs` |
 
 The simulator models the lease row, owners, the network and the database clock. It drives every transition, injects a crash after every step (before and after each CAS lands, between flush and release), and plays stale-epoch writes after every handoff. Under real load, the measurement is: no lock waits (sampled `wait_event_type = 'Lock'` and `pg_locks WHERE NOT granted`), no statement timeouts, throughput that grows with the number of owners, and handoff stall time.
+
+## Resident scopes
+
+Rule 1 gives every scope one writer. It doesn't keep that writer's state. When a host opens a log per request, it pays for the scope's whole history again on each one: load the snapshot, replay the tail, commit a claim, read sections that still live in old rows, then drop the handle. Leases don't prevent this. They decide who may write, not what stays in memory. So the scope runtime owns both: the lease, and the folded state for as long as the lease lasts.
+
+### API
+
+```text
+Scopes<F: Resident>          one per process; owns leases, residents, the checkpoint writer and routing
+  Scopes::get(scope) -> Scope<F>       local owner, or a route to the remote holder, or a claim
+Scope<F>                     a strong, cloneable handle; never weak, never per turn
+  scope.send(command)   -> Committed<F::Reply>    one mailbox per scope; group commit; epoch-fenced
+  scope.state()         -> Arc<F::State>          last committed state, from an Atom; never queues
+  scope.watch()         -> watch::Receiver<Arc<F::State>>   committed folds, for followers
+trait Resident           the app's fold: State, Command, Reply, apply(&mut State, Record), encode/decode of State
+```
+
+- **Owner.** The lease owner runs one task per resident scope. That task holds \`F::State\` by value and is the only writer. After each commit it publishes \`Arc<F::State>\` to an \`Atom\`.
+- **Reads.** \`state()\` and \`watch()\` read the published \`Arc\`, so a reader never waits behind an append (snapshot isolation at the last commit). Only \`send\` serializes, and only within its own scope.
+- **Routing.** If this process doesn't own the scope, \`get\` returns a handle that forwards to the holder named in the lease row, through a \`Route\` the host supplies (HTTP in \`examples/scoped-api\`). A process that sees the lease Released or lapsed claims it. A host writes no routing or ownership code of its own.
+- **No per-request open.** \`TurnLog::open\`, \`claim\` and \`follow\`, \`OneLog::open\`/\`claim\` and \`PartedLog\` claims become \`pub(crate)\` behind \`Scopes\`. \`--tidy\` refuses any call to them outside the scope runtime and the simulator.
+- **Residency ends only by handoff.** A resident leaves memory only through \`Draining\` → final checkpoint → \`Released { cursor }\`, either on a planned move, on shutdown, or when a capacity bound (\`Weighed\` bytes per process) evicts the least recently used scope. A scope is never dropped while it is held, and a handle never goes weak.
+
+### Checkpoints hold values
+
+- A checkpoint is \`F::encode(&State)\`: the folded values themselves, not an index into older rows. It is stored in parts (\`CHECKPOINT_PART_BYTES\`) as \`nanocode_checkpoint(scope, epoch, seq, part, bytes)\`.
+- The owner writes one every N committed rows or T seconds, whichever comes first, and always on drain. Writes are fenced: \`INSERT … WHERE epoch = $e\` on the lease row, and \`seq\` only moves forward.
+- A cold claim loads the newest checkpoint at or before \`cursor\` and replays at most N rows after it. Rows before the checkpoint are never read on open. Retention may archive them; a history reader takes its own path, never \`get\`.
+- After a planned handoff the checkpoint is at the cursor, so the gainer replays zero rows. A deploy costs one checkpoint load per scope that is touched, not a scan.
+
+### Invariants
+
+| Invariant | Check | Mutation |
+|---|---|---|
+| I8 a cold claim reads at most one checkpoint and N tail rows | sim counts rows read per claim against the checkpoint seq | \`checkpoint_indexes_only\`: the checkpoint stores keys, and the claim scans history |
+| I9 a read never waits on an append | sim stalls an append and requires \`state()\` to answer at the last commit | \`read_through_writer\`: reads go through the mailbox |
+| I10 the state a reader sees is a committed fold | sim compares \`state()\` against a refold of committed rows | \`publish_before_commit\` |
+| I11 a stale owner's checkpoint never lands | sim plays checkpoints from the old epoch after each handoff | \`checkpoint_skips_epoch\` |
+| I12 a resident is dropped only after a final checkpoint at its release cursor | sim evicts under memory pressure and crashes at every step | \`evict_without_checkpoint\` |
+
+### Proof
+
+A benchmark sized like the host that hit this: 95k scopes, 131 GB of history, a hot set of a few thousand. It measures load latency, Postgres rows read per turn and full-history scans in three cases: cold after a deploy, cold after an hour idle, and steady. The targets are p50 under 20 ms and p90 under 100 ms with cold loads included, O(1) Postgres reads per turn, and 0 full-history scans. A rolling restart must keep p99 load flat.
 
 ## Ownership: the lease state machine
 
