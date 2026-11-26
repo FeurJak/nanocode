@@ -38,6 +38,7 @@ use crate::{
         TurnRecord, TurnRetry, TurnState, edited, now, submission_digest,
     },
     stored_event::Stored,
+    thread_scope::sim as thread_scope_sim,
     turn_inbox::Envelope,
     turn_log::{EventLog, Logged, Recording, TurnLog},
 };
@@ -1866,9 +1867,14 @@ impl EffectGate for OneLog {
                     Box::pin(async move {
                         let this = upgraded(&this);
             match facts::intended(writing.fold(), call_id.as_str()) {
-                Some(tool) if tool != tool.as_str() => {
+                Some(intended)
+                    if intended != tool.as_str()
+                        && !thread_scope_sim::mutated(
+                            thread_scope_sim::Mutation::GateComparesIntentToItself,
+                        ) =>
+                {
                     return Err(format!(
-                        "call {} was intended for tool {tool}, not {}",
+                        "call {} was intended for tool {intended}, not {}",
                         call_id.as_str(), tool.as_str()
                     ));
                 }

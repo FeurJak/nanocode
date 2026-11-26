@@ -15,10 +15,11 @@ pub enum Mutation {
     HoldStaged,
     WakesUnbounded,
     WakeIndexSkipped,
+    GateComparesIntentToItself,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::PartDropped,
         Self::AdoptionSkipsRetired,
         Self::AdoptionSkipsBlobs,
@@ -30,6 +31,7 @@ impl Mutation {
         Self::HoldStaged,
         Self::WakesUnbounded,
         Self::WakeIndexSkipped,
+        Self::GateComparesIntentToItself,
     ];
 
     #[must_use]
@@ -47,6 +49,7 @@ impl Mutation {
             Self::HoldStaged => "hold_staged",
             Self::WakesUnbounded => "wakes_unbounded",
             Self::WakeIndexSkipped => "wake_index_skipped",
+            Self::GateComparesIntentToItself => "gate_compares_intent_to_itself",
         }
     }
 

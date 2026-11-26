@@ -434,7 +434,8 @@ async fn start_monitor(
         "run_in_background": true,
         "timeout": timeout_ms,
     });
-    let context = tool_context(invocation).with_run_time(Some(
+    let call_id = format!("{}/start", invocation.call_id);
+    let context = tool_context_as(invocation, &call_id).with_run_time(Some(
         nanocode_backend_claude_tools::tools::bash::direct_run_time(&bash),
     ));
     let raw = serde_json::value::to_raw_value(&bash).map_err(|error| error.to_string())?;
@@ -834,10 +835,14 @@ impl Call {
 }
 
 fn tool_context(invocation: &ClaudeToolInvocation) -> ToolContext<'_> {
+    tool_context_as(invocation, &invocation.call_id)
+}
+
+fn tool_context_as<'a>(invocation: &'a ClaudeToolInvocation, call_id: &'a str) -> ToolContext<'a> {
     ToolContext::new(
         &invocation.model,
         &invocation.session_id,
-        &invocation.call_id,
+        call_id,
         &[],
         usize::MAX,
     )

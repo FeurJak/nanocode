@@ -181,13 +181,7 @@ fn shown_running(running: Option<Option<Running>>) -> String {
     )
 }
 
-fn gated(
-    rng: &mut Rng,
-    world: &World,
-    sides: &Sides,
-    call_id: &str,
-    stats: &mut ThreadScopeStats,
-) -> (String, String) {
+fn gated(rng: &mut Rng, world: &World, sides: &Sides, call_id: &str) -> (String, String) {
     let input = ToolInput::Function(raw(&json!({ "call": call_id })));
     let session = if rng.chance(500_000) {
         format!("state{}", rng.below(STATES))
@@ -195,6 +189,12 @@ fn gated(
         "plain".to_owned()
     };
     let tool = TOOLS[usize::from(rng.chance(300_000))];
+    let nested = format!("{call_id}/start");
+    let call_id = if rng.chance(200_000) {
+        nested.as_str()
+    } else {
+        call_id
+    };
     let call = || EffectCall {
         call_id,
         effect: EffectClass::External,
@@ -205,14 +205,6 @@ fn gated(
     };
     let ours = driven(world, "a gate", sides.one.gate().before(call()));
     let theirs = driven(world, "a gate", sides.holds.before(call()));
-    let refused = format!(
-        "call {call_id} was intended for tool {}, not {tool}",
-        TOOLS[0]
-    );
-    if tool != TOOLS[0] && matches!(ours, Some(Ok(()))) && theirs == Some(Err(refused)) {
-        stats.gate_lenient += 1;
-        return (format!("{ours:?}"), format!("{ours:?}"));
-    }
     (format!("{ours:?}"), format!("{theirs:?}"))
 }
 
@@ -221,7 +213,6 @@ fn op(
     world: &World,
     sides: &Sides,
     id: u64,
-    stats: &mut ThreadScopeStats,
 ) -> Option<(&'static str, String, String)> {
     let key = format!("k{}", rng.below(KEYS));
     let call_id = format!("g{}", rng.below(CALLS));
@@ -280,7 +271,7 @@ fn op(
             )
         }
         7 => {
-            let (ours, theirs) = gated(rng, world, sides, &call_id, stats);
+            let (ours, theirs) = gated(rng, world, sides, &call_id);
             ("before", ours, theirs)
         }
         8 => {
@@ -451,7 +442,7 @@ pub(crate) fn run(rng: &mut Rng, world: &World, stats: &mut ThreadScopeStats) {
             continue;
         }
         stats.hold_ops += 1;
-        let Some((what, ours, theirs)) = op(rng, world, &sides, step, stats) else {
+        let Some((what, ours, theirs)) = op(rng, world, &sides, step) else {
             return;
         };
         if ours != theirs {

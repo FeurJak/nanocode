@@ -112,7 +112,6 @@ pub struct ThreadScopeStats {
     pub hold_ops: u64,
     pub hold_reopens: u64,
     pub hold_settles: u64,
-    pub gate_lenient: u64,
     pub wake_ops: u64,
     pub seeds: u64,
     pub steps: u64,
@@ -154,7 +153,6 @@ impl ThreadScopeStats {
         self.hold_ops += other.hold_ops;
         self.hold_reopens += other.hold_reopens;
         self.hold_settles += other.hold_settles;
-        self.gate_lenient += other.gate_lenient;
         self.wake_ops += other.wake_ops;
         self.seeds += other.seeds;
         self.steps += other.steps;
