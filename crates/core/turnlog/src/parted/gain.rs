@@ -1,8 +1,8 @@
-use std::{future::Future, pin::pin, task::Poll};
+use std::future::Future;
 
 use nanocode_durability_core::StoreError;
 use nanocode_partitions::Partition;
-use nanocode_sync::Semaphore;
+use nanocode_sync::{AcquireError, Semaphore};
 
 use super::{PartStore, PartedLog, sim};
 
@@ -47,26 +47,27 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         R: FnOnce(Gained) -> F,
         F: Future<Output = Result<T, StoreError>>,
     {
-        let mut acquire = pin!(capacity.acquire());
-        let mut deadline = pin!(deadline);
-        let permit = std::future::poll_fn(|context| {
-            if let Poll::Ready(permit) = acquire.as_mut().poll(context) {
-                return Poll::Ready(Some(permit));
+        let unbounded = sim::mutated(sim::Mutation::GainWaitsUnbounded);
+        let deadline = async move {
+            if unbounded {
+                std::future::pending::<()>().await;
             }
-            if !sim::mutated(sim::Mutation::GainWaitsUnbounded)
-                && deadline.as_mut().poll(context).is_ready()
-            {
-                return Poll::Ready(None);
-            }
-            Poll::Pending
-        })
-        .await
-        .ok_or(GainError::Busy)?
-        .map_err(|_| GainError::Closed)?;
-        let epoch = self.claim(part, ttl_ms).await.map_err(|error| match error {
-            StoreError::Fenced => GainError::Fenced,
-            error => GainError::Store(error),
-        })?;
+            deadline.await;
+        };
+        let permit = capacity
+            .acquire_within(deadline)
+            .await
+            .map_err(|error| match error {
+                AcquireError::Busy => GainError::Busy,
+                AcquireError::Closed => GainError::Closed,
+            })?;
+        let epoch = self
+            .claim(part, ttl_ms)
+            .await
+            .map_err(|error| match error {
+                StoreError::Fenced => GainError::Fenced,
+                error => GainError::Store(error),
+            })?;
         let cursor = self.resume(part).ok_or(GainError::Fenced)?;
         let gained = Gained {
             part,

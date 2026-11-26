@@ -13,7 +13,7 @@ use std::{
 };
 
 use nanocode_sync::{
-    Notify, OnceCell, Semaphore, SemaphorePermit,
+    AcquireError, Notify, OnceCell, Semaphore, SemaphorePermit,
     broadcast::{self, error::RecvError},
     mpsc::{self, error::TrySendError},
     watch,
@@ -64,10 +64,11 @@ pub enum SyncMutation {
     NotifyOneForWaiters,
     WatchResendsStale,
     FillKeepsAbandoned,
+    AcquireIgnoresDeadline,
 }
 
 impl SyncMutation {
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::None,
         Self::SkipNotify,
         Self::LeakPermit,
@@ -83,6 +84,7 @@ impl SyncMutation {
         Self::NotifyOneForWaiters,
         Self::WatchResendsStale,
         Self::FillKeepsAbandoned,
+        Self::AcquireIgnoresDeadline,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -108,6 +110,7 @@ impl SyncMutation {
             Self::NotifyOneForWaiters => "notify_one_for_waiters",
             Self::WatchResendsStale => "watch_resends_stale",
             Self::FillKeepsAbandoned => "fill_keeps_abandoned",
+            Self::AcquireIgnoresDeadline => "acquire_ignores_deadline",
         }
     }
 
@@ -671,7 +674,9 @@ async fn holder(
             continue;
         }
         let limit = World::limit(&mut rng);
-        let mut acquire = pin!(semaphore.acquire_many(permits));
+        let wait = limit.unwrap_or(PATIENCE);
+        let deadline_ns = world.clock.now_ns() + nanos(wait);
+        let mut acquire = pin!(semaphore.acquire_many_within(permits, world.clock.sleep(wait)));
         let tracked = Tracked {
             future: acquire.as_mut(),
             ledger,
@@ -680,16 +685,37 @@ async fn holder(
             ticket: None,
             granted: Arc::new(AtomicBool::new(false)),
         };
-        let Some((acquired, ticket)) = world.within(limit, tracked).await else {
-            world.note(format!("holder {index} gave up on {wanted}"));
-            continue;
+        let (acquired, ticket) = tracked.await;
+        if acquired.is_err()
+            && let Some(ticket) = ticket
+        {
+            ledger.leave(ticket);
+        }
+        let permit = match acquired {
+            Ok(permit) => permit,
+            Err(AcquireError::Busy) if limit.is_some() => {
+                world.note(format!("holder {index} gave up on {wanted}"));
+                continue;
+            }
+            Err(AcquireError::Busy) => {
+                world.fail(format!(
+                    "semaphore: holder {index} found no {wanted} permits within the patience of {PATIENCE:?}"
+                ));
+                return;
+            }
+            Err(AcquireError::Closed) => {
+                world.fail(format!(
+                    "semaphore: holder {index} saw the open semaphore closed"
+                ));
+                return;
+            }
         };
-        let Ok(permit) = acquired else {
+        if world.clock.now_ns() > deadline_ns {
             world.fail(format!(
-                "semaphore: holder {index} saw the open semaphore closed"
+                "semaphore: holder {index} got {wanted} at {} ns, after its deadline at {deadline_ns} ns",
+                world.clock.now_ns()
             ));
-            return;
-        };
+        }
         if let Some((first, first_holder)) = ledger.ahead(ticket) {
             world.fail(format!(
                 "semaphore: holder {index} (ticket {ticket:?}) got {wanted} before holder {first_holder} (ticket {first}) queued ahead of it"
@@ -703,6 +729,11 @@ async fn holder(
 }
 
 async fn semaphore_scenario(world: &World, script: &Script, seed: u64) {
+    nanocode_sync::sim::mutate(if world.mutation == SyncMutation::AcquireIgnoresDeadline {
+        nanocode_sync::sim::Mutation::AcquireIgnoresDeadline
+    } else {
+        nanocode_sync::sim::Mutation::None
+    });
     let semaphore = Semaphore::new(count(script.permits));
     let ledger = Ledger {
         total: Cell::new(script.permits),
@@ -746,6 +777,7 @@ async fn semaphore_scenario(world: &World, script: &Script, seed: u64) {
     if !waiting.is_empty() {
         world.fail(format!("semaphore: waiters left queued: {waiting:?}"));
     }
+    nanocode_sync::sim::mutate(nanocode_sync::sim::Mutation::None);
 }
 
 struct Mail<'a> {

@@ -1,4 +1,4 @@
-use nanocode_sync::{Semaphore, SemaphorePermit};
+use nanocode_sync::{AcquireError, Semaphore, SemaphorePermit};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -210,10 +210,13 @@ impl Budget {
             None => None,
             Some(room) => {
                 let mib = u32::try_from(expected.div_ceil(1 << 20)).unwrap_or(u32::MAX);
-                match nanocode_platform::timeout(self.cpu_wait, room.acquire_many(mib)).await {
-                    Ok(Ok(reserved)) => Some(reserved),
-                    Ok(Err(_)) => return Err(Busy::Short),
-                    Err(_) => {
+                match room
+                    .acquire_many_within(mib, nanocode_platform::sleep(self.cpu_wait))
+                    .await
+                {
+                    Ok(reserved) => Some(reserved),
+                    Err(AcquireError::Closed) => return Err(Busy::Short),
+                    Err(AcquireError::Busy) => {
                         return Err(Busy::Memory {
                             wait: self.cpu_wait,
                         });
@@ -222,10 +225,14 @@ impl Budget {
             }
         };
         let left = self.cpu_wait.saturating_sub(began.elapsed());
-        let permit = match nanocode_platform::timeout(left, self.computing.acquire()).await {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_)) => return Err(Busy::Short),
-            Err(_) => {
+        let permit = match self
+            .computing
+            .acquire_within(nanocode_platform::sleep(left))
+            .await
+        {
+            Ok(permit) => permit,
+            Err(AcquireError::Closed) => return Err(Busy::Short),
+            Err(AcquireError::Busy) => {
                 return Err(Busy::Cpu {
                     wait: self.cpu_wait,
                 });

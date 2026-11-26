@@ -129,6 +129,7 @@ default_table='
 1 canary_sync_broadcast_extra canary --scenario sync --mutation broadcast_extra
 1 canary_sync_ring_off_by_one canary --scenario sync --mutation ring_off_by_one
 1 canary_sync_fill_keeps_abandoned canary --scenario sync --mutation fill_keeps_abandoned
+1 canary_sync_acquire_ignores_deadline canary --scenario sync --mutation acquire_ignores_deadline
 4 turns_turnlog_events pass --scenario turns --policy turnlog --event-bytes 32768
 4 turns_turnlog_snapshots pass --scenario turns --policy turnlog --snapshot-rows 4 --state-bytes 131072
 2 turns_turnlog_retain pass --scenario turns --policy turnlog --retain 1
@@ -522,6 +523,7 @@ default_table='
 1 held_await_twice pass --scenario held_await --twice
 1 canary_held_await_held_across_await canary:64 --scenario held_await --mutation held_across_await
 1 canary_held_await_waits_unbounded canary:64 --scenario held_await --mutation waits_unbounded
+1 canary_held_await_mutex_semaphore canary:64 --scenario held_await --mutation mutex_semaphore
 4 durable pass --scenario durable
 1 durable_twice pass --scenario durable --twice
 1 canary_durable_write_skips_fence canary:64 --scenario durable --mutation write_skips_fence

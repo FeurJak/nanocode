@@ -1,11 +1,12 @@
+use crate::sim::{Mutation, mutated};
 use nanocode_sys::{
     AtomicBox, AtomicWaker,
     queue::{Consumer, Pop, Queue},
 };
 use std::{
     fmt,
-    future::Future,
-    pin::Pin,
+    future::{Future, poll_fn},
+    pin::{Pin, pin},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -47,12 +48,18 @@ pub struct Semaphore {
     drainer: AtomicBox<Drainer>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct AcquireError(());
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcquireError {
+    Closed,
+    Busy,
+}
 
 impl fmt::Display for AcquireError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("semaphore closed")
+        match self {
+            Self::Closed => formatter.write_str("semaphore closed"),
+            Self::Busy => formatter.write_str("no permit came free before the deadline"),
+        }
     }
 }
 
@@ -338,31 +345,62 @@ impl Semaphore {
         })
     }
 
-    pub async fn acquire(&self) -> Result<SemaphorePermit<'_>, AcquireError> {
-        self.acquire_many(1).await
+    pub async fn acquire_within<D: Future<Output = ()>>(
+        &self,
+        deadline: D,
+    ) -> Result<SemaphorePermit<'_>, AcquireError> {
+        self.acquire_many_within(1, deadline).await
     }
 
-    pub async fn acquire_many(&self, permits: u32) -> Result<SemaphorePermit<'_>, AcquireError> {
-        Acquire::new(self, permits as usize).await?;
+    pub async fn acquire_many_within<D: Future<Output = ()>>(
+        &self,
+        permits: u32,
+        deadline: D,
+    ) -> Result<SemaphorePermit<'_>, AcquireError> {
+        self.take_within(permits as usize, deadline).await?;
         Ok(SemaphorePermit {
             semaphore: self,
             permits,
         })
     }
 
-    pub async fn acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, AcquireError> {
-        self.acquire_many_owned(1).await
+    pub async fn acquire_owned_within<D: Future<Output = ()>>(
+        self: Arc<Self>,
+        deadline: D,
+    ) -> Result<OwnedSemaphorePermit, AcquireError> {
+        self.acquire_many_owned_within(1, deadline).await
     }
 
-    pub async fn acquire_many_owned(
+    pub async fn acquire_many_owned_within<D: Future<Output = ()>>(
         self: Arc<Self>,
         permits: u32,
+        deadline: D,
     ) -> Result<OwnedSemaphorePermit, AcquireError> {
-        Acquire::new(&self, permits as usize).await?;
+        self.take_within(permits as usize, deadline).await?;
         Ok(OwnedSemaphorePermit {
             semaphore: self,
             permits,
         })
+    }
+
+    async fn take_within<D: Future<Output = ()>>(
+        &self,
+        permits: usize,
+        deadline: D,
+    ) -> Result<(), AcquireError> {
+        let mut acquire = pin!(Acquire::new(self, permits));
+        let mut deadline = pin!(deadline);
+        let bounded = !mutated(Mutation::AcquireIgnoresDeadline);
+        poll_fn(|context| {
+            if let Poll::Ready(acquired) = acquire.as_mut().poll(context) {
+                return Poll::Ready(acquired);
+            }
+            if bounded && deadline.as_mut().poll(context).is_ready() {
+                return Poll::Ready(Err(AcquireError::Busy));
+            }
+            Poll::Pending
+        })
+        .await
     }
 
     pub(crate) fn release(&self, permits: usize) {
@@ -400,7 +438,7 @@ impl<'a> Acquire<'a> {
             }
             Err(TryAcquireError::Closed) => {
                 self.queued = Queued::Done;
-                return Poll::Ready(Err(AcquireError(())));
+                return Poll::Ready(Err(AcquireError::Closed));
             }
             Err(TryAcquireError::NoPermits) => {}
         }
@@ -419,7 +457,7 @@ impl<'a> Acquire<'a> {
 
     fn settle(&mut self, node: &Node) -> Poll<Result<(), AcquireError>> {
         if self.semaphore.is_closed() {
-            return Poll::Ready(Err(AcquireError(())));
+            return Poll::Ready(Err(AcquireError::Closed));
         }
         if node.state.load(Ordering::Acquire) & GRANTED != 0 {
             self.queued = Queued::Done;

@@ -32,16 +32,19 @@ const NAMES: &[&str] = &["turn", "held", "permit", "_turn", "_guard", "mut guard
 const STORE_CALL: &str = "self.store.commit(n).await?;";
 const WAITS: RangeInclusive<u64> = 1..=8;
 const BARE_ACQUIRE: &str = "let permit = self.permits.clone().acquire_owned().await.map_err(|_| Busy)?;";
+const GATES: RangeInclusive<u64> = 1..=8;
+const MUTEX_GATE: &str = "let gate = Semaphore::new(1);";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeldAwaitMutation {
     None,
     HeldAcrossAwait,
     WaitsUnbounded,
+    MutexSemaphore,
 }
 
 impl HeldAwaitMutation {
-    const ALL: [Self; 3] = [Self::None, Self::HeldAcrossAwait, Self::WaitsUnbounded];
+    const ALL: [Self; 4] = [Self::None, Self::HeldAcrossAwait, Self::WaitsUnbounded, Self::MutexSemaphore];
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -54,6 +57,7 @@ impl HeldAwaitMutation {
             Self::None => "none",
             Self::HeldAcrossAwait => "held_across_await",
             Self::WaitsUnbounded => "waits_unbounded",
+            Self::MutexSemaphore => "mutex_semaphore",
         }
     }
 
@@ -74,6 +78,7 @@ pub struct HeldAwaitStats {
     pub shapes: u64,
     pub held: u64,
     pub waits: u64,
+    pub gates: u64,
 }
 
 impl HeldAwaitStats {
@@ -84,6 +89,7 @@ impl HeldAwaitStats {
         self.shapes += other.shapes;
         self.held += other.held;
         self.waits += other.waits;
+        self.gates += other.gates;
     }
 }
 
@@ -127,6 +133,41 @@ fn wait(rng: &mut Rng) -> (&'static str, u64) {
         4 => ("let mut acquire = pin!(self.capacity.acquire());", 0),
         _ => ("// let permit = self.permits.acquire().await;\nlet text = \"self.permits.acquire().await\";", 0),
     }
+}
+
+fn gate(rng: &mut Rng) -> (&'static str, u64) {
+    match rng.below(9) {
+        0 => (MUTEX_GATE, 1),
+        1 => ("gate: Arc::new(nanocode_sync::Semaphore::new( 1usize )),", 1),
+        2 => ("let slots = Arc::new(Semaphore::new(capacity));", 0),
+        3 => ("let slots = Semaphore::new(1 << 20);", 0),
+        4 => ("let slots = Semaphore::new(1_000);", 0),
+        5 => ("let slots = Semaphore::new(16);", 0),
+        6 => ("let slots = Semaphore::new(sizes.permits.max(1));", 0),
+        7 => ("// let gate = Semaphore::new(1);", 0),
+        _ => ("let text = \"Semaphore::new(1)\";", 0),
+    }
+}
+
+fn gates(rng: &mut Rng, mutation: HeldAwaitMutation, stats: &mut HeldAwaitStats) -> Option<String> {
+    let path = format!("{CRATE}/gates.rs");
+    let mut source = "pub fn gates(capacity: usize, sizes: Sizes) {\n".to_owned();
+    let mut mutexes = 0;
+    for _ in 0..draw(rng, &GATES) {
+        let (text, count) = gate(rng);
+        mutexes += count;
+        let _ = writeln!(source, "    {text}");
+    }
+    if mutation == HeldAwaitMutation::MutexSemaphore {
+        let _ = writeln!(source, "    {MUTEX_GATE}");
+    }
+    source.push_str("}\n");
+    let problems = tidy::mutex_problems(&[(path.clone(), source)]);
+    let found = u64::try_from(problems.len()).expect("a problem count fits a u64");
+    stats.gates += found;
+    (found != mutexes).then(|| {
+        format!("Semaphore::new(1): tidy reports {found} in {path}, the source builds {mutexes}: {}", problems.join("; "))
+    })
 }
 
 fn pool(rng: &mut Rng, mutation: HeldAwaitMutation) -> (String, u64) {
@@ -240,7 +281,8 @@ fn run_seed(seed: u64, mutation: HeldAwaitMutation) -> (u64, Option<String>, Hel
     let reported = u64::try_from(problems.len()).expect("a problem count fits a u64");
     let wrong = (reported != held)
         .then(|| format!("I3 held across await: tidy reports {reported} guards where the owners hold {held}: {}", problems.join("; ")))
-        .or_else(|| waits(&mut rng, mutation, &mut stats));
+        .or_else(|| waits(&mut rng, mutation, &mut stats))
+        .or_else(|| gates(&mut rng, mutation, &mut stats));
     (digest, wrong, stats)
 }
 

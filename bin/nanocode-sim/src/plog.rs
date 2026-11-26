@@ -32,6 +32,7 @@ use crate::rng::{FNV_OFFSET, Rng, fnv};
 pub use parted_sim::Mutation as PlogMutation;
 
 const LEASE_TICKS_MIN: u64 = 8;
+const RECOVERIES_AT_ONCE: usize = 1;
 const LEASE_TICKS_MAX: u64 = 96;
 const HANDOFF_TTL_TICKS: u64 = u64::MAX / 4;
 const HANDOFF_APPENDS_MIN: u64 = 2;
@@ -447,7 +448,7 @@ async fn handoff(
 /// the first releases what it gained and another node gains it at the cursor the release
 /// recorded.
 async fn gains(nodes: &[Node], part: Partition, patience: u64, ledger: &RefCell<Ledger>) {
-    let capacity = Semaphore::new(1);
+    let capacity = Semaphore::new(RECOVERIES_AT_ONCE);
     let parked = Signal::new();
     let (first, second) = (&nodes[0], &nodes[1]);
     let mut holding = Box::pin(first.log.gain(

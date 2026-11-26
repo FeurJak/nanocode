@@ -4,7 +4,7 @@ use crate::postgres::{
     sim,
 };
 use nanocode_platform::Elapsed;
-use nanocode_sync::{Mailbox, OwnedSemaphorePermit, Semaphore};
+use nanocode_sync::{AcquireError, Mailbox, OwnedSemaphorePermit, Semaphore};
 use std::{
     future::Future,
     ops::{Deref, DerefMut},
@@ -110,9 +110,16 @@ impl<C: Send + 'static> Lending<C> {
     ) -> Result<Result<Lent<C>, E>, Elapsed> {
         let deadline =
             (!sim::mutated(sim::Mutation::WaitsUnbounded)).then(|| nanocode_platform::now() + wait);
-        let permit = by(deadline, Arc::clone(&self.permits).acquire_owned())
-            .await?
-            .expect("a pool never closes its semaphore");
+        let permit = Arc::clone(&self.permits)
+            .acquire_owned_within(until(deadline))
+            .await
+            .map_err(|error| {
+                assert!(
+                    error == AcquireError::Busy,
+                    "a pool never closes its semaphore"
+                );
+                Elapsed
+            })?;
         let connections = self.connections;
         let idle = by(
             deadline,
@@ -137,6 +144,13 @@ impl<C: Send + 'static> Lending<C> {
             }
         }
         Ok(Ok(lent))
+    }
+}
+
+async fn until(deadline: Option<nanocode_platform::Instant>) {
+    match deadline {
+        Some(deadline) => nanocode_platform::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 

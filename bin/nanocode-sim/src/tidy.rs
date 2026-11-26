@@ -300,6 +300,7 @@ pub fn check(root: &Path) -> std::io::Result<Vec<String>> {
     problems.extend(locks(root)?);
     problems.extend(held(root)?);
     problems.extend(waits(root)?);
+    problems.extend(mutexes(root)?);
     let base = djs_base::make();
     let base_dir = root.join(BASE_DIR);
     for file in djs_base::stale(&base_dir, &base) {
@@ -363,6 +364,10 @@ const WAITS: &[&str] = &[
     "connect_reusing",
 ];
 const ACQUIRES: &[&str] = &["acquire_owned", "try_acquire_owned", "try_acquire", "acquire"];
+const MUTEX_ROOTS: &[&str] = &["crates", "bin", "examples"];
+const MUTEX_SKIPPED: &[&str] = &["crates/patches"];
+const MUTEX_SKIPPED_DIRS: &[&str] = &["target", "output"];
+const MUTEX: &[u8] = b"Semaphore::new(";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldGuard {
@@ -726,6 +731,16 @@ pub fn waits(root: &Path) -> std::io::Result<Vec<String>> {
 }
 
 fn held_sources(root: &Path, directory: &Path, found: &mut Vec<(String, String)>) -> std::io::Result<()> {
+    rust_sources(root, directory, HELD_SKIPPED, HELD_SKIPPED_DIRS, found)
+}
+
+fn rust_sources(
+    root: &Path,
+    directory: &Path,
+    skipped_paths: &[&str],
+    skipped_dirs: &[&str],
+    found: &mut Vec<(String, String)>,
+) -> std::io::Result<()> {
     let mut entries = std::fs::read_dir(directory)?
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<std::io::Result<Vec<_>>>()?;
@@ -736,12 +751,12 @@ fn held_sources(root: &Path, directory: &Path, found: &mut Vec<(String, String)>
             .expect("a scanned file lies under the workspace root")
             .to_string_lossy()
             .into_owned();
-        let skipped = HELD_SKIPPED.contains(&relative.as_str())
+        let skipped = skipped_paths.contains(&relative.as_str())
             || path
                 .file_name()
-                .is_some_and(|name| HELD_SKIPPED_DIRS.iter().any(|skipped| name == *skipped));
+                .is_some_and(|name| skipped_dirs.iter().any(|skipped| name == *skipped));
         if path.is_dir() && !skipped {
-            held_sources(root, &path, found)?;
+            rust_sources(root, &path, skipped_paths, skipped_dirs, found)?;
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             found.push((relative, std::fs::read_to_string(&path)?));
         }
@@ -755,4 +770,41 @@ pub fn held(root: &Path) -> std::io::Result<Vec<String>> {
         held_sources(root, &root.join(directory), &mut sources)?;
     }
     Ok(held_problems(&sources))
+}
+
+pub fn mutex_semaphores(code: &[u8]) -> Vec<usize> {
+    let mut lines = Vec::new();
+    let mut from = 0;
+    while let Some(at) = find(&code[from..], MUTEX) {
+        let start = from + at;
+        from = start + MUTEX.len();
+        let Some(rest) = code[from..].trim_ascii_start().strip_prefix(b"1") else {
+            continue;
+        };
+        let rest = rest.strip_prefix(b"usize").or_else(|| rest.strip_prefix(b"_usize")).unwrap_or(rest);
+        if rest.trim_ascii_start().starts_with(b")") {
+            lines.push(1 + code[..start].iter().filter(|byte| **byte == b'\n').count());
+        }
+    }
+    lines
+}
+
+pub fn mutex_problems(sources: &[(String, String)]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (path, text) in sources {
+        for line in mutex_semaphores(&code_only(text)) {
+            problems.push(format!(
+                "{path}:{line}: Semaphore::new(1) serializes access like a mutex: give the state one owner (an Actor or Mailbox) or a compare-and-set, and size a capacity Semaphore from what it bounds"
+            ));
+        }
+    }
+    problems
+}
+
+pub fn mutexes(root: &Path) -> std::io::Result<Vec<String>> {
+    let mut sources = Vec::new();
+    for directory in MUTEX_ROOTS {
+        rust_sources(root, &root.join(directory), MUTEX_SKIPPED, MUTEX_SKIPPED_DIRS, &mut sources)?;
+    }
+    Ok(mutex_problems(&sources))
 }

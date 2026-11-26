@@ -2,7 +2,7 @@ use crate::{read_body, write_body};
 use nanocode_executor::{UnixListener, UnixStream};
 use nanocode_io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use nanocode_sync::{Atom, Signal, Slot};
-use nanocode_sync::{Semaphore, mpsc, oneshot};
+use nanocode_sync::{Semaphore, TryAcquireError, mpsc, oneshot};
 use nanocode_tool_contracts::{
     Tool, ToolContext, ToolDefinition, ToolError, ToolInput, ToolOutput, ToolResult,
 };
@@ -129,11 +129,17 @@ impl ExtensionLink {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         loop {
-            let permit = Arc::clone(&slots)
-                .acquire_owned()
-                .await
-                .map_err(io::Error::other)?;
             let (stream, _) = listener.accept().await?;
+            let permit = match Arc::clone(&slots).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(TryAcquireError::NoPermits) => {
+                    drop(stream);
+                    continue;
+                }
+                Err(TryAcquireError::Closed) => {
+                    return Err(io::Error::other(TryAcquireError::Closed));
+                }
+            };
             let link = Arc::clone(&self);
             nanocode_platform::spawn_task(async move {
                 link.connection(stream, rank).await;
