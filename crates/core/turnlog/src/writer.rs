@@ -1934,6 +1934,8 @@ async fn blobs(
             .1
             .push(*digest);
     }
+    let (mut scanned, mut rows, mut plain) = (0_u64, 0_u64, 0_u64);
+    let looked = digests.len() as u64;
     for (segment, wanted) in sealed.into_values() {
         let end = fold
             .fact_segments()
@@ -1943,11 +1945,14 @@ async fn blobs(
         let stored = unsectioned(host.scan(scope, segment.row, end).await?);
         stats.pages += 1;
         stats.page_rows += stored.len() as u64;
+        scanned += 1;
+        rows += stored.len() as u64;
         let keys = wanted
             .iter()
             .map(|digest| (digest.key().as_str().to_owned(), *digest))
             .collect::<BTreeMap<_, _>>();
         each_row(stored, &mut History::default(), |row| {
+            plain += row.plain.len() as u64;
             for record in row.records()? {
                 if let Record::Stored { key, value } = record
                     && let Some(digest) = keys.get(&key)
@@ -1964,6 +1969,13 @@ async fn blobs(
             return Err(FoldError::MissingBlob { digest: *missing }.into());
         }
     }
+    nanocode_trace::event!(target: "nc_metrics", nanocode_trace::Level::INFO, {
+        monotonic_counter.nc.turnlog.blob_lookups = 1_u64,
+        monotonic_counter.nc.turnlog.blobs_wanted = looked,
+        monotonic_counter.nc.turnlog.blob_segments_scanned = scanned,
+        monotonic_counter.nc.turnlog.blob_rows_scanned = rows,
+        histogram.nc.turnlog.blob_scan_plain_bytes = plain
+    });
     Ok(found)
 }
 
@@ -1980,6 +1992,8 @@ async fn facts_from(
         .skip(1)
         .map(|segment| segment.row)
         .chain([fold.fact_row()]);
+    let (mut scanned, mut rows, mut plain, mut taken) = (0_u64, 0_u64, 0_u64, 0_u64);
+    let mut skipped = 0_u64;
     for (segment, end) in segments.iter().zip(ends) {
         if segment.last <= after {
             continue;
@@ -1987,8 +2001,15 @@ async fn facts_from(
         let stored = unsectioned(host.scan(scope, segment.row, end).await?);
         stats.pages += 1;
         stats.page_rows += stored.len() as u64;
+        scanned += 1;
+        rows += stored.len() as u64;
+        skipped += after
+            .saturating_sub(segment.first.saturating_sub(1))
+            .min(segment.last - segment.first + 1);
         let mut next = segment.first.max(after + 1);
+        let before = next;
         each_row(stored, &mut History::default(), |row| {
+            plain += row.plain.len() as u64;
             for record in row.records()? {
                 if let Record::Fact { fact, seq, state } = record
                     && seq == next
@@ -2000,6 +2021,7 @@ async fn facts_from(
             }
             Ok(true)
         })?;
+        taken += next - before;
         if next <= segment.last {
             return Err(StoreError::Backend(format!(
                 "turn log rows {}..{end} of {scope} hold sealed facts up to {} of {}..={}",
@@ -2010,6 +2032,15 @@ async fn facts_from(
             )));
         }
     }
+    nanocode_trace::event!(target: "nc_metrics", nanocode_trace::Level::INFO, {
+        monotonic_counter.nc.turnlog.facts_scans = 1_u64,
+        monotonic_counter.nc.turnlog.facts_segments_scanned = scanned,
+        monotonic_counter.nc.turnlog.facts_rows_scanned = rows,
+        monotonic_counter.nc.turnlog.facts_taken = taken,
+        monotonic_counter.nc.turnlog.facts_skipped = skipped,
+        monotonic_counter.nc.turnlog.facts_segments_total = segments.len() as u64,
+        histogram.nc.turnlog.facts_scan_plain_bytes = plain
+    });
     for (seq, state, fact) in fold.resident_facts(after) {
         take(seq, state, fact);
     }
