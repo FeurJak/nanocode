@@ -446,6 +446,7 @@ default_table='
 1 canary_thread_scope_job_rows_dropped canary:16 --scenario thread_scope --mutation job_rows_dropped
 1 canary_thread_scope_scoped_intent_skipped canary:16 --scenario thread_scope --mutation scoped_intent_skipped
 1 canary_thread_scope_facts_unseen_skipped canary:16 --scenario thread_scope --mutation facts_unseen_skipped
+1 canary_thread_scope_recovery_uncounted canary:16 --scenario thread_scope --mutation recovery_uncounted
 8 repo_cache pass --scenario repo_cache
 2 repo_cache_twice pass --scenario repo_cache --twice
 1 canary_repo_cache_shared_head canary:8 --scenario repo_cache --mutation shared_head

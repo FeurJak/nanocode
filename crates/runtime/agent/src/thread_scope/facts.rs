@@ -45,7 +45,7 @@ struct Scoped {
     scope: FactScope,
 }
 
-fn refused(error: ScopeError) -> StoreError {
+pub(super) fn refused(error: ScopeError) -> StoreError {
     match error {
         ScopeError::Store(error) => error,
         ScopeError::Busy => StoreError::Busy,

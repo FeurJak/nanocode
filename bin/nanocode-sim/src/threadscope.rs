@@ -44,7 +44,7 @@ use crate::{
     threadlegacy::{self, Legacy, View},
 };
 
-const PARTS: u32 = 2;
+pub(crate) const PARTS: u32 = 2;
 const THREADS: Range<u64> = 2..5;
 const NODES: Range<u64> = 2..4;
 const STEPS: Range<u64> = 120..320;
@@ -106,6 +106,9 @@ impl ThreadScopeMutation {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ThreadScopeStats {
+    pub turn_ops: u64,
+    pub turn_reopens: u64,
+    pub turn_lenient: u64,
     pub seeds: u64,
     pub steps: u64,
     pub sends: u64,
@@ -140,6 +143,9 @@ pub struct ThreadScopeStats {
 
 impl ThreadScopeStats {
     pub fn add(&mut self, other: &Self) {
+        self.turn_ops += other.turn_ops;
+        self.turn_reopens += other.turn_reopens;
+        self.turn_lenient += other.turn_lenient;
         self.seeds += other.seeds;
         self.steps += other.steps;
         self.sends += other.sends;
@@ -175,7 +181,7 @@ impl ThreadScopeStats {
 
 type Wrong = Arc<Atom<Option<String>>>;
 
-fn flag(wrong: &Wrong, message: String) {
+pub(crate) fn flag(wrong: &Wrong, message: String) {
     wrong.update(|wrong| {
         if wrong.is_none() {
             *wrong = Some(message.clone());
@@ -212,13 +218,13 @@ impl Route<ThreadFold> for Net {
     }
 }
 
-struct Node {
+pub(crate) struct Node {
     name: String,
-    logs: ThreadLogs,
+    pub(crate) logs: ThreadLogs,
     handles: BTreeMap<String, ThreadLog>,
 }
 
-struct World {
+pub(crate) struct World {
     time: Arc<Clock>,
     db: Arc<AtomicU64>,
     store: Arc<ModelParts>,
@@ -233,11 +239,11 @@ struct World {
     legacy: BTreeMap<String, (Legacy, View)>,
     bases: RefCell<BTreeMap<String, (u64, ThreadState)>>,
     gone: Cell<(u64, u64)>,
-    wrong: Wrong,
+    pub(crate) wrong: Wrong,
 }
 
 impl World {
-    fn node(&self, name: &str) -> Node {
+    pub(crate) fn node(&self, name: &str) -> Node {
         let db = Arc::clone(&self.db);
         let log = Arc::new(
             PartedLog::fenced(Arc::clone(&self.store), self.count, name)
@@ -279,7 +285,7 @@ impl World {
     }
 }
 
-fn publish(world: &World, nodes: &[Node]) {
+pub(crate) fn publish(world: &World, nodes: &[Node]) {
     world.net.nodes.set(
         nodes
             .iter()
@@ -301,7 +307,7 @@ fn drive<T>(time: &Arc<Clock>, future: impl Future<Output = T>) -> Option<T> {
     }
 }
 
-fn driven<T>(world: &World, what: &str, future: impl Future<Output = T>) -> Option<T> {
+pub(crate) fn driven<T>(world: &World, what: &str, future: impl Future<Output = T>) -> Option<T> {
     let driven = drive(&world.time, future);
     if driven.is_none() {
         flag(
@@ -312,7 +318,7 @@ fn driven<T>(world: &World, what: &str, future: impl Future<Output = T>) -> Opti
     driven
 }
 
-fn raw(value: &serde_json::Value) -> Box<RawValue> {
+pub(crate) fn raw(value: &serde_json::Value) -> Box<RawValue> {
     serde_json::value::to_raw_value(value).expect("a JSON value encodes")
 }
 
@@ -523,7 +529,7 @@ fn job_landed(world: &World, thread: &str, note: u64, event: u64, fact: u64) -> 
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
-struct Tally {
+pub(crate) struct Tally {
     inputs: u64,
     bytes: u64,
     decisions: Vec<u64>,
@@ -1125,6 +1131,14 @@ fn seeded(seed: u64, mutation: ThreadScopeMutation, time: &Arc<Clock>) -> Outcom
         }
     }
     legacy(&world, &mut stats);
+    if world.wrong.read(Option::is_none) {
+        let turns = self::world(&mut rng, time);
+        crate::threadturns::run(&mut rng, &turns, &mut stats);
+        turns.net.nodes.set(Vec::new());
+        if let Some(wrong) = turns.wrong.read(Clone::clone) {
+            flag(&world.wrong, wrong);
+        }
+    }
     thread_scope_sim::mutate(Mutation::None);
     scope_sim::mutate(ScopeMutation::None);
     let (adoptions, adoption_rows) = world.gone.get();

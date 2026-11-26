@@ -354,7 +354,7 @@ impl FactLogs for Logs {
 
 const UNKNOWN_OUTCOME: &str = "Tool execution interrupted by a host crash; outcome unknown. Do not assume it did not run or automatically repeat it.";
 
-fn unknown_outcome() -> Result<Box<RawValue>, StoreError> {
+pub(crate) fn unknown_outcome() -> Result<Box<RawValue>, StoreError> {
     let wire = ToolOutput::error(UNKNOWN_OUTCOME)
         .into_wire()
         .map_err(|error| StoreError::NotCommitted(format!("encode an unknown outcome: {error}")))?;
@@ -363,7 +363,7 @@ fn unknown_outcome() -> Result<Box<RawValue>, StoreError> {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum Owners {
+pub(crate) enum Owners {
     TurnOrNone,
     Turn,
 }

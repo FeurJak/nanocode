@@ -10,7 +10,9 @@ use serde_json::{Map, Value, value::RawValue};
 use crate::{
     durability::{
         StoreError, StoreFuture,
-        facts::{Fact, Input, InputKind, Marker, OwnedFact, StoredFact, TurnStatus, Value as Stored},
+        facts::{
+            Fact, Input, InputKind, Marker, OwnedFact, StoredFact, TurnStatus, Value as Stored,
+        },
     },
     one_log::{Finished, Lifecycle, fact_outcome, logged, outcome, raw, record_of},
     session_log::{
@@ -24,9 +26,11 @@ mod facts;
 mod parts;
 pub mod sim;
 mod state;
+mod turns;
 
 pub use facts::ThreadFacts;
 pub use state::{KeptFact, ThreadState};
+pub use turns::ThreadTurns;
 
 type Run = dyn Fn(&mut Staged) -> Result<Box<dyn Any + Send>, StoreError> + Send + Sync;
 type Once<T> = Box<dyn FnOnce(&mut Staged) -> Result<T, StoreError> + Send>;
@@ -47,11 +51,13 @@ impl Job {
         run: impl FnOnce(&mut Staged) -> Result<T, StoreError> + Send + 'static,
     ) -> Self {
         let run: Slot<Once<T>> = Slot::new(Some(Box::new(run)));
-        Self::new(move |staged| match run.take() {
+        Self::new(move |staged| {
+            match run.take() {
             Some(run) => run(staged),
             None => Err(StoreError::NotCommitted(
                 "a one-shot thread job already ran in a batch its owner could not commit; nothing was written".to_owned(),
             )),
+        }
         })
     }
 }
@@ -83,6 +89,13 @@ impl Staged {
     pub fn push(&mut self, record: Record) -> Result<(), StoreError> {
         self.state.take(&record, None)?;
         self.records.push(record);
+        Ok(())
+    }
+
+    pub fn extend(&mut self, records: Vec<Record>) -> Result<(), StoreError> {
+        for record in records {
+            self.push(record)?;
+        }
         Ok(())
     }
 
@@ -253,15 +266,23 @@ fn record_in(state: &ThreadState, id: &str) -> Result<TurnRecord, StoreError> {
 impl ThreadFold {
     fn decided(&self, state: &ThreadState, command: &ThreadCommand) -> Decided {
         match command {
-            ThreadCommand::Submit { submission, at } => self.submit(state, submission, *at),
-            ThreadCommand::Start { request_id, at } => start(state, request_id, *at),
+            ThreadCommand::Submit { submission, at } => {
+                let (records, submitted) = admit(state, submission, *at, self.policy.finished_max)?;
+                Ok((records, ThreadReply::Submitted(submitted)))
+            }
+            ThreadCommand::Start { request_id, at } => {
+                let (records, started) = start(state, request_id, *at)?;
+                Ok((records, ThreadReply::Started(started)))
+            }
             ThreadCommand::Finish {
                 request_id,
                 state: finished,
                 fields,
                 at,
             } => match state.turn(request_id).map(|turn| &turn.phase) {
-                None | Some(Phase::Finished { .. }) => Ok((Vec::new(), ThreadReply::Finished(None))),
+                None | Some(Phase::Finished { .. }) => {
+                    Ok((Vec::new(), ThreadReply::Finished(None)))
+                }
                 Some(_) => {
                     let (records, record, event) =
                         close(state, request_id, *finished, fields, *at)?;
@@ -273,7 +294,10 @@ impl ThreadFold {
                 fields,
                 at,
             } => cancel(state, request_id, fields, *at),
-            ThreadCommand::Append { entries, at } => Ok(append(state, entries, *at)),
+            ThreadCommand::Append { entries, at } => {
+                let (records, events) = append(state, entries, *at);
+                Ok((records, ThreadReply::Appended(events)))
+            }
             ThreadCommand::Facts { facts } => {
                 let first = state.next_fact();
                 let records: Vec<Record> = (first..)
@@ -299,68 +323,74 @@ impl ThreadFold {
             ThreadCommand::Job(job) => Ok(run(state, job)),
         }
     }
-
-    fn submit(&self, state: &ThreadState, submission: &Submission, at: u64) -> Decided {
-        let id = submission.request_id.as_str();
-        let digest = submission_digest(&submission.prompt, submission.hand.as_deref())?;
-        let prompt = raw(&submission.prompt)?;
-        let derived = input_digest(&prompt, submission.hand.as_deref());
-        if let Some(turn) = state.turn(id) {
-            let record = record_of(turn)?;
-            let same = match turn.digest.strip_prefix(adopt::RETIRED_DIGEST) {
-                Some(retired) => {
-                    *retired == format!("{:032x}", tag(&digest))
-                        || *retired == format!("{:032x}", tag(&derived))
-                }
-                None => turn.digest == digest || turn.digest == derived,
-            };
-            let submitted = if same {
-                Submitted::Existing(record)
-            } else {
-                Submitted::Conflict(record)
-            };
-            return Ok((Vec::new(), ThreadReply::Submitted(submitted)));
-        }
-        if let Some(max) = self.policy.finished_max {
-            let finished = state.finished();
-            if finished >= max {
-                return Err(StoreError::NotCommitted(format!(
-                    "turn {id} refused: this thread already holds {finished} finished turns, the most one thread keeps ({max}); start a new thread"
-                )));
-            }
-        }
-        let first = state.next_event();
-        let body = raw(&Lifecycle {
-            kind: "queued",
-            request_id: id,
-        })?;
-        let input = Fact::Input(Input {
-            turn: id.to_owned(),
-            kind: InputKind::Prompt,
-            value: prompt,
-            metadata: submission.metadata.clone(),
-            hand: submission.hand.clone(),
-            first: Some(first),
-        });
-        let records = vec![
-            fact_at(state.next_fact(), &input, None),
-            event_at(at, first, Some(id), body.clone()),
-        ];
-        let record = record_in(&applied(state, &records)?, id)?;
-        let event = logged(first, Some(id), at, body);
-        Ok((
-            records,
-            ThreadReply::Submitted(Submitted::Accepted { record, event }),
-        ))
-    }
 }
 
-fn start(state: &ThreadState, id: &str, at: u64) -> Decided {
+fn admit(
+    state: &ThreadState,
+    submission: &Submission,
+    at: u64,
+    finished_max: Option<usize>,
+) -> Result<(Vec<Record>, Submitted), StoreError> {
+    let id = submission.request_id.as_str();
+    let digest = submission_digest(&submission.prompt, submission.hand.as_deref())?;
+    let prompt = raw(&submission.prompt)?;
+    let derived = input_digest(&prompt, submission.hand.as_deref());
+    if let Some(turn) = state.turn(id) {
+        let record = record_of(turn)?;
+        let same = match turn.digest.strip_prefix(adopt::RETIRED_DIGEST) {
+            Some(retired) => {
+                *retired == format!("{:032x}", tag(&digest))
+                    || *retired == format!("{:032x}", tag(&derived))
+            }
+            None => turn.digest == digest || turn.digest == derived,
+        };
+        let submitted = if same {
+            Submitted::Existing(record)
+        } else {
+            Submitted::Conflict(record)
+        };
+        return Ok((Vec::new(), submitted));
+    }
+    if let Some(max) = finished_max {
+        let finished = state.finished();
+        if finished >= max {
+            return Err(StoreError::NotCommitted(format!(
+                "turn {id} refused: this thread already holds {finished} finished turns, the most one thread keeps ({max}); start a new thread"
+            )));
+        }
+    }
+    let first = state.next_event();
+    let body = raw(&Lifecycle {
+        kind: "queued",
+        request_id: id,
+    })?;
+    let input = Fact::Input(Input {
+        turn: id.to_owned(),
+        kind: InputKind::Prompt,
+        value: prompt,
+        metadata: submission.metadata.clone(),
+        hand: submission.hand.clone(),
+        first: Some(first),
+    });
+    let records = vec![
+        fact_at(state.next_fact(), &input, None),
+        event_at(at, first, Some(id), body.clone()),
+    ];
+    let record = record_in(&applied(state, &records)?, id)?;
+    let event = logged(first, Some(id), at, body);
+    Ok((records, Submitted::Accepted { record, event }))
+}
+
+fn start(
+    state: &ThreadState,
+    id: &str,
+    at: u64,
+) -> Result<(Vec<Record>, Option<Started>), StoreError> {
     let Some(turn) = state.turn(id) else {
-        return Ok((Vec::new(), ThreadReply::Started(None)));
+        return Ok((Vec::new(), None));
     };
     let previous = match turn.phase {
-        Phase::Finished { .. } => return Ok((Vec::new(), ThreadReply::Started(None))),
+        Phase::Finished { .. } => return Ok((Vec::new(), None)),
         Phase::Queued { .. } => TurnState::Queued,
         Phase::Running { .. } => TurnState::Running,
     };
@@ -379,7 +409,7 @@ fn start(state: &ThreadState, id: &str, at: u64) -> Decided {
         record,
         event: logged(seq, Some(id), at, body),
     };
-    Ok((records, ThreadReply::Started(Some(started))))
+    Ok((records, Some(started)))
 }
 
 fn close(
@@ -441,7 +471,7 @@ fn cancel(state: &ThreadState, id: &str, fields: &Map<String, Value>, at: u64) -
     }
 }
 
-fn append(state: &ThreadState, entries: &[LogEntry], at: u64) -> (Vec<Record>, ThreadReply) {
+fn append(state: &ThreadState, entries: &[LogEntry], at: u64) -> (Vec<Record>, Vec<LoggedEvent>) {
     let first = state.next_event();
     let mut records = Vec::with_capacity(entries.len());
     let mut events = Vec::with_capacity(entries.len());
@@ -450,7 +480,7 @@ fn append(state: &ThreadState, entries: &[LogEntry], at: u64) -> (Vec<Record>, T
         records.push(event_at(at, seq, turn, entry.event.clone()));
         events.push(logged(seq, turn, at, entry.event.clone()));
     }
-    (records, ThreadReply::Appended(events))
+    (records, events)
 }
 
 impl ThreadFold {
@@ -596,6 +626,18 @@ impl ThreadLog {
         };
         match self.send(command).await? {
             ThreadReply::Submitted(submitted) => Ok(submitted),
+            reply => unexpected("submit", &reply),
+        }
+    }
+
+    pub async fn submit_staged(&self, submission: &Submission) -> Result<Submitted, ScopeError> {
+        let command = ThreadCommand::Submit {
+            submission: submission.clone(),
+            at: now(),
+        };
+        match self.reached.stage(command).await?.reply {
+            ThreadReply::Submitted(submitted) => Ok(submitted),
+            ThreadReply::Refused(why) => Err(ScopeError::Store(StoreError::NotCommitted(why))),
             reply => unexpected("submit", &reply),
         }
     }

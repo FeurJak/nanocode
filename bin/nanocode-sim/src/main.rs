@@ -51,6 +51,7 @@ mod kvlease;
 mod scope;
 mod threadlegacy;
 mod threadscope;
+mod threadturns;
 mod migrated;
 mod model;
 mod mpp;

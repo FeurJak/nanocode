@@ -50,7 +50,7 @@ mod wakes;
 
 pub use export::Exported;
 pub use facts::sim as facts_sim;
-pub(crate) use facts::{Scope as FactScope, in_scope};
+pub(crate) use facts::{Owners, Scope as FactScope, in_scope, unknown_outcome};
 pub use import::{Imported, sim as import_sim};
 pub use wakes::{Fire, Heard, WakeError};
 
@@ -148,14 +148,14 @@ struct Replacement<'a> {
 }
 
 #[derive(Serialize)]
-struct Retrying<'a> {
+pub(crate) struct Retrying<'a> {
     #[serde(rename = "type")]
-    tag: &'static str,
-    request_id: &'a str,
-    error: &'a str,
-    kind: &'a str,
-    attempts: u64,
-    retry_at: u64,
+    pub(crate) tag: &'static str,
+    pub(crate) request_id: &'a str,
+    pub(crate) error: &'a str,
+    pub(crate) kind: &'a str,
+    pub(crate) attempts: u64,
+    pub(crate) retry_at: u64,
 }
 
 fn encoding(error: serde_json::Error) -> StoreError {
@@ -340,7 +340,12 @@ pub(crate) fn record_of(turn: &Turn) -> Result<TurnRecord, StoreError> {
     })
 }
 
-pub(crate) fn logged(seq: u64, request_id: Option<&str>, at: u64, event: Box<RawValue>) -> LoggedEvent {
+pub(crate) fn logged(
+    seq: u64,
+    request_id: Option<&str>,
+    at: u64,
+    event: Box<RawValue>,
+) -> LoggedEvent {
     LoggedEvent {
         seq,
         request_id: request_id.map(str::to_owned),
@@ -475,6 +480,32 @@ async fn retried(
     )?;
     let record = writing.fold().turn(request_id).map(record_of).transpose()?;
     Ok(Some(record.map(|record| (record, event))))
+}
+
+pub(crate) type Encoded = Vec<(Option<Box<RawValue>>, Box<RawValue>, Option<String>)>;
+
+pub(crate) fn encoded(recording: &Recording<'_>) -> Result<Encoded, String> {
+    let mut encoded = Vec::with_capacity(recording.events.len());
+    for (event, request_id) in recording.events.iter().zip(recording.request_ids) {
+        let stored = if telemetry(event) {
+            None
+        } else {
+            Some(
+                serde_json::value::to_raw_value(&Stored {
+                    event,
+                    compact: None,
+                })
+                .map_err(|error| format!("encode agent event: {error}"))?,
+            )
+        };
+        let live = serde_json::value::to_raw_value(&Envelope {
+            event,
+            annotation: recording.annotation,
+        })
+        .map_err(|error| format!("encode agent event: {error}"))?;
+        encoded.push((stored, live, request_id.clone()));
+    }
+    Ok(encoded)
 }
 
 fn upgraded(this: &Weak<OneLog>) -> Arc<OneLog> {
@@ -1724,26 +1755,7 @@ let events = events.as_slice();
     }
 
     async fn recorded(&self, recording: Recording<'_>) -> Result<Vec<LoggedEvent>, String> {
-        let mut encoded = Vec::with_capacity(recording.events.len());
-        for (event, request_id) in recording.events.iter().zip(recording.request_ids) {
-            let stored = if telemetry(event) {
-                None
-            } else {
-                Some(
-                    serde_json::value::to_raw_value(&Stored {
-                        event,
-                        compact: None,
-                    })
-                    .map_err(|error| format!("encode agent event: {error}"))?,
-                )
-            };
-            let live = serde_json::value::to_raw_value(&Envelope {
-                event,
-                annotation: recording.annotation,
-            })
-            .map_err(|error| format!("encode agent event: {error}"))?;
-            encoded.push((stored, live, request_id.clone()));
-        }
+        let encoded = encoded(&recording)?;
         self.written(
             |error| error.to_string(),
             move |writing| {
