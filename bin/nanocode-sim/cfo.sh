@@ -448,6 +448,8 @@ default_table='
 1 canary_thread_scope_facts_unseen_skipped canary:16 --scenario thread_scope --mutation facts_unseen_skipped
 1 canary_thread_scope_recovery_uncounted canary:16 --scenario thread_scope --mutation recovery_uncounted
 1 canary_thread_scope_hold_staged canary:16 --scenario thread_scope --mutation hold_staged
+1 canary_thread_scope_wakes_unbounded canary:16 --scenario thread_scope --mutation wakes_unbounded
+1 canary_thread_scope_wake_index_skipped canary:16 --scenario thread_scope --mutation wake_index_skipped
 8 repo_cache pass --scenario repo_cache
 2 repo_cache_twice pass --scenario repo_cache --twice
 1 canary_repo_cache_shared_head canary:8 --scenario repo_cache --mutation shared_head

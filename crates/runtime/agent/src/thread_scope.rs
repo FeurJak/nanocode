@@ -28,11 +28,13 @@ mod parts;
 pub mod sim;
 mod state;
 mod turns;
+mod wakes;
 
 pub use facts::ThreadFacts;
 pub use holds::ThreadHolds;
 pub use state::{KeptFact, ThreadState};
 pub use turns::ThreadTurns;
+pub use wakes::ThreadWakes;
 
 type Run = dyn Fn(&mut Staged) -> Result<Box<dyn Any + Send>, StoreError> + Send + Sync;
 type Once<T> = Box<dyn FnOnce(&mut Staged) -> Result<T, StoreError> + Send>;

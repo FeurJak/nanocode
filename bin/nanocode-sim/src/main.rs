@@ -53,6 +53,7 @@ mod threadlegacy;
 mod threadscope;
 mod threadholds;
 mod threadturns;
+mod threadwakes;
 mod migrated;
 mod model;
 mod mpp;

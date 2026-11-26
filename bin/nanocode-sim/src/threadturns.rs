@@ -34,7 +34,7 @@ struct Sides {
 
 const RENUMBERED: [&str; 3] = ["created_at: ", "seq: ", "seq: Some("];
 
-fn normalized(text: String) -> String {
+pub(crate) fn normalized(text: String) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text.as_str();
     while let Some((at, key)) = RENUMBERED
