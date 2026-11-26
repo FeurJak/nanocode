@@ -490,6 +490,13 @@ impl OneLog {
         Self::opened(nanocode_turnlog::TurnLog::open(host, scope).await?, policy).await
     }
 
+    pub async fn claim(
+        follower: nanocode_turnlog::Follower,
+        policy: Policy,
+    ) -> Result<Arc<Self>, StoreError> {
+        Self::opened(follower.claim().await?, policy).await
+    }
+
     async fn opened(
         log: nanocode_turnlog::TurnLog,
         policy: Policy,
