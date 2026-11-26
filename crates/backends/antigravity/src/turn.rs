@@ -145,6 +145,18 @@ impl State {
         }
     }
 
+    pub(crate) fn open_ids(&self, turn: &str) -> Vec<String> {
+        if !matches!(self.phase(), Phase::Calls) {
+            return Vec::new();
+        }
+        let Some(last) = self.contents.last() else {
+            return Vec::new();
+        };
+        let mut ids = crate::record::call_ids(turn, self.calls.saturating_sub(1), &last.parts);
+        ids.drain(..self.progress.responses.len().min(ids.len()));
+        ids
+    }
+
     pub(crate) fn close_calls(&mut self, answer: &str) {
         if !matches!(self.phase(), Phase::Calls) {
             return;
@@ -712,6 +724,10 @@ impl Inner {
         let replayed = self.begin_model(state, &step, index, advance).await?;
         self.bind_steers(turn, binds, index).await?;
         let call_index = state.calls;
+        let recorded = replayed.is_some() && self.recorded(&turn.id, index).await?;
+        if !recorded {
+            self.sync_facts(&state.contents).await?;
+        }
         let reply = match replayed {
             Some(reply) => reply,
             None => {
@@ -744,6 +760,10 @@ impl Inner {
         if !called {
             state.streak += 1;
         }
+        if !recorded {
+            let ids = crate::record::call_ids(&turn.id, call_index, &parts);
+            self.fact_model(&turn.id, index, &parts, &ids).await?;
+        }
         let output = json!({"parts": parts, "usage": reply.usage});
         state.push(Content::model(parts));
         self.finish_model(state, &step, &output).await?;
@@ -764,23 +784,36 @@ impl Inner {
             .unwrap_or_default();
         let call_index = state.calls.saturating_sub(1);
         let start = state.progress.responses.len();
+        let ids = state
+            .contents
+            .last()
+            .map(|content| crate::record::call_ids(id, call_index, &content.parts))
+            .unwrap_or_default();
         for (index, call) in calls.iter().enumerate().skip(start) {
             state.step += 1;
-            let call_id = call
-                .id
-                .clone()
-                .unwrap_or_else(|| format!("{id}-{call_index}-{index}"));
-            let (key, body) = if recovering && index == start {
-                self.recover(&call.name, &call_id, id).await
-            } else {
-                emit(
-                    events,
-                    AgentEventKind::ToolCall,
-                    json!({"call_id": call_id, "tool": call.name, "arguments": call.args, "model_call_index": call_index}),
-                );
-                self.execute(&call.name, &call.args, state.step, &call_id, id)
-                    .await
+            let call_id = ids[index].clone();
+            let recover = recovering && index == start;
+            let settled = match recover {
+                true => self.settled_result(&call_id).await?,
+                false => None,
             };
+            let unstarted =
+                recover && settled.is_none() && self.intended(&call_id).await? == Some(false);
+            let (key, body) = match settled {
+                Some(settled) => settled,
+                None if recover && !unstarted => self.recover(&call.name, &call_id, id).await,
+                None => {
+                    emit(
+                        events,
+                        AgentEventKind::ToolCall,
+                        json!({"call_id": call_id, "tool": call.name, "arguments": call.args, "model_call_index": call_index}),
+                    );
+                    self.fact_intent(id, &call_id, &call.name).await?;
+                    self.execute(&call.name, &call.args, state.step, &call_id, id)
+                        .await
+                }
+            };
+            self.fact_result(&call_id, key, &body).await?;
             emit(
                 events,
                 AgentEventKind::ToolResult,

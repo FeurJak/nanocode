@@ -357,7 +357,7 @@ impl Inner {
         self.settle(owner, turn, ended).await
     }
 
-    fn settled_state(&self) -> State {
+    pub(crate) fn settled_state(&self) -> State {
         State::clone(&self.settled.get())
     }
 
@@ -479,12 +479,21 @@ impl Inner {
                 (written.map(|()| Ok(done)), true)
             }
             Ended::Cancelled => {
+                if let Err(error) = self.abandon_calls(&state.open_ids(&id), INTERRUPTED).await {
+                    self.stop();
+                    return Err(recovery_error(error));
+                }
                 state.close_calls(INTERRUPTED);
                 state.settle();
                 let written = owner.cancel(id.clone(), Some(self.encode(&state)?)).await;
                 (written.map(|()| Err(NanocodeError::TurnCancelled)), true)
             }
             Ended::Finished(Err(error)) => {
+                if let Err(abandoned) = self.abandon_calls(&state.open_ids(&id), INTERRUPTED).await
+                {
+                    self.stop();
+                    return Err(recovery_error(abandoned));
+                }
                 state.close_calls(INTERRUPTED);
                 state.settle();
                 let written = owner
@@ -833,6 +842,31 @@ impl Inner {
             Some(owner) => owner.shutdown().await.map_err(agent_error),
             None => Ok(()),
         }
+    }
+
+    pub(crate) async fn persist_initial(&self) -> Result<()> {
+        let Some(owner) = &self.config.durable else {
+            return Ok(());
+        };
+        if self.config.committed || self.initialized.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        owner
+            .commit_checkpoint(self.encode(&self.settled.get())?)
+            .await
+            .map_err(agent_error)?;
+        self.initialized.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub(crate) async fn discard_initial(&self) -> Result<()> {
+        let Some(owner) = &self.config.durable else {
+            return Ok(());
+        };
+        if !self.initialized.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        owner.discard_unused().await.map_err(agent_error)
     }
 
     pub(crate) async fn queue_compaction(self: &Arc<Self>) -> Result<()> {

@@ -195,14 +195,10 @@ impl AntigravityHarness {
         let settings = settings.or(&defaults);
         let model = spec.model.clone();
         let session = spec
-            .options
-            .session_id
-            .clone()
-            .or_else(|| {
-                spec.durable_state
-                    .as_ref()
-                    .map(|state| state.state_id().to_owned())
-            })
+            .durable_state
+            .as_ref()
+            .map(|state| state.state_id().to_owned())
+            .or_else(|| spec.options.session_id.clone())
             .unwrap_or_else(|| {
                 new_id(&format!(
                     "{}{:?}",
@@ -246,6 +242,7 @@ impl AntigravityHarness {
         if let Some(retry) = self.retry {
             client = client.with_retry(retry);
         }
+        let initial_notice = self.initial_notice(&spec, &settings, services.as_ref());
         let durable = match spec.durable_state.take() {
             Some(state) => Some(acquire(state, spec.thinking).await?),
             None => None,
@@ -270,6 +267,18 @@ impl AntigravityHarness {
             .as_ref()
             .and_then(|durable| durable.initial)
             .unwrap_or(spec.thinking);
+        let initial_notice = initial_notice.filter(|_| stored.is_none() && imported.is_none());
+        let facts = match durable.as_ref().and_then(|durable| durable.session.facts()) {
+            Some(log) => {
+                let facts = crate::facts::AntigravityFacts::open(log).await?;
+                if let Some(payload) = stored.as_ref().or(imported.as_ref()) {
+                    crate::record::import_base(&facts, &session, payload).await?;
+                }
+                Some(facts)
+            }
+            None => None,
+        };
+        let committed = stored.is_some() || imported.is_some();
         let lineage = explicit
             .or_else(|| {
                 durable
@@ -432,6 +441,8 @@ impl AntigravityHarness {
             events: runtime.events(),
             keep,
             handle,
+            committed,
+            facts,
         });
         factory.bind(&driver.inner);
         let driver = match (stored, imported) {
@@ -443,7 +454,40 @@ impl AntigravityHarness {
             }
             (None, None) => driver,
         };
-        Ok((runtime.bind(driver), events))
+        let Some(text) = initial_notice else {
+            return Ok((runtime.bind(driver), events));
+        };
+        driver.seed_notice(&text);
+        let built =
+            nanocode_agent_core::Agent::persist_created(Ok((runtime.bind(driver), events))).await?;
+        services.initial_notice_committed(&built.0, text);
+        Ok(built)
+    }
+
+    fn initial_notice(
+        &self,
+        spec: &nanocode_agent_config::HarnessRequest,
+        settings: &nanocode_agent_config::configuration::Settings,
+        services: &dyn nanocode_agent_config::configuration::HostServices,
+    ) -> Option<String> {
+        use nanocode_agent_config::configuration::AgentTools;
+        let remote = settings
+            .tools
+            .as_ref()
+            .is_some_and(AgentTools::has_code_mode_host);
+        let folds = !remote
+            && spec.checkpoint.is_none()
+            && !matches!(settings.tools, Some(AgentTools::PerAgent(_)));
+        let state = spec.durable_state.as_ref().filter(|_| folds)?;
+        state
+            .described_record()
+            .filter(|record| record.initial.is_none())?;
+        services.initial_notice(
+            state.state_id(),
+            spec.parent
+                .as_ref()
+                .map(nanocode_agent_core::AgentHandle::session_id),
+        )
     }
 }
 

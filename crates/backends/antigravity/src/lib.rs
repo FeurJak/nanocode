@@ -2,15 +2,20 @@ mod control;
 mod driver;
 mod durability;
 mod factory;
+mod facts;
+mod fold;
 mod harness;
 mod nanotools;
 mod profile;
 mod prompts;
+mod record;
 mod request;
 mod search;
 mod turn;
 
 pub use durability::AntigravityCheckpointFormat;
+#[doc(hidden)]
+pub use fold::{AntigravityDecision, AntigravityFold};
 pub use harness::{AntigravityHarness, DEFAULT_MODEL, FAMILY};
 pub use nanocode_backend_antigravity_client::{
     Auth, AuthMethod, CacheConfig, Client, ClientError, Discovery, Endpoint, Failure, GoogleAuth,

@@ -44,6 +44,8 @@ pub struct Config {
     pub events: AgentEventPublisher,
     pub keep: Option<nanocode_durability::DurableSession>,
     pub handle: nanocode_agent_core::AgentHandle,
+    pub committed: bool,
+    pub facts: Option<crate::facts::AntigravityFacts>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -125,6 +127,7 @@ pub(crate) struct Inner {
     pub(crate) life: AtomicU8,
     pub(crate) noticed: AtomicBool,
     pub(crate) notices: Atom<Vec<String>>,
+    pub(crate) initialized: AtomicBool,
 }
 
 pub struct Driver {
@@ -213,8 +216,12 @@ impl State {
         let streak = u32::try_from(number("streak")).map_err(|_| {
             NanocodeError::InvalidCheckpoint("antigravity streak exceeds u32".into())
         })?;
+        let settings_sent = payload
+            .get("settings_sent")
+            .and_then(Value::as_bool)
+            .unwrap_or(!contents.is_empty());
         Ok(Self {
-            settings_sent: !contents.is_empty(),
+            settings_sent,
             transcript: contents.clone(),
             contents,
             step: number("step"),
@@ -280,6 +287,7 @@ impl Inner {
             "workspace": self.config.workspace,
             "contents": state.contents.iter().map(|content| serde_json::to_value(content).unwrap_or(Value::Null)).collect::<Vec<_>>(),
             "step": state.step,
+            "settings_sent": state.settings_sent,
             "calls": state.calls,
             "streak": state.streak,
             "requests": state.requests,
@@ -350,6 +358,7 @@ impl Driver {
                 life: AtomicU8::new(OPEN),
                 noticed: AtomicBool::new(false),
                 notices: Atom::default(),
+                initialized: AtomicBool::new(false),
             }),
         }
     }
@@ -370,6 +379,16 @@ impl Driver {
         self.inner.state.set(state.clone());
         self.inner.settled.set(state);
         Ok(self)
+    }
+
+    pub fn seed_notice(&self, text: &str) {
+        let mut state = self.inner.settled_state();
+        state.step += 1;
+        state.push(Content::user(vec![Part::text(
+            nanocode_backend_antigravity_tools::system_message(text),
+        )]));
+        self.inner.state.set(state.clone());
+        self.inner.settled.set(state);
     }
 
     pub async fn import(&self) -> Result<()> {
@@ -493,6 +512,16 @@ impl LifecycleBackend for Driver {
     fn cancel_active(&self) -> BackendFuture<Result<()>> {
         let inner = Arc::clone(&self.inner);
         Box::pin(async move { inner.cancel_active().await })
+    }
+
+    fn persist_initial(&self) -> BackendFuture<Result<()>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.persist_initial().await })
+    }
+
+    fn discard_initial(&self) -> BackendFuture<Result<()>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.discard_initial().await })
     }
 
     fn set_harness_model(&self, model: ModelSelection) -> BackendFuture<Result<()>> {

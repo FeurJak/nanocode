@@ -163,6 +163,13 @@ impl NanoTools {
 }
 
 impl NanoTools {
+    pub async fn abandon(
+        &self,
+        call_id: &str,
+    ) -> std::result::Result<Option<nanocode_tool_host::ToolOutput>, String> {
+        self.runtime.abandon(call_id).await
+    }
+
     pub async fn recover(
         &self,
         name: &str,
@@ -215,7 +222,7 @@ fn flatten(definitions: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
     flat
 }
 
-fn body_text(body: &ToolOutputBody) -> String {
+pub(crate) fn body_text(body: &ToolOutputBody) -> String {
     match body {
         ToolOutputBody::Text(text) => text.clone(),
         ToolOutputBody::Content(items) => items
