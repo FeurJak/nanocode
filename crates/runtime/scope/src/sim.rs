@@ -15,10 +15,13 @@ pub enum Mutation {
     ListingChainUnbounded,
     AdoptionSkipsCheckpoint,
     DeferredRedecided,
+    StagedPublished,
+    FlushSkipsStaged,
+    RiderSplit,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::CheckpointIndexesOnly,
         Self::ReadThroughWriter,
         Self::PublishBeforeCommit,
@@ -29,6 +32,9 @@ impl Mutation {
         Self::ListingSkipsDropped,
         Self::ListingChainUnbounded,
         Self::DeferredRedecided,
+        Self::StagedPublished,
+        Self::FlushSkipsStaged,
+        Self::RiderSplit,
     ];
 
     #[must_use]
@@ -46,6 +52,9 @@ impl Mutation {
             Self::ListingChainUnbounded => "listing_chain_unbounded",
             Self::AdoptionSkipsCheckpoint => "adoption_skips_checkpoint",
             Self::DeferredRedecided => "deferred_redecided",
+            Self::StagedPublished => "staged_published",
+            Self::FlushSkipsStaged => "flush_skips_staged",
+            Self::RiderSplit => "rider_split",
         }
     }
 

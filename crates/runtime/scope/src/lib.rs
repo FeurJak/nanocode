@@ -31,6 +31,18 @@ pub struct Committed<R> {
     pub reply: R,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Carry {
+    pub host: usize,
+    pub statements: Vec<(&'static str, Vec<String>)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Flushed {
+    pub next: Option<u64>,
+    pub carried: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Policy {
     pub checkpoint_rows: usize,

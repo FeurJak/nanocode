@@ -432,6 +432,9 @@ default_table='
 1 canary_scope_forward_waits_unbounded canary:16 --scenario scope --mutation forward_waits_unbounded
 1 canary_scope_listing_chain_unbounded canary:16 --scenario scope --mutation listing_chain_unbounded
 1 canary_scope_deferred_redecided canary:16 --scenario scope --mutation deferred_redecided
+1 canary_scope_staged_published canary:16 --scenario scope --mutation staged_published
+1 canary_scope_flush_skips_staged canary:16 --scenario scope --mutation flush_skips_staged
+1 canary_scope_rider_split canary:16 --scenario scope --mutation rider_split
 4 thread_scope pass --scenario thread_scope
 1 thread_scope_twice pass --scenario thread_scope --twice
 1 canary_thread_scope_part_dropped canary:16 --scenario thread_scope --mutation part_dropped

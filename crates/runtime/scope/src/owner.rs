@@ -6,12 +6,13 @@ use std::{
     },
 };
 
-use nanocode_durability_core::StoreError;
+use nanocode_durability_core::{SqlStatement, StoreError};
 use nanocode_partitions::Partition;
 use nanocode_sync::{Atom, Slot, Vector, oneshot, watch};
+use nanocode_turnlog::{Compaction, Rider, Write};
 
 use crate::{
-    Committed, Resident, ScopeError,
+    Carry, Committed, Flushed, Resident, ScopeError,
     checkpoint::{Fence, Listing, Manifest, Written, digest},
     scopes::Inner,
     sim::{self, Mutation},
@@ -19,6 +20,8 @@ use crate::{
 
 pub(crate) enum Ask<F: Resident> {
     Send(F::Command),
+    Stage(F::Command),
+    Flush(Option<Carry>),
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     Read,
     Checkpoint,
@@ -36,6 +39,7 @@ pub(crate) enum Turn<F: Resident> {
     Moved(Option<F::Command>),
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     Read(Arc<F::State>),
+    Flushed(Result<Flushed, ScopeError>),
     Checkpointed(Result<(), ScopeError>),
     Drained(Result<u64, ScopeError>),
 }
@@ -54,7 +58,68 @@ struct Decided<F: Resident> {
 struct Pending<F: Resident> {
     command: F::Command,
     decided: Option<Decided<F>>,
+    durable: bool,
     reply: oneshot::Sender<Turn<F>>,
+}
+
+struct Batch<F: Resident> {
+    pending: Vec<Pending<F>>,
+    flushes: Vec<oneshot::Sender<Turn<F>>>,
+    carrying: Option<(Carry, oneshot::Sender<Turn<F>>)>,
+    force: bool,
+}
+
+impl<F: Resident> Batch<F> {
+    const fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            flushes: Vec::new(),
+            carrying: None,
+            force: false,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.flushes.is_empty() && self.carrying.is_none() && !self.force
+    }
+
+    fn forces(&self) -> bool {
+        self.force
+            || self.carrying.is_some()
+            || (!self.flushes.is_empty() && !sim::mutated(Mutation::FlushSkipsStaged))
+    }
+
+    fn flushed(self, flushed: &Result<Flushed, ScopeError>, carried: bool) {
+        for reply in self.flushes {
+            drop(reply.send(Turn::Flushed(flushed.clone())));
+        }
+        if let Some((_, reply)) = self.carrying {
+            let flushed = flushed.clone().map(|flushed| Flushed { carried, ..flushed });
+            drop(reply.send(Turn::Flushed(flushed)));
+        }
+    }
+
+    fn fail(mut self, error: &ScopeError) {
+        for pending in std::mem::take(&mut self.pending) {
+            pending.answer(Err(error.clone()));
+        }
+        self.flushed(&Err(error.clone()), false);
+    }
+}
+
+struct Round<F: Resident> {
+    working: F::State,
+    next: u64,
+    rows: Vec<(u64, String)>,
+    answers: Vec<(oneshot::Sender<Turn<F>>, u64, F::Reply)>,
+    rest: Vec<Pending<F>>,
+    durable: bool,
+}
+
+pub(crate) struct Staging<F: Resident> {
+    state: F::State,
+    next: u64,
+    rows: Vec<(u64, String)>,
 }
 
 impl<F: Resident> Pending<F> {
@@ -199,6 +264,7 @@ pub(crate) struct Core<F: Resident> {
     pub(crate) next: u64,
     pub(crate) since: usize,
     pub(crate) checkpointed: Checkpointed,
+    pub(crate) staged: Option<Staging<F>>,
 }
 
 pub(crate) struct Owner<F: Resident> {
@@ -211,11 +277,13 @@ pub(crate) struct Owner<F: Resident> {
     core: Slot<Core<F>>,
     pub(crate) used: AtomicU64,
     weight: AtomicUsize,
+    buffered: AtomicUsize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Send,
+    Flush,
     Read,
     Checkpoint,
     Drain,
@@ -223,7 +291,8 @@ enum Kind {
 
 const fn kind<F: Resident>(ask: &Ask<F>) -> Kind {
     match ask {
-        Ask::Send(_) => Kind::Send,
+        Ask::Send(_) | Ask::Stage(_) => Kind::Send,
+        Ask::Flush(_) => Kind::Flush,
         Ask::Read => Kind::Read,
         Ask::Checkpoint => Kind::Checkpoint,
         Ask::Drain(_) => Kind::Drain,
@@ -233,15 +302,8 @@ const fn kind<F: Resident>(ask: &Ask<F>) -> Kind {
 const fn admits(life: Life, kind: Kind) -> bool {
     match life {
         Life::Serving => true,
-        Life::Draining => matches!(kind, Kind::Read),
+        Life::Draining => matches!(kind, Kind::Read | Kind::Flush),
         Life::Released { .. } | Life::Lost => false,
-    }
-}
-
-fn refused<F: Resident>(ask: Ask<F>) -> Turn<F> {
-    match ask {
-        Ask::Send(command) => Turn::Moved(Some(command)),
-        Ask::Read | Ask::Checkpoint | Ask::Drain(_) => Turn::Moved(None),
     }
 }
 
@@ -270,7 +332,7 @@ impl<F: Resident> Drop for Leading<'_, F> {
         });
         for queued in &waiting {
             let job = queued.take();
-            drop(job.reply.send(refused(job.ask)));
+            drop(job.reply.send(self.owner.refused(job.ask, in_flight)));
         }
     }
 }
@@ -302,6 +364,29 @@ impl<F: Resident> Owner<F> {
             core: Slot::new(Some(core)),
             used: AtomicU64::new(used),
             weight: AtomicUsize::new(weight),
+            buffered: AtomicUsize::new(0),
+        }
+    }
+
+    fn refused(&self, ask: Ask<F>, landing: bool) -> Turn<F> {
+        match ask {
+            Ask::Send(command) | Ask::Stage(command) => Turn::Moved(Some(command)),
+            Ask::Flush(_) => Turn::Flushed(self.unflushed(landing)),
+            Ask::Read | Ask::Checkpoint | Ask::Drain(_) => Turn::Moved(None),
+        }
+    }
+
+    fn unflushed(&self, landing: bool) -> Result<Flushed, ScopeError> {
+        if self.buffered.load(Ordering::Acquire) == 0 {
+            return Ok(Flushed {
+                next: Some(self.next()),
+                carried: false,
+            });
+        }
+        match self.life() {
+            Life::Serving | Life::Draining => Err(ScopeError::Busy),
+            Life::Released { .. } | Life::Lost if landing => Err(ScopeError::Uncertain),
+            Life::Released { .. } | Life::Lost => Err(ScopeError::Lost),
         }
     }
 
@@ -360,7 +445,8 @@ impl<F: Resident> Owner<F> {
             Some(!std::mem::replace(&mut queue.leading, true))
         });
         let Some(lead) = admitted else {
-            return refused(queued.take().ask);
+            let landing = self.queue.read(|queue| queue.leading);
+            return self.refused(queued.take().ask, landing);
         };
         if lead {
             self.lead(inner).await;
@@ -368,6 +454,7 @@ impl<F: Resident> Owner<F> {
         match answer.await {
             Ok(turn) => turn,
             Err(_) if asked == Kind::Send => Turn::Committed(Err(ScopeError::Uncertain)),
+            Err(_) if asked == Kind::Flush => Turn::Flushed(Err(ScopeError::Uncertain)),
             Err(_) => Turn::Moved(None),
         }
     }
@@ -411,19 +498,32 @@ impl<F: Resident> Owner<F> {
     }
 
     async fn serve(&self, leading: &mut Leading<'_, F>, jobs: Vec<Job<F>>, inner: &Inner<F>) {
-        let mut batch = Vec::new();
+        let mut batch = Batch::new();
         for job in jobs {
             match job.ask {
-                Ask::Send(command) => batch.push(Pending {
+                Ask::Send(command) => batch.pending.push(Pending {
                     command,
                     decided: None,
+                    durable: true,
                     reply: job.reply,
                 }),
+                Ask::Stage(command) => batch.pending.push(Pending {
+                    command,
+                    decided: None,
+                    durable: false,
+                    reply: job.reply,
+                }),
+                Ask::Flush(None) => batch.flushes.push(job.reply),
+                Ask::Flush(Some(carry)) => {
+                    batch.carrying = Some((carry, job.reply));
+                    self.commit(leading, std::mem::replace(&mut batch, Batch::new()), inner)
+                        .await;
+                }
                 Ask::Read => {
                     drop(job.reply.send(Turn::Read(self.state())));
                 }
                 Ask::Checkpoint => {
-                    self.commit(leading, std::mem::take(&mut batch), inner)
+                    self.commit(leading, std::mem::replace(&mut batch, Batch::new()), inner)
                         .await;
                     let due = self.due(leading, inner);
                     let checkpointed = match (due, leading.core.as_mut()) {
@@ -433,7 +533,8 @@ impl<F: Resident> Owner<F> {
                     drop(job.reply.send(Turn::Checkpointed(checkpointed)));
                 }
                 Ask::Drain(why) => {
-                    self.commit(leading, std::mem::take(&mut batch), inner)
+                    batch.force = true;
+                    self.commit(leading, std::mem::replace(&mut batch, Batch::new()), inner)
                         .await;
                     let drained = self.drain(leading, why, inner).await;
                     drop(job.reply.send(Turn::Drained(drained)));
@@ -462,6 +563,14 @@ impl<F: Resident> Owner<F> {
         };
         if self.life() != Life::Draining {
             return Err(ScopeError::Lost);
+        }
+        if core.staged.is_some() {
+            self.queue.update(|queue| {
+                if queue.life == Life::Draining {
+                    queue.life = Life::Serving;
+                }
+            });
+            return Err(ScopeError::Busy);
         }
         let skip = why == Why::Evict && sim::mutated(Mutation::EvictWithoutCheckpoint);
         if !skip && let Err(error) = self.checkpoint(core, inner).await {
@@ -572,12 +681,7 @@ impl<F: Resident> Owner<F> {
         }
     }
 
-    async fn commit(
-        &self,
-        leading: &mut Leading<'_, F>,
-        mut batch: Vec<Pending<F>>,
-        inner: &Inner<F>,
-    ) {
+    async fn commit(&self, leading: &mut Leading<'_, F>, mut batch: Batch<F>, inner: &Inner<F>) {
         while !batch.is_empty() {
             batch = self.commit_once(leading, batch, inner).await;
         }
@@ -595,55 +699,57 @@ impl<F: Resident> Owner<F> {
         false
     }
 
-    async fn commit_once(
-        &self,
-        leading: &mut Leading<'_, F>,
-        batch: Vec<Pending<F>>,
-        inner: &Inner<F>,
-    ) -> Vec<Pending<F>> {
-        if self.movable(inner) {
-            batch.into_iter().for_each(Pending::moved);
-            return Vec::new();
-        }
+    fn moved(&self, mut batch: Batch<F>) {
+        std::mem::take(&mut batch.pending)
+            .into_iter()
+            .for_each(Pending::moved);
+        batch.flushed(&self.unflushed(false), false);
+    }
+
+    fn round(&self, core: &Core<F>, batch: Vec<Pending<F>>, inner: &Inner<F>) -> Round<F> {
         let limit = inner.policy.checkpoint_rows;
-        let Some(core) = leading.core.as_mut() else {
-            panic!(
-                "a committing leader of scope {} holds its state",
-                self.scope
-            );
-        };
-        if core.since >= limit
-            && let Err(error) = self.checkpoint(core, inner).await
-        {
-            for pending in batch {
-                pending.answer(Err(error.clone()));
-            }
-            return Vec::new();
-        }
         let room = limit - core.since;
-        let mut working = (*core.state).clone();
-        let mut next = core.next;
-        let mut rows: Vec<(u64, String)> = Vec::new();
-        let mut answers = Vec::new();
-        let mut rest = Vec::new();
+        let mut round = match &core.staged {
+            Some(staged) => Round {
+                working: staged.state.clone(),
+                next: staged.next,
+                rows: staged.rows.clone(),
+                answers: Vec::new(),
+                rest: Vec::new(),
+                durable: false,
+            },
+            None => Round {
+                working: (*core.state).clone(),
+                next: core.next,
+                rows: Vec::new(),
+                answers: Vec::new(),
+                rest: Vec::new(),
+                durable: false,
+            },
+        };
+        assert!(
+            round.rows.len() <= room,
+            "scope {} stages no more rows than its checkpoint bound leaves room for",
+            self.scope
+        );
         for mut pending in batch {
-            if !rest.is_empty() {
-                rest.push(pending);
+            if !round.rest.is_empty() {
+                round.rest.push(pending);
                 continue;
             }
             let decided = match pending.decided.take() {
                 Some(decided) if !sim::mutated(Mutation::DeferredRedecided) => {
                     assert_eq!(
-                        decided.at, next,
+                        decided.at, round.next,
                         "scope {} commits a deferred command at the row it was decided at",
                         self.scope
                     );
                     decided
                 }
                 Some(_) | None => {
-                    let (bodies, answer) = inner.fold.decide(&working, &pending.command);
+                    let (bodies, answer) = inner.fold.decide(&round.working, &pending.command);
                     Decided {
-                        at: next,
+                        at: round.next,
                         bodies,
                         answer,
                     }
@@ -658,64 +764,134 @@ impl<F: Resident> Owner<F> {
                 pending.answer(Err(bound));
                 continue;
             }
-            if rows.len() + decided.bodies.len() > room {
+            if round.rows.len() + decided.bodies.len() > room {
                 pending.decided = Some(decided);
-                rest.push(pending);
+                round.rest.push(pending);
                 continue;
             }
-            let Decided { bodies, answer, .. } = decided;
-            for body in bodies {
-                if let Err(error) = inner.fold.apply(&mut working, next, &body) {
+            for body in decided.bodies {
+                let next = round.next;
+                if let Err(error) = inner.fold.apply(&mut round.working, next, &body) {
                     panic!(
                         "scope {} decided row {next} that its own fold refuses: {error}",
                         self.scope
                     );
                 }
-                rows.push((next, body));
-                next += 1;
+                round.rows.push((next, body));
+                round.next += 1;
             }
-            answers.push((pending.reply, next, answer));
+            round.durable |= pending.durable;
+            round
+                .answers
+                .push((pending.reply, round.next, decided.answer));
         }
-        if rows.is_empty() {
-            for (reply, seq, answer) in answers {
+        round
+    }
+
+    fn stage(&self, core: &mut Core<F>, round: Round<F>) {
+        assert!(
+            round.rest.is_empty(),
+            "scope {} stages only a batch that fits",
+            self.scope
+        );
+        if sim::mutated(Mutation::StagedPublished) {
+            self.publish(&Arc::new(round.working.clone()), round.next);
+        }
+        self.buffered.store(round.rows.len(), Ordering::Release);
+        core.staged = Some(Staging {
+            state: round.working,
+            next: round.next,
+            rows: round.rows,
+        });
+        for (reply, seq, answer) in round.answers {
+            drop(reply.send(Turn::Committed(Ok(Committed { seq, reply: answer }))));
+        }
+    }
+
+    async fn commit_once(
+        &self,
+        leading: &mut Leading<'_, F>,
+        mut batch: Batch<F>,
+        inner: &Inner<F>,
+    ) -> Batch<F> {
+        if self.movable(inner) {
+            self.moved(batch);
+            return Batch::new();
+        }
+        let Some(core) = leading.core.as_mut() else {
+            panic!(
+                "a committing leader of scope {} holds its state",
+                self.scope
+            );
+        };
+        if core.since >= inner.policy.checkpoint_rows
+            && let Err(error) = self.checkpoint(core, inner).await
+        {
+            batch.fail(&error);
+            return Batch::new();
+        }
+        let round = self.round(core, std::mem::take(&mut batch.pending), inner);
+        if round.rows.is_empty() {
+            for (reply, seq, answer) in round.answers {
                 drop(reply.send(Turn::Committed(Ok(Committed { seq, reply: answer }))));
             }
-            if !rest.is_empty()
-                && let Err(error) = self.checkpoint(core, inner).await
-            {
-                for pending in rest {
-                    pending.answer(Err(error.clone()));
-                }
-                return Vec::new();
+            if round.rest.is_empty() {
+                let flushed = Flushed {
+                    next: Some(core.next),
+                    carried: false,
+                };
+                batch.flushed(&Ok(flushed), false);
+                return Batch::new();
             }
-            return rest;
+            if let Err(error) = self.checkpoint(core, inner).await {
+                batch.pending = round.rest;
+                batch.fail(&error);
+                return Batch::new();
+            }
+            batch.pending = round.rest;
+            return batch;
         }
-        let working = Arc::new(working);
+        if !(round.durable || batch.forces() || !round.rest.is_empty()) {
+            let next = round.next;
+            self.stage(core, round);
+            let flushed = Flushed {
+                next: Some(next),
+                carried: false,
+            };
+            batch.flushed(&Ok(flushed), false);
+            return Batch::new();
+        }
+        self.landed(leading, batch, round, inner).await
+    }
+
+    async fn landed(
+        &self,
+        leading: &mut Leading<'_, F>,
+        mut batch: Batch<F>,
+        round: Round<F>,
+        inner: &Inner<F>,
+    ) -> Batch<F> {
+        let working = Arc::new(round.working);
+        let next = round.next;
         if sim::mutated(Mutation::PublishBeforeCommit) {
             self.publish(&working, next);
         }
+        let last = round.rest.is_empty();
+        let carry = batch.carrying.as_ref().filter(|_| last).map(|(carry, _)| carry);
         leading.in_flight = true;
-        let appended = inner.log.append(&self.scope, &rows).await;
+        let appended = self.append(&round.rows, carry, inner).await;
         leading.in_flight = false;
-        let failed = match appended {
-            Ok(()) => None,
-            Err(StoreError::Busy) => Some(ScopeError::Busy),
-            Err(StoreError::Fenced | StoreError::Conflict { .. }) => {
-                self.lose();
-                Some(ScopeError::Lost)
-            }
-            Err(_) => {
-                self.lose();
-                Some(ScopeError::Uncertain)
+        let carried = match appended {
+            Ok(carried) => carried,
+            Err(error) => {
+                for (reply, _, _) in round.answers {
+                    drop(reply.send(Turn::Committed(Err(error.clone()))));
+                }
+                round.rest.into_iter().for_each(Pending::moved);
+                batch.fail(&error);
+                return Batch::new();
             }
         };
-        if let Some(error) = failed {
-            for (reply, _, _) in answers {
-                drop(reply.send(Turn::Committed(Err(error.clone()))));
-            }
-            rest.into_iter().for_each(Pending::moved);
-            return Vec::new();
-        }
         let Some(core) = leading.core.as_mut() else {
             panic!(
                 "a committing leader of scope {} holds its state",
@@ -724,15 +900,17 @@ impl<F: Resident> Owner<F> {
         };
         core.state = working;
         core.next = next;
-        core.since += rows.len();
+        core.since += round.rows.len();
+        core.staged = None;
+        self.buffered.store(0, Ordering::Release);
         self.weight
             .store(inner.fold.weight(&core.state), Ordering::Relaxed);
         self.publish(&core.state, next);
         inner.stats.update(|stats| {
             stats.commits += 1;
-            stats.rows += rows.len() as u64;
+            stats.rows += round.rows.len() as u64;
         });
-        for (reply, seq, answer) in answers {
+        for (reply, seq, answer) in round.answers {
             drop(reply.send(Turn::Committed(Ok(Committed { seq, reply: answer }))));
         }
         if self.due(leading, inner)
@@ -740,6 +918,76 @@ impl<F: Resident> Owner<F> {
         {
             let _ = self.checkpoint(core, inner).await;
         }
-        rest
+        if !last {
+            batch.pending = round.rest;
+            return batch;
+        }
+        let flushed = Flushed {
+            next: Some(next),
+            carried,
+        };
+        batch.flushed(&Ok(flushed), carried);
+        Batch::new()
+    }
+
+    async fn append(
+        &self,
+        rows: &[(u64, String)],
+        carry: Option<&Carry>,
+        inner: &Inner<F>,
+    ) -> Result<bool, ScopeError> {
+        let (appended, carried) = match carry {
+            None => (inner.log.append(&self.scope, rows).await, false),
+            Some(carry) => self.carried(rows, carry, inner).await,
+        };
+        match appended {
+            Ok(()) => Ok(carried),
+            Err(StoreError::Busy) => Err(ScopeError::Busy),
+            Err(StoreError::Fenced | StoreError::Conflict { .. }) => {
+                self.lose();
+                Err(ScopeError::Lost)
+            }
+            Err(_) => {
+                self.lose();
+                Err(ScopeError::Uncertain)
+            }
+        }
+    }
+
+    async fn carried(
+        &self,
+        rows: &[(u64, String)],
+        carry: &Carry,
+        inner: &Inner<F>,
+    ) -> (Result<(), StoreError>, bool) {
+        let statements: Vec<SqlStatement<'_>> = carry
+            .statements
+            .iter()
+            .map(|(sql, params)| SqlStatement {
+                sql,
+                params: params.iter().map(String::as_str).collect(),
+            })
+            .collect();
+        let rider = Rider {
+            host: carry.host,
+            statements: &statements,
+        };
+        let split = sim::mutated(Mutation::RiderSplit);
+        if split && let Err(error) = inner.log.append(&self.scope, rows).await {
+            return (Err(error), false);
+        }
+        let write = Write::Append {
+            rows: if split { &[] } else { rows },
+            compaction: Compaction {
+                archived: &[],
+                dropped: 0..0,
+                superseded: &[],
+            },
+        };
+        match inner.log.carry(&self.scope, write, rider) {
+            Some(carrying) => (carrying.await, true),
+            None if split => (Ok(()), false),
+            None => (inner.log.append(&self.scope, rows).await, false),
+        }
     }
 }

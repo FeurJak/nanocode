@@ -16,14 +16,15 @@ use std::{
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_partitions::{Partition, Row};
 use nanocode_scope::{
-    Checkpoints, Committed, Fence, Listing, Manifest, MemoryCheckpoints, Part, PartedLeases, Policy,
-    Reached, Resident, Route, Routed, Scope, ScopeError, Scopes, Stats, Wiring, Written,
+    Carry, Checkpoints, Committed, Fence, Flushed, Listing, Manifest, MemoryCheckpoints, Part,
+    PartedLeases, Policy, Reached, Resident, Route, Routed, Scope, ScopeError, Scopes, Stats,
+    Wiring, Written,
     sim::{self as scope_sim, Mutation},
 };
 use nanocode_sync::{Atom, Signal, block_on};
 
 use nanocode_turnlog::{
-    LogHost, SCAN_END,
+    LogHost, Rider, SCAN_END, Write,
     parted::{ModelParts, PartStore, PartedLog},
 };
 
@@ -65,6 +66,10 @@ const OVERSIZE_PPM: u64 = 20_000;
 const DOWN_ROUTE_PPM: u64 = 200_000;
 const BURST_PPM: u64 = 60_000;
 const BURST_SENDS: Range<u64> = 3..7;
+const STAGE_PPM: u64 = 80_000;
+const STAGES: Range<u64> = 1..4;
+const RIDER_HOST: usize = 7;
+const RIDER_SQL: &str = "UPDATE rider SET seen = $1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScopeMutation(Mutation);
@@ -123,6 +128,9 @@ pub struct ScopeStats {
     pub bursts: u64,
     pub burst_sends: u64,
     pub burst_decides_checked: u64,
+    pub staged: u64,
+    pub flushes: u64,
+    pub carried: u64,
 }
 
 impl ScopeStats {
@@ -159,6 +167,9 @@ impl ScopeStats {
         self.bursts += other.bursts;
         self.burst_sends += other.burst_sends;
         self.burst_decides_checked += other.burst_decides_checked;
+        self.staged += other.staged;
+        self.flushes += other.flushes;
+        self.carried += other.carried;
     }
 
     fn runtime(&mut self, stats: &Stats) {
@@ -419,7 +430,10 @@ impl Checkpoints for Witness {
     }
 }
 
+type Landed = (String, u64, Vec<(&'static str, Vec<String>)>);
+
 struct Tap {
+    riders: Atom<Vec<Landed>>,
     log: Arc<PartedLog<ModelParts>>,
     witness: Arc<Witness>,
     limit: usize,
@@ -502,6 +516,42 @@ impl LogHost for Tap {
             self.log.append(scope, rows).await
         })
     }
+
+    fn carry<'a>(
+        &'a self,
+        scope: &'a str,
+        write: Write<'a>,
+        rider: Rider<'a>,
+    ) -> Option<StoreFuture<'a, Result<(), StoreError>>> {
+        let Write::Append { rows, .. } = write else {
+            return None;
+        };
+        Some(Box::pin(async move {
+            if let Some(signal) = self.gated(scope) {
+                signal.wait().await;
+            }
+            if rows.is_empty() {
+                flag(
+                    &self.wrong,
+                    format!("rider: a rider of {scope} commits in a write without its rows"),
+                );
+                return Ok(());
+            }
+            self.log.append(scope, rows).await?;
+            let statements: Vec<(&'static str, Vec<String>)> = rider
+                .statements
+                .iter()
+                .map(|statement| {
+                    let params = statement.params.iter().map(|param| (*param).to_owned());
+                    (statement.sql, params.collect())
+                })
+                .collect();
+            let end = rows.last().map_or(0, |(seq, _)| seq + 1);
+            let landed: Landed = (scope.to_owned(), end, statements);
+            self.riders.update(|riders| riders.push(landed.clone()));
+            Ok(())
+        }))
+    }
 }
 
 #[derive(Default)]
@@ -571,6 +621,7 @@ impl World {
         );
         let leases = PartedLeases::new(Arc::clone(&log), name, TTL_MS);
         let tap = Arc::new(Tap {
+            riders: Atom::default(),
             log: Arc::clone(&log),
             witness: Arc::clone(&self.witness),
             limit: self.policy.checkpoint_rows,
@@ -881,6 +932,111 @@ fn burst(rng: &mut Rng, world: &World, nodes: &mut [Node], stats: &mut ScopeStat
     }
 }
 
+fn staging(rng: &mut Rng, world: &World, nodes: &mut [Node], stats: &mut ScopeStats) {
+    let at = rng.pick(nodes.len());
+    if nodes[at].paused {
+        return;
+    }
+    let scope = world.scopes[rng.pick(world.scopes.len())].clone();
+    let node = &mut nodes[at];
+    let Some(Ok(Reached::Local(handle))) = driven(world, "a get", node.scopes.get(&scope)) else {
+        return;
+    };
+    node.handles.insert(scope.clone(), handle.clone());
+    for _ in 0..rng.range(STAGES.start, STAGES.end) {
+        let command = Add {
+            bucket: u8::try_from(rng.below(u64::from(BUCKETS))).expect("a bucket fits in u8"),
+            values: vec![rng.below(1_000)],
+            decided: Arc::default(),
+        };
+        match driven(world, "a stage", handle.stage(command)) {
+            Some(Ok(_)) => stats.staged += 1,
+            Some(Err(_)) | None => return,
+        }
+        if *handle.state() != world.refold(&scope, handle.next()) {
+            flag(
+                &world.wrong,
+                format!("staged: a read of {scope} sees a staged row before it commits"),
+            );
+            return;
+        }
+    }
+    let carry = Carry {
+        host: RIDER_HOST,
+        statements: vec![(RIDER_SQL, vec![format!("{}", rng.below(1_000))])],
+    };
+    match rng.below(4) {
+        0 => {}
+        1 => {
+            let answer = driven(world, "a flush", handle.flush(None));
+            flushed(world, &scope, &node.tap, answer, None, stats);
+        }
+        2 => {
+            let answer = driven(world, "a carrying flush", handle.flush(Some(carry.clone())));
+            flushed(world, &scope, &node.tap, answer, Some(&carry), stats);
+        }
+        _ => {
+            let command = Add {
+                bucket: 0,
+                values: vec![rng.below(1_000)],
+                decided: Arc::default(),
+            };
+            let _ = driven(world, "a send after stages", handle.send(command));
+        }
+    }
+}
+
+fn flushed(
+    world: &World,
+    scope: &str,
+    tap: &Tap,
+    answer: Option<Result<Flushed, ScopeError>>,
+    carry: Option<&Carry>,
+    stats: &mut ScopeStats,
+) {
+    let Some(Ok(flushed)) = answer else {
+        return;
+    };
+    stats.flushes += 1;
+    let Some(next) = flushed.next else {
+        return;
+    };
+    let head = world.head(scope);
+    if head < next {
+        flag(
+            &world.wrong,
+            format!(
+                "durable: a flush of {scope} answered at row {next} with the log's head at {head}"
+            ),
+        );
+        return;
+    }
+    if !flushed.carried {
+        return;
+    }
+    stats.carried += 1;
+    let Some(carry) = carry else {
+        flag(
+            &world.wrong,
+            format!("rider: a flush of {scope} without a rider says it carried one"),
+        );
+        return;
+    };
+    let landed = tap.riders.read(|riders| {
+        riders.iter().any(|(at, end, statements)| {
+            at == scope && *end == next && *statements == carry.statements
+        })
+    });
+    if !landed {
+        flag(
+            &world.wrong,
+            format!(
+                "rider: the rider of a flush of {scope} at row {next} did not land in the write of its rows"
+            ),
+        );
+    }
+}
+
 fn residents(world: &World, node: &Node) -> Vec<(String, u64)> {
     let _ = world;
     node.scopes
@@ -1010,6 +1166,7 @@ fn roll(
         TICK_PPM,
         STALE_PPM,
         BURST_PPM,
+        STAGE_PPM,
     ]
     .into_iter();
     let mut floor = 0;
@@ -1064,6 +1221,9 @@ fn roll(
     } else if band() {
         publish(world, nodes);
         burst(rng, world, nodes, stats);
+    } else if band() {
+        publish(world, nodes);
+        staging(rng, world, nodes, stats);
     } else {
         publish(world, nodes);
         send(rng, world, nodes, stats);

@@ -13,7 +13,7 @@ use nanocode_sync::{Atom, OrdMap, Slot, Vector, oneshot, watch};
 use nanocode_turnlog::{LogHost, SCAN_END};
 
 use crate::{
-    Adopted, Committed, Part, Policy, Resident, ScopeError,
+    Adopted, Carry, Committed, Flushed, Part, Policy, Resident, ScopeError,
     checkpoint::{Checkpoints, Listing, Manifest, digest},
     lease::Leases,
     owner::{Ask, Chain, Checkpointed, Core, Life, Owner, Turn, Why},
@@ -212,6 +212,23 @@ impl<F: Resident> Reached<F> {
             Self::Routed(routed) => routed.send(command).await,
         }
     }
+
+    pub async fn stage(&self, command: F::Command) -> Result<Committed<F::Reply>, ScopeError> {
+        match self {
+            Self::Local(scope) => scope.stage(command).await,
+            Self::Routed(routed) => routed.send(command).await,
+        }
+    }
+
+    pub async fn flush(&self, carry: Option<Carry>) -> Result<Flushed, ScopeError> {
+        match self {
+            Self::Local(scope) => scope.flush(carry).await,
+            Self::Routed(_) => Ok(Flushed {
+                next: None,
+                carried: false,
+            }),
+        }
+    }
 }
 
 impl<F: Resident> Scope<F> {
@@ -243,19 +260,47 @@ impl<F: Resident> Scope<F> {
     }
 
     pub async fn send(&self, command: F::Command) -> Result<Committed<F::Reply>, ScopeError> {
+        self.committed(command, Ask::Send).await
+    }
+
+    pub async fn stage(&self, command: F::Command) -> Result<Committed<F::Reply>, ScopeError> {
+        self.committed(command, Ask::Stage).await
+    }
+
+    pub async fn flush(&self, carry: Option<Carry>) -> Result<Flushed, ScopeError> {
         self.owner.used.store(self.inner.touch(), Ordering::Relaxed);
-        match self.owner.ask(Ask::Send(command), &self.inner).await {
+        match self.owner.ask(Ask::Flush(carry), &self.inner).await {
+            Turn::Flushed(flushed) => flushed,
+            Turn::Committed(_)
+            | Turn::Moved(_)
+            | Turn::Read(_)
+            | Turn::Checkpointed(_)
+            | Turn::Drained(_) => {
+                panic!("a flush of scope {} is answered as a flush", self.owner.scope)
+            }
+        }
+    }
+
+    async fn committed(
+        &self,
+        command: F::Command,
+        ask: fn(F::Command) -> Ask<F>,
+    ) -> Result<Committed<F::Reply>, ScopeError> {
+        self.owner.used.store(self.inner.touch(), Ordering::Relaxed);
+        match self.owner.ask(ask(command), &self.inner).await {
             Turn::Committed(committed) => committed,
             Turn::Moved(Some(command)) => match self.inner.get(&self.owner.scope).await? {
-                Reached::Local(scope) => {
-                    match scope.owner.ask(Ask::Send(command), &self.inner).await {
-                        Turn::Committed(committed) => committed,
-                        _ => Err(ScopeError::Moved),
-                    }
-                }
+                Reached::Local(scope) => match scope.owner.ask(ask(command), &self.inner).await {
+                    Turn::Committed(committed) => committed,
+                    _ => Err(ScopeError::Moved),
+                },
                 Reached::Routed(routed) => routed.send(command).await,
             },
-            Turn::Moved(None) | Turn::Read(_) | Turn::Checkpointed(_) | Turn::Drained(_) => {
+            Turn::Moved(None)
+            | Turn::Read(_)
+            | Turn::Flushed(_)
+            | Turn::Checkpointed(_)
+            | Turn::Drained(_) => {
                 panic!("a send to scope {} is answered as a send", self.owner.scope)
             }
         }
@@ -561,6 +606,7 @@ impl<F: Resident> Inner<F> {
             next: at,
             since: tail.len(),
             checkpointed,
+            staged: None,
         };
         let owner = Arc::new(Owner::new(
             Arc::from(scope),
@@ -641,7 +687,7 @@ impl<F: Resident> Inner<F> {
         let drained = match owner.ask(Ask::Drain(why), self).await {
             Turn::Drained(drained) => drained,
             Turn::Moved(_) => Err(ScopeError::Moved),
-            Turn::Committed(_) | Turn::Read(_) | Turn::Checkpointed(_) => {
+            Turn::Committed(_) | Turn::Read(_) | Turn::Flushed(_) | Turn::Checkpointed(_) => {
                 panic!("a drain of scope {} is answered as a drain", owner.scope)
             }
         };

@@ -1,6 +1,9 @@
 use std::{any::Any, sync::Arc};
 
-use nanocode_scope::{Adopted, Part, Reached, Resident, ScopeError, Scopes, Wiring};
+use nanocode_scope::{
+    Adopted, Carry, Flushed, Part, Reached, Resident, ScopeError, Scopes, Wiring,
+};
+use nanocode_sync::Slot;
 use nanocode_turnlog::{LogHost, Phase, Record, input_digest, tag};
 use serde_json::{Map, Value, value::RawValue};
 
@@ -24,6 +27,7 @@ mod state;
 pub use state::{KeptFact, ThreadState};
 
 type Run = dyn Fn(&mut Staged) -> Result<Box<dyn Any + Send>, StoreError> + Send + Sync;
+type Once<T> = Box<dyn FnOnce(&mut Staged) -> Result<T, StoreError> + Send>;
 
 #[derive(Clone)]
 pub struct Job(Arc<Run>);
@@ -35,6 +39,18 @@ impl Job {
         Self(Arc::new(move |staged| {
             run(staged).map(|value| Box::new(value) as Box<dyn Any + Send>)
         }))
+    }
+
+    pub fn once<T: Send + 'static>(
+        run: impl FnOnce(&mut Staged) -> Result<T, StoreError> + Send + 'static,
+    ) -> Self {
+        let run: Slot<Once<T>> = Slot::new(Some(Box::new(run)));
+        Self::new(move |staged| match run.take() {
+            Some(run) => run(staged),
+            None => Err(StoreError::NotCommitted(
+                "a one-shot thread job already ran in a batch its owner could not commit; nothing was written".to_owned(),
+            )),
+        })
     }
 }
 
@@ -659,6 +675,28 @@ impl ThreadLog {
         &self,
         run: impl Fn(&mut Staged) -> Result<T, StoreError> + Send + Sync + 'static,
     ) -> Result<T, ScopeError> {
+        self.jobbed(Job::new(run), false).await
+    }
+
+    pub async fn job_once<T: Send + 'static>(
+        &self,
+        run: impl FnOnce(&mut Staged) -> Result<T, StoreError> + Send + 'static,
+    ) -> Result<T, ScopeError> {
+        self.jobbed(Job::once(run), false).await
+    }
+
+    pub async fn job_staged<T: Send + 'static>(
+        &self,
+        run: impl Fn(&mut Staged) -> Result<T, StoreError> + Send + Sync + 'static,
+    ) -> Result<T, ScopeError> {
+        self.jobbed(Job::new(run), true).await
+    }
+
+    pub async fn flush(&self, carry: Option<Carry>) -> Result<Flushed, ScopeError> {
+        self.reached.flush(carry).await
+    }
+
+    async fn jobbed<T: Send + 'static>(&self, job: Job, staged: bool) -> Result<T, ScopeError> {
         if let Reached::Routed(routed) = &self.reached
             && !sim::mutated(sim::Mutation::JobForwarded)
         {
@@ -666,12 +704,19 @@ impl ThreadLog {
                 holder: routed.holder().to_owned(),
             });
         }
-        match self.send(ThreadCommand::Job(Job::new(run))).await? {
+        let command = ThreadCommand::Job(job);
+        let replied = if staged {
+            self.reached.stage(command).await?.reply
+        } else {
+            self.reached.send(command).await?.reply
+        };
+        match replied {
             ThreadReply::Job(Ok(Done(done))) => match done.downcast::<T>() {
                 Ok(value) => Ok(*value),
                 Err(_) => panic!("a thread job answers with the type its closure returns"),
             },
             ThreadReply::Job(Err(error)) => Err(ScopeError::Store(error)),
+            ThreadReply::Refused(why) => Err(ScopeError::Store(StoreError::NotCommitted(why))),
             reply => unexpected("job", &reply),
         }
     }
