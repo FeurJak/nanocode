@@ -1,4 +1,4 @@
-use crate::postgres::PgError;
+use crate::postgres::{PgError, sim};
 use nanocode_durability_core::SqlAccess;
 use std::{path::PathBuf, time::Duration};
 
@@ -89,6 +89,25 @@ impl PgLimits {
             SqlAccess::Schema => self.schema,
             SqlAccess::Autocommit => self.autocommit,
         }
+    }
+
+    #[must_use]
+    pub fn call_bound(&self) -> Duration {
+        let cancel = if sim::mutated(sim::Mutation::CallBoundSkipsCancel) {
+            Duration::ZERO
+        } else {
+            self.acquire
+        };
+        [self.read, self.write, self.schema]
+            .iter()
+            .map(|bounds| {
+                self.acquire
+                    .checked_add(bounds.statement)
+                    .and_then(|waited| waited.checked_add(cancel))
+                    .expect("a call's acquire, statement and cancel deadlines fit in a Duration")
+            })
+            .max()
+            .expect("a pool has transaction classes")
     }
 
     pub(super) fn assert_bounded(&self) {

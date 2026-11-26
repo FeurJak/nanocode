@@ -1,4 +1,7 @@
-use crate::postgres::{PgCancel, PgError, PgPool, Pooled, connection::BOUND_SESSION};
+use crate::postgres::{
+    Lent, PgBounds, PgCancel, PgConnection, PgError, PgLimits, PgPool, Pooled,
+    connection::BOUND_SESSION,
+};
 use nanocode_durability_core::{
     Settle, Sql, SqlAccess, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
 };
@@ -66,24 +69,22 @@ impl PgSql {
             SqlAccess::Write | SqlAccess::Schema | SqlAccess::Autocommit => &self.writes,
         };
         let started = nanocode_platform::now();
-        let mut connection = pool
+        let connection = pool
             .acquire()
             .await
             .map_err(|error| refused(access, error))?;
         let acquired = nanocode_platform::now();
-        let bounds = pool.limits().bounds(access);
-        let key = connection.cancel_key();
-        let answered = nanocode_platform::timeout(
-            bounds.statement,
-            connection.bounded(settle, bounds, statements),
+        let result = answer_within(
+            connection,
+            pool.limits(),
+            access,
+            settle,
+            statements,
+            |key| async move { pool.cancel(&key).await },
         )
         .await;
-        let result = match answered {
-            Ok(result) => result,
-            Err(Elapsed) => Err(unanswered(pool, connection, &key).await),
-        };
         self.time(operation, started, acquired);
-        result.map_err(|error| refused(access, error))
+        result
     }
 
     async fn autocommit(
@@ -141,6 +142,63 @@ impl PgSql {
     }
 }
 
+pub trait Answering: Send + 'static {
+    type Key;
+
+    fn key(&self) -> Self::Key;
+
+    fn answer<'a>(
+        &'a mut self,
+        settle: Settle,
+        bounds: PgBounds,
+        statements: &'a [SqlStatement<'a>],
+    ) -> impl Future<Output = Result<Vec<Vec<SqlRow>>, PgError>> + Send + 'a;
+}
+
+impl Answering for PgConnection {
+    type Key = PgCancel;
+
+    fn key(&self) -> PgCancel {
+        self.cancel_key()
+    }
+
+    fn answer<'a>(
+        &'a mut self,
+        settle: Settle,
+        bounds: PgBounds,
+        statements: &'a [SqlStatement<'a>],
+    ) -> impl Future<Output = Result<Vec<Vec<SqlRow>>, PgError>> + Send + 'a {
+        self.bounded(settle, bounds, statements)
+    }
+}
+
+pub async fn answer_within<C: Answering, F: Future<Output = Result<(), PgError>>>(
+    mut connection: Lent<C>,
+    limits: &PgLimits,
+    access: SqlAccess,
+    settle: Settle,
+    statements: &[SqlStatement<'_>],
+    cancel: impl FnOnce(C::Key) -> F,
+) -> Result<Vec<Vec<SqlRow>>, StoreError> {
+    let bounds = limits.bounds(access);
+    let key = connection.key();
+    let answered = nanocode_platform::timeout(
+        bounds.statement,
+        connection.answer(settle, bounds, statements),
+    )
+    .await;
+    match answered {
+        Ok(result) => result.map_err(|error| refused(access, error)),
+        Err(Elapsed) => {
+            let cancelled = nanocode_platform::timeout(limits.acquire, cancel(key)).await;
+            connection.discard();
+            match cancelled {
+                Ok(Ok(()) | Err(_)) | Err(Elapsed) => Err(refused(access, PgError::Unanswered)),
+            }
+        }
+    }
+}
+
 async fn within(
     connection: &mut Pooled,
     wait: Duration,
@@ -182,7 +240,12 @@ impl Sql for PgSql {
     }
 
     fn call_bound(&self) -> Option<Duration> {
-        None
+        Some(
+            self.writes
+                .limits()
+                .call_bound()
+                .max(self.reads.limits().call_bound()),
+        )
     }
 
     fn run<'a>(

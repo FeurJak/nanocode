@@ -5,16 +5,18 @@ use std::sync::atomic::{AtomicU8, Ordering};
 pub enum Mutation {
     None,
     WaitsUnbounded,
+    CallBoundSkipsCancel,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 1] = [Self::WaitsUnbounded];
+    pub const ALL: [Self; 2] = [Self::WaitsUnbounded, Self::CallBoundSkipsCancel];
 
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::WaitsUnbounded => "waits_unbounded",
+            Self::CallBoundSkipsCancel => "call_bound_skips_cancel",
         }
     }
 

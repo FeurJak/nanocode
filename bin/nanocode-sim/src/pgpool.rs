@@ -3,8 +3,9 @@ use std::{
     time::Duration,
 };
 
+use nanocode_durability_core::{Settle, SqlAccess, SqlRow, SqlStatement, StoreError};
 use nanocode_store_sql::{
-    Lending, Lent, PgLimits,
+    Answering, Lending, Lent, PgBounds, PgError, PgLimits, answer_within,
     sim::{self as pool_sim, Mutation as Rule},
 };
 
@@ -17,20 +18,25 @@ const CONNECTIONS_MAX: u64 = 4;
 const CALLERS_PER_CONNECTION_MAX: u64 = 3;
 const ANSWERED_PPM: u64 = 300_000;
 const REFUSED_PPM: u64 = 100_000;
+const CALLS_MAX: u64 = 8;
+const NEVER_PPM: u64 = 500_000;
+const ACCESSES: [SqlAccess; 3] = [SqlAccess::Read, SqlAccess::Write, SqlAccess::Schema];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PgPoolMutation {
     None,
     WaitsUnbounded,
+    CallBoundSkipsCancel,
 }
 
 impl PgPoolMutation {
-    const ALL: [Self; 2] = [Self::None, Self::WaitsUnbounded];
+    const ALL: [Self; 3] = [Self::None, Self::WaitsUnbounded, Self::CallBoundSkipsCancel];
 
     const fn rule(self) -> Rule {
         match self {
             Self::None => Rule::None,
             Self::WaitsUnbounded => Rule::WaitsUnbounded,
+            Self::CallBoundSkipsCancel => Rule::CallBoundSkipsCancel,
         }
     }
 
@@ -60,6 +66,8 @@ pub struct PgPoolStats {
     pub lent: u64,
     pub busy: u64,
     pub refused: u64,
+    pub calls: u64,
+    pub unknown: u64,
 }
 
 impl PgPoolStats {
@@ -69,6 +77,8 @@ impl PgPoolStats {
         self.lent += other.lent;
         self.busy += other.busy;
         self.refused += other.refused;
+        self.calls += other.calls;
+        self.unknown += other.unknown;
     }
 }
 
@@ -111,9 +121,242 @@ fn connecting(store: Store) -> Connecting {
 fn run_seed(seed: u64, mutation: PgPoolMutation) -> Outcome {
     pool_sim::mutate(mutation.rule());
     let clock = Clock::new();
-    let outcome = crate::host::entered(seed, &clock, || callers(seed, &clock));
+    let mut outcome = crate::host::entered(seed, &clock, || callers(seed, &clock));
+    let clock = Clock::new();
+    let calls = crate::host::entered(seed, &clock, || bound_calls(seed, &clock));
     pool_sim::mutate(Rule::None);
+    outcome.digest = fnv(outcome.digest, calls.shape.as_bytes());
+    outcome.wrong = outcome.wrong.or(calls.wrong);
+    outcome.stats.add(&calls.stats);
+    outcome.shape.push_str(&calls.shape);
     outcome
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reply {
+    Never,
+    Answers,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Call {
+    delay_ms: u64,
+    store: Store,
+    connect_ms: u64,
+    statement: Reply,
+    cancel: Reply,
+    access: SqlAccess,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Called {
+    Answered,
+    Busy,
+    Unknown,
+    Refused,
+}
+
+struct Statement(Call);
+
+impl Answering for Statement {
+    type Key = Reply;
+
+    fn key(&self) -> Reply {
+        self.0.cancel
+    }
+
+    fn answer<'a>(
+        &'a mut self,
+        _settle: Settle,
+        _bounds: PgBounds,
+        _statements: &'a [SqlStatement<'a>],
+    ) -> impl Future<Output = Result<Vec<Vec<SqlRow>>, PgError>> + Send + 'a {
+        let reply = self.0.statement;
+        async move {
+            if reply == Reply::Never {
+                std::future::pending::<()>().await;
+            }
+            Ok(Vec::new())
+        }
+    }
+}
+
+async fn made(call: Call) -> Result<Statement, Refusal> {
+    match call.store {
+        Store::Unanswered => std::future::pending().await,
+        Store::Refuses => Err(Refusal),
+        Store::Answers => {
+            nanocode_platform::sleep(Duration::from_millis(call.connect_ms)).await;
+            Ok(Statement(call))
+        }
+    }
+}
+
+async fn cancelled(reply: Reply) -> Result<(), PgError> {
+    if reply == Reply::Never {
+        std::future::pending::<()>().await;
+    }
+    Ok(())
+}
+
+fn reply(rng: &mut Rng) -> Reply {
+    if rng.chance(NEVER_PPM) {
+        Reply::Never
+    } else {
+        Reply::Answers
+    }
+}
+
+fn limits(rng: &mut Rng) -> PgLimits {
+    let defaults = PgLimits::default();
+    let acquire_ms =
+        u64::try_from(defaults.acquire.as_millis()).expect("an acquire deadline fits in u64");
+    let statement_ms = u64::try_from(defaults.write.statement.as_millis())
+        .expect("a statement timeout fits in u64");
+    let bounds = PgBounds {
+        statement: Duration::from_millis(rng.range(1, statement_ms + 1)),
+        ..defaults.write
+    };
+    PgLimits {
+        acquire: Duration::from_millis(rng.range(1, acquire_ms + 1)),
+        read: bounds,
+        write: bounds,
+        schema: bounds,
+        autocommit: bounds,
+    }
+}
+
+fn bound_calls(seed: u64, clock: &Arc<Clock>) -> Outcome {
+    let mut rng = Rng::derive(seed, "pg pool bound calls");
+    let limits = limits(&mut rng);
+    let acquire_ms =
+        u64::try_from(limits.acquire.as_millis()).expect("an acquire deadline fits in u64");
+    let bound_ns = u64::try_from(limits.call_bound().as_nanos())
+        .expect("a call bound fits in u64 nanoseconds");
+    let connections = rng.range(1, CONNECTIONS_MAX + 1);
+    let lending: Lending<Statement> =
+        Lending::new(usize::try_from(connections).expect("a connection count fits in usize"));
+    let plan: Vec<Call> = (0..rng.range(1, CALLS_MAX + 1))
+        .map(|_| Call {
+            delay_ms: rng.below(acquire_ms),
+            store: if rng.chance(ANSWERED_PPM) || rng.chance(ANSWERED_PPM) {
+                Store::Answers
+            } else if rng.chance(REFUSED_PPM) {
+                Store::Refuses
+            } else {
+                Store::Unanswered
+            },
+            connect_ms: rng.below(acquire_ms),
+            statement: reply(&mut rng),
+            cancel: reply(&mut rng),
+            access: ACCESSES[usize::try_from(rng.below(3)).expect("an index fits in usize")],
+        })
+        .collect();
+    let ended: Rc<RefCell<Vec<Option<(u64, u64, Called)>>>> =
+        Rc::new(RefCell::new(vec![None; plan.len()]));
+    let tasks = plan
+        .iter()
+        .enumerate()
+        .map(|(index, &call)| {
+            let (lending, limits, clock, ended) =
+                (&lending, &limits, Arc::clone(clock), Rc::clone(&ended));
+            Box::pin(async move {
+                nanocode_platform::sleep(Duration::from_millis(call.delay_ms)).await;
+                let started = clock.now_ns();
+                let called = match lending.lend(limits.acquire, |_| false, || made(call)).await {
+                    Err(_) => Called::Busy,
+                    Ok(Err(Refusal)) => Called::Refused,
+                    Ok(Ok(lent)) => {
+                        match answer_within(
+                            lent,
+                            limits,
+                            call.access,
+                            Settle::Durable,
+                            &[],
+                            cancelled,
+                        )
+                        .await
+                        {
+                            Ok(_) => Called::Answered,
+                            Err(StoreError::Busy) => Called::Busy,
+                            Err(_) => Called::Unknown,
+                        }
+                    }
+                };
+                ended.borrow_mut()[index] = Some((started, clock.now_ns(), called));
+            }) as Task<'_>
+        })
+        .collect();
+    let run = Executor::new(
+        Arc::clone(clock),
+        Rng::derive(seed, "pg pool bound callers"),
+    )
+    .run(tasks, None);
+    let mut stats = PgPoolStats::default();
+    let mut shape = format!(" calls={} bound_ms={} ", plan.len(), bound_ns / 1_000_000);
+    let wrong = called(
+        &plan,
+        &ended.borrow(),
+        run,
+        bound_ns,
+        &mut stats,
+        &mut shape,
+    );
+    Outcome {
+        digest: fnv(FNV_OFFSET, shape.as_bytes()),
+        wrong,
+        stats,
+        shape,
+    }
+}
+
+fn called(
+    plan: &[Call],
+    ended: &[Option<(u64, u64, Called)>],
+    run: Ended,
+    bound_ns: u64,
+    stats: &mut PgPoolStats,
+    shape: &mut String,
+) -> Option<String> {
+    if run != Ended::Finished {
+        return Some(format!(
+            "with a store that never answers, bound calls still wait: {run:?}"
+        ));
+    }
+    for (index, (call, end)) in plan.iter().zip(ended).enumerate() {
+        let Some((started, ended, answer)) = *end else {
+            return Some(format!("bound call {index} never returned"));
+        };
+        stats.calls += 1;
+        shape.push(match answer {
+            Called::Answered => 'a',
+            Called::Busy => 'b',
+            Called::Unknown => 'u',
+            Called::Refused => 'r',
+        });
+        if answer == Called::Unknown {
+            stats.unknown += 1;
+        }
+        let waited = ended - started;
+        if waited > bound_ns {
+            return Some(format!(
+                "bound call {index} ({call:?}) answered {answer:?} after {waited} ns, past the call bound of {bound_ns} ns its store reports"
+            ));
+        }
+        let made = call.store == Store::Answers;
+        let wrong = match answer {
+            Called::Answered => !made || call.statement == Reply::Never,
+            Called::Unknown => {
+                !made || call.statement == Reply::Answers || call.access == SqlAccess::Read
+            }
+            Called::Refused => call.store != Store::Refuses,
+            Called::Busy => false,
+        };
+        if wrong || (call.store == Store::Unanswered && answer != Called::Busy) {
+            return Some(format!("bound call {index} ({call:?}) answered {answer:?}"));
+        }
+    }
+    None
 }
 
 fn callers(seed: u64, clock: &Arc<Clock>) -> Outcome {
