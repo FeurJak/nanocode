@@ -4,6 +4,7 @@ mod owner;
 mod route;
 mod scopes;
 pub mod sim;
+mod sql;
 
 use nanocode_durability_core::StoreError;
 
@@ -13,6 +14,7 @@ pub use checkpoint::{
 pub use lease::{Leases, PartedLeases};
 pub use route::Route;
 pub use scopes::{ClaimHook, Clock, Reached, Routed, Scope, Scopes, Stats, Wiring};
+pub use sql::SqlCheckpoints;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Part {
