@@ -579,35 +579,114 @@ enum Written<'a> {
     Extended(Extension<'a>, usize),
 }
 
-async fn landed(
+#[derive(PartialEq, Eq)]
+enum Unsettled {
+    Appended(Vec<(u64, String)>),
+    Extended {
+        cut: usize,
+        row: u64,
+        seq: u64,
+        tail: String,
+        merged: usize,
+    },
+}
+
+impl Unsettled {
+    fn of(written: &Written<'_>) -> Self {
+        match written {
+            Written::Appended(rows) => Self::Appended(rows.to_vec()),
+            Written::Extended(extension, merged) => Self::Extended {
+                cut: extension.cut,
+                row: extension.row,
+                seq: extension.seq,
+                tail: extension.tail.to_owned(),
+                merged: *merged,
+            },
+        }
+    }
+
+    fn written(&self) -> Written<'_> {
+        match self {
+            Self::Appended(rows) => Written::Appended(rows),
+            Self::Extended {
+                cut,
+                row,
+                seq,
+                tail,
+                merged,
+            } => Written::Extended(
+                Extension {
+                    cut: *cut,
+                    row: *row,
+                    seq: *seq,
+                    tail,
+                },
+                *merged,
+            ),
+        }
+    }
+
+    fn repeats(
+        &self,
+        extension: Option<Extension<'_>>,
+        merged: Option<usize>,
+        rows: &[(u64, String)],
+    ) -> bool {
+        match (self, extension.zip(merged)) {
+            (Self::Appended(earlier), None) => earlier == rows,
+            (Self::Extended { .. }, Some((extension, merged))) => {
+                *self == Self::of(&Written::Extended(extension, merged))
+            }
+            _ => false,
+        }
+    }
+}
+
+enum Found {
+    Absent,
+    Ours,
+    Other,
+}
+
+async fn read_back(
     host: &dyn LogHost,
     scope: &str,
-    written: Written<'_>,
-    error: StoreError,
-) -> Result<(), StoreError> {
-    let (from, to) = match &written {
+    written: &Written<'_>,
+) -> Result<Found, StoreError> {
+    let (from, to) = match written {
         Written::Appended(rows) => match (rows.first(), rows.last()) {
             (Some((first, _)), Some((last, _))) => (*first, last + 1),
-            _ => return Err(error),
+            _ => return Ok(Found::Absent),
         },
         Written::Extended(extension, _) => (extension.seq, extension.seq + 1),
     };
-    let Ok(found) = host.scan(scope, from, to).await else {
-        return Err(error);
-    };
+    let found = host.scan(scope, from, to).await?;
     let ours = match written {
-        Written::Appended(rows) => found == rows,
+        Written::Appended(rows) => codec::same_rows(&found, rows),
         Written::Extended(extension, merged) => match found.as_slice() {
             [(seq, body)] => {
-                *seq == extension.seq && body.len() == merged && body.ends_with(extension.tail)
+                *seq == extension.seq && body.len() == *merged && body.ends_with(extension.tail)
             }
             _ => false,
         },
     };
-    match (found.is_empty(), ours) {
-        (true, _) => Err(error),
-        (false, true) => Ok(()),
-        (false, false) => Err(StoreError::Fenced),
+    Ok(match (found.is_empty(), ours) {
+        (true, _) => Found::Absent,
+        (false, true) => Found::Ours,
+        (false, false) => Found::Other,
+    })
+}
+
+async fn landed(
+    host: &dyn LogHost,
+    scope: &str,
+    written: &Written<'_>,
+    error: StoreError,
+) -> Result<(), StoreError> {
+    match read_back(host, scope, written).await {
+        Ok(Found::Ours) => Ok(()),
+        Ok(Found::Other) => Err(StoreError::Fenced),
+        Ok(Found::Absent) | Err(_) => Err(error),
     }
 }
 
@@ -1278,6 +1357,7 @@ impl Follower {
                 tail_rows,
                 tails: BTreeMap::new(),
                 tried: None,
+                unsettled: None,
             },
         };
         let (letters, received) = mpsc::unbounded_channel();
@@ -1333,6 +1413,7 @@ struct Writer {
     tail_rows: usize,
     tails: BTreeMap<String, u64>,
     tried: Option<(usize, usize)>,
+    unsettled: Option<Unsettled>,
 }
 
 type Job = Box<dyn for<'a> FnOnce(&'a mut Writing) -> StoreFuture<'a, ()> + Send>;
@@ -2806,6 +2887,22 @@ impl Writing {
             dropped,
             superseded: &superseded,
         };
+        let repeated = match self.writer.unsettled.take() {
+            Some(_) if crate::sim::mutated(crate::sim::Mutation::RetrySkipsReadBack) => false,
+            Some(earlier) => match read_back(&*self.host, &self.scope, &earlier.written()).await {
+                Ok(Found::Absent) => false,
+                Ok(Found::Ours) if earlier.repeats(extension, merged, &appended) => true,
+                Ok(Found::Ours | Found::Other) => {
+                    self.writer.fenced = true;
+                    return Err(StoreError::Fenced);
+                }
+                Err(error) => {
+                    self.writer.unsettled = Some(earlier);
+                    return Err(error);
+                }
+            },
+            None => false,
+        };
         let mut riding = Vec::new();
         while let Ok(ride) = self.writer.riders.try_recv() {
             riding.push(ride);
@@ -2838,7 +2935,7 @@ impl Writing {
             }
         };
         let (carried, extended) = {
-            let carrying = rider.and_then(|rider| {
+            let carrying = rider.filter(|_| !repeated).and_then(|rider| {
                 let write = match extension {
                     Some(extension) => Write::Extend(extension),
                     None => Write::Append {
@@ -2851,6 +2948,10 @@ impl Writing {
             let carried = carrying.is_some();
             let (rodes, extended, done) = match carrying {
                 Some(carrying) => (rodes, extension.and(merged), carrying.await),
+                None if repeated => {
+                    answer(rodes, false);
+                    (Vec::new(), extension.and(merged), Ok(()))
+                }
                 None => {
                     answer(rodes, false);
                     let extending =
@@ -2875,9 +2976,11 @@ impl Writing {
                         Some((extension, merged)) => Written::Extended(extension, merged),
                         None => Written::Appended(&appended[..]),
                     };
-                    let landed = landed(&*self.host, &self.scope, written, error).await;
-                    if matches!(landed, Err(StoreError::Fenced)) {
-                        self.writer.fenced = true;
+                    let landed = landed(&*self.host, &self.scope, &written, error).await;
+                    match &landed {
+                        Err(StoreError::Fenced) => self.writer.fenced = true,
+                        Err(_) => self.writer.unsettled = Some(Unsettled::of(&written)),
+                        Ok(()) => {}
                     }
                     landed
                 }

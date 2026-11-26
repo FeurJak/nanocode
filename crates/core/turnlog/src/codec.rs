@@ -770,6 +770,19 @@ pub(crate) fn binaries(rows: &[(u64, String)]) -> Vec<Option<(&str, String)>> {
         .collect()
 }
 
+pub(crate) fn same_rows(found: &[(u64, String)], rows: &[(u64, String)]) -> bool {
+    found.len() == rows.len()
+        && found.iter().zip(rows).zip(binaries(rows)).all(
+            |(((found_seq, found), (seq, body)), binary)| {
+                found_seq == seq
+                    && (found == body
+                        || binary.is_some_and(|(tag, padded)| {
+                            found.strip_prefix(tag) == Some(padded.trim_end_matches('='))
+                        }))
+            },
+        )
+}
+
 pub(crate) fn tail(text: &str) -> Option<String> {
     if !text.contains(SEGMENT) {
         return padded(text);

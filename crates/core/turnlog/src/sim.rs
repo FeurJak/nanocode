@@ -26,6 +26,8 @@ pub enum Mutation {
     CacheInline,
     OpenMigrates,
     PrepareMigrates,
+    ConflictSkipsReadBack,
+    RetrySkipsReadBack,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

@@ -164,9 +164,10 @@ const SCAN: Dialects = [
 ];
 const APPEND: Dialects = [
     "INSERT INTO nanocode_log (scope, seq, body) VALUES (?1, CAST(?2 AS INTEGER), ?3)",
-    "INSERT INTO nanocode_log (scope, seq, body) VALUES ($1::text, CAST($2::text AS BIGINT), $3::text)",
+    "INSERT INTO nanocode_log (scope, seq, body) VALUES ($1::text, CAST($2::text AS BIGINT), $3::text) ON CONFLICT (scope, seq) DO NOTHING RETURNING CAST(seq AS TEXT)",
 ];
-const APPEND_DATA: &str = "INSERT INTO nanocode_log (scope, seq, body, data) VALUES ($1::text, CAST($2::text AS BIGINT), $3::text, decode($4::text, 'base64'))";
+const APPEND_DATA: &str = "INSERT INTO nanocode_log (scope, seq, body, data) VALUES ($1::text, CAST($2::text AS BIGINT), $3::text, decode($4::text, 'base64')) ON CONFLICT (scope, seq) DO NOTHING RETURNING CAST(seq AS TEXT)";
+const INSERTED: &str = "SELECT CAST(concat('turn log ', $1::text, ' already holds a row at one of seqs ', $2::text) AS BIGINT) WHERE (SELECT count(*) FROM nanocode_log WHERE scope = $1::text AND seq = ANY(CAST($2::text AS BIGINT[])) AND xmin::text = (txid_current() % 4294967296)::text) <> CAST($3::text AS BIGINT)";
 const ARCHIVE: Dialects = [
     "UPDATE nanocode_log SET body = ?3 WHERE scope = ?1 AND seq = CAST(?2 AS INTEGER)",
     "UPDATE nanocode_log SET body = $3::text, data = NULL WHERE scope = $1::text AND seq = CAST($2::text AS BIGINT)",
@@ -249,10 +250,16 @@ impl<H: Sql + ?Sized> SqlLog<H> {
             .filter(|range| !range.is_empty())
             .map(|range| (range.start.to_string(), range.end.to_string()))
             .collect();
+        let appended = rows
+            .iter()
+            .map(|(seq, _)| seq.to_string())
+            .collect::<Vec<_>>();
         Stored {
             seqs,
             payloads,
             ranges,
+            appended: format!("{{{}}}", appended.join(",")),
+            count: rows.len().to_string(),
         }
     }
 
@@ -262,6 +269,7 @@ impl<H: Sql + ?Sized> SqlLog<H> {
         rows: &'a [(u64, String)],
         compaction: &Compaction<'a>,
         stored: &'a Stored<'a>,
+        riders: bool,
     ) -> Vec<SqlStatement<'a>> {
         let mut statements = rows
             .iter()
@@ -282,6 +290,16 @@ impl<H: Sql + ?Sized> SqlLog<H> {
                 }
             })
             .collect::<Vec<_>>();
+        let more = rows.len() > 1 || !compaction.archived.is_empty() || !stored.ranges.is_empty();
+        if self.binary() && (more || riders) {
+            statements.insert(
+                rows.len(),
+                SqlStatement {
+                    sql: INSERTED,
+                    params: vec![scope, &stored.appended, &stored.count],
+                },
+            );
+        }
         for (from, to) in &stored.ranges {
             statements.push(SqlStatement {
                 sql: self.pick(&DROP),
@@ -313,6 +331,63 @@ impl<H: Sql + ?Sized> SqlLog<H> {
         }
     }
 
+    async fn inserted(
+        &self,
+        scope: &str,
+        rows: &[(u64, String)],
+        results: &[Vec<Vec<Option<String>>>],
+    ) -> Result<(), StoreError> {
+        if !self.binary() {
+            return Ok(());
+        }
+        let Some(answers) = results.get(..rows.len()) else {
+            return Err(invalid(format!(
+                "{} appends answered {} results",
+                rows.len(),
+                results.len()
+            )));
+        };
+        if answers.iter().all(|answer| answer.len() == 1) {
+            return Ok(());
+        }
+        if crate::sim::mutated(crate::sim::Mutation::ConflictSkipsReadBack) {
+            return Ok(());
+        }
+        let (Some((first, _)), Some((last, _))) = (rows.first(), rows.last()) else {
+            return Ok(());
+        };
+        let found = self.scanned(scope, *first, last + 1).await?;
+        if crate::codec::same_rows(&found, rows) {
+            Ok(())
+        } else {
+            Err(StoreError::Fenced)
+        }
+    }
+
+    async fn scanned(
+        &self,
+        scope: &str,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<(u64, String)>, StoreError> {
+        let (from, to) = (from.to_string(), to.to_string());
+        let statements = [SqlStatement {
+            sql: self.pick(&SCAN),
+            params: vec![scope, &from, &to],
+        }];
+        // A read: on SQLite it shares the file with writers instead of taking the write lock.
+        let rows = self
+            .host
+            .run(SqlAccess::Read, "turn_log_scan", &statements)
+            .await?;
+        rows.into_iter()
+            .next()
+            .ok_or_else(|| invalid("scan returned no result"))?
+            .into_iter()
+            .map(row)
+            .collect()
+    }
+
     fn numbers(&self, extension: &Extension<'_>) -> Extending {
         let binary = self.binary().then(|| {
             let tail = crate::codec::tail(extension.tail)
@@ -332,6 +407,8 @@ struct Stored<'a> {
     seqs: Vec<String>,
     payloads: Vec<Option<(&'a str, String)>>,
     ranges: Vec<(String, String)>,
+    appended: String,
+    count: String,
 }
 
 struct Extending {
@@ -378,22 +455,7 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
     ) -> StoreFuture<'a, Result<Vec<(u64, String)>, StoreError>> {
         Box::pin(async move {
             self.prepare().await?;
-            let (from, to) = (from.to_string(), to.to_string());
-            let statements = [SqlStatement {
-                sql: self.pick(&SCAN),
-                params: vec![scope, &from, &to],
-            }];
-            // A read: on SQLite it shares the file with writers instead of taking the write lock.
-            let rows = self
-                .host
-                .run(SqlAccess::Read, "turn_log_scan", &statements)
-                .await?;
-            rows.into_iter()
-                .next()
-                .ok_or_else(|| invalid("scan returned no result"))?
-                .into_iter()
-                .map(row)
-                .collect()
+            self.scanned(scope, from, to).await
         })
     }
 
@@ -481,11 +543,12 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
         Box::pin(async move {
             self.prepare().await?;
             let stored = self.stored(rows, &compaction);
-            let statements = self.appending(scope, rows, &compaction, &stored);
-            self.host
+            let statements = self.appending(scope, rows, &compaction, &stored, false);
+            let results = self
+                .host
                 .transaction("turn_log_append", &statements)
-                .await
-                .map(drop)
+                .await?;
+            self.inserted(scope, rows, &results).await
         })
     }
 
@@ -523,12 +586,11 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
             match write {
                 Write::Append { rows, compaction } => {
                     let stored = self.stored(rows, &compaction);
-                    let mut statements = self.appending(scope, rows, &compaction, &stored);
+                    let riders = !rider.statements.is_empty();
+                    let mut statements = self.appending(scope, rows, &compaction, &stored, riders);
                     statements.extend(rider.statements.iter().cloned());
-                    self.host
-                        .transaction("turn_log_carry", &statements)
-                        .await
-                        .map(drop)
+                    let results = self.host.transaction("turn_log_carry", &statements).await?;
+                    self.inserted(scope, rows, &results).await
                 }
                 Write::Extend(extension) => {
                     let numbers = self.numbers(&extension);
