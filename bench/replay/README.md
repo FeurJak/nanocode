@@ -34,27 +34,27 @@ A task is a JSON file. Keep task files, prompts and results out of the repositor
 
 ```json
 {
-  "name": "api-1234",
-  "repo": "~/src/api",
+  "name": "example-task",
+  "repo": "~/src/example",
   "base": "<commit before the task>",
   "branch": "<the task's branch>",
-  "prompt": "output/replay/tasks/api-1234.prompt.txt",
+  "prompt": "output/replay/tasks/example-task.prompt.txt",
   "agent": "~/.forge/agents/forge-implementer.md",
   "forge_home": "~/.forge",
   "impl": true,
   "links": ["node_modules"],
-  "link_from": "~/src/api-impl",
+  "link_from": "~/src/example-impl",
   "forge_context": {"from": "<vault>/implementations/IMPL-NNN-.../snapshot",
-                    "files": ["plan.md", "tasks.md", "verification.md", "pr-checklist.md"], "decisions_lines": 13},
+                    "files": ["plan.md", "tasks.md", "verification.md", "pr-checklist.md"], "decisions_lines": <lines of the header>},
   "rewrite": [["<original slot path>", "{slot}"], ["<original Impl worktree>", "{impl}"],
               ["FORGE=<original>", "FORGE={forge}"], ["FORGE_VAULT=<original>", "FORGE_VAULT={vault}"]],
-  "check_env": {"PATH": "$HOME/.local/node24/bin:$PATH"},
-  "checks": [{"name": "specs", "command": "unshare -rn npx jest -c jest.unit.config.js src/thing"},
+  "check_env": {"PATH": "<toolchain>/bin:$PATH"},
+  "checks": [{"name": "specs", "command": "unshare -rn npx jest src/thing"},
              {"name": "tsc", "command": "npx tsc --noEmit -p .", "count": "error TS", "only_changed": true},
              {"name": "eslint", "command": "npx eslint --quiet {changed}"}],
   "reference": {"commit": "<the task's commit>",
                 "files": {"src/thing.acceptance.test.ts": "src/zz-reference.acceptance.test.ts"},
-                "command": "unshare -rn npx jest -c jest.unit.config.js src/zz-reference.acceptance.test.ts"},
+                "command": "unshare -rn npx jest src/zz-reference.acceptance.test.ts"},
   "footprint": ["src/thing.ts", "src/thing.test.ts", "src/thing.acceptance.test.ts"],
   "protected": []
 }
@@ -85,10 +85,10 @@ apart by the session id in the request's `metadata`.
 ```sh
 AWS_PROFILE=<profile> AWS_REGION=<region> python3 bench/replay/proxy.py 18601 &
 cargo build -p nanocode-cli --bin nanocode
-AWS_REGION=<region> python3 bench/replay/replay.py rounds output/replay/tasks/api-1234.json --rounds 2 \
+AWS_REGION=<region> python3 bench/replay/replay.py rounds output/replay/tasks/example-task.json --rounds 2 \
   --variant claude-sonnet-5-5:code-mode --variant claude-opus-5-5:code-mode \
-  --results output/replay/api-1234.jsonl
-python3 bench/replay/replay.py summary output/replay/api-1234.jsonl
+  --results output/replay/example-task.jsonl
+python3 bench/replay/replay.py summary output/replay/example-task.jsonl
 ```
 
 - **Rounds.** `rounds` runs one run of every `--variant` (`model:orchestration`) at the same time, so
