@@ -13,6 +13,7 @@ const SKIP_BEDROCK_AUTH: &str = "CLAUDE_CODE_SKIP_BEDROCK_AUTH";
 const DEFAULT_REGION: &str = "us-east-1";
 const MANTLE_SERVICE: &str = "bedrock-mantle";
 const MODEL_PREFIX: &str = "anthropic.";
+const HOUR_CACHE: &str = "ENABLE_PROMPT_CACHING_1H";
 const REGION_PREFIX: &str = "ANTHROPIC_BEDROCK_REGION_PREFIX";
 const REGION_PREFIXES: [&str; 6] = ["global", "us", "eu", "apac", "jp", "au"];
 const FAMILY_MODELS: [(&str, &[&str]); 3] = [
@@ -45,6 +46,13 @@ fn flag(name: &str) -> bool {
 
 pub fn enabled() -> bool {
     flag(USE_BEDROCK) || flag(USE_MANTLE)
+}
+
+pub fn hour_cache() -> nanocode::claude::HourCache {
+    match flag(HOUR_CACHE) {
+        true => nanocode::claude::HourCache::Always,
+        false => nanocode::claude::HourCache::AfterIdle,
+    }
 }
 
 fn default_model(model: &str) -> Result<String, Error> {
