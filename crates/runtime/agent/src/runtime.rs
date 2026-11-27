@@ -511,6 +511,7 @@ fn assemble(
     if let Some(store) = &durability {
         router = router.recovery_store(store.clone());
     }
+    router = router.workspace(workspace.clone());
     for (family, recipe) in &recipes {
         let recipe = Arc::clone(recipe);
         router = router.register(family.clone(), move |request: HarnessRequest| {
@@ -658,6 +659,10 @@ fn backend_recipe(
                 .find(|(model, _)| *model == spec.model)
                 .map(|(_, instructions)| Arc::clone(instructions));
         }
+        let workspace = spec
+            .options
+            .selected_workdir()
+            .map_or_else(|| workspace.clone(), Arc::from);
         backend.build(RuntimeRequest {
             request: HarnessRequest {
                 model: spec.model,
@@ -823,6 +828,13 @@ fn persistent_recipe(
                         if spec.options.provider.is_none() {
                             spec.options.provider.clone_from(&record.provider);
                         }
+                        if spec.parent.is_some()
+                            && spec.options.selected_workdir().is_none()
+                            && let Some(recorded) = &record.workspace
+                            && recorded.as_path() != &*workspace
+                        {
+                            spec.options = spec.options.clone().workdir(recorded);
+                        }
                         spec.durable_state = Some(
                             store
                                 .prepare_resume(checkpoint.session_id())
@@ -867,7 +879,11 @@ fn persistent_recipe(
                 let mut record = crate::durability::SessionRecord::root(
                     id,
                     spec.model.clone(),
-                    Some(workspace.to_path_buf()),
+                    Some(
+                        spec.options
+                            .selected_workdir()
+                            .map_or_else(|| workspace.to_path_buf(), Path::to_path_buf),
+                    ),
                 )
                 .with_lineage(lineage);
                 record.provider.clone_from(&spec.options.provider);

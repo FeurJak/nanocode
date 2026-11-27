@@ -336,6 +336,7 @@ pub struct SpawnOptions {
     pub stateless_http: bool,
     #[doc(hidden)]
     pub session_id: Option<String>,
+    workdir: Option<std::path::PathBuf>,
 }
 
 impl SpawnOptions {
@@ -350,7 +351,19 @@ impl SpawnOptions {
             provider: None,
             stateless_http: false,
             session_id: None,
+            workdir: None,
         }
+    }
+
+    #[must_use]
+    pub fn workdir(mut self, workdir: impl Into<std::path::PathBuf>) -> Self {
+        self.workdir = Some(workdir.into());
+        self
+    }
+
+    #[must_use]
+    pub fn selected_workdir(&self) -> Option<&std::path::Path> {
+        self.workdir.as_deref()
     }
 
     #[must_use]

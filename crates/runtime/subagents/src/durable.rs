@@ -2343,6 +2343,8 @@ pub(super) struct Unstarted {
     provider: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     stateless_http: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workdir: Option<std::path::PathBuf>,
     #[serde(skip)]
     pub(super) restored: bool,
 }
@@ -2356,6 +2358,7 @@ impl Unstarted {
             reasoning_mode: options.selected_reasoning_mode(),
             provider: options.selected_provider().map(str::to_owned),
             stateless_http: options.stateless_http,
+            workdir: options.selected_workdir().map(std::path::Path::to_path_buf),
             restored: false,
         }
     }
@@ -2385,7 +2388,10 @@ impl Unstarted {
             options = options.provider(provider);
         }
         options.stateless_http = self.stateless_http;
-        options
+        match &self.workdir {
+            Some(workdir) => options.workdir(workdir),
+            None => options,
+        }
     }
 }
 

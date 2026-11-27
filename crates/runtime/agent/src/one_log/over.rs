@@ -479,6 +479,7 @@ impl HoldLedger for OneLogOver {
             session_id,
             tool,
             turn_id,
+            directory,
         } = call;
         Box::pin(async move {
             self.retried(move |bound| async move {
@@ -488,6 +489,7 @@ impl HoldLedger for OneLogOver {
                     session_id,
                     tool,
                     turn_id,
+                    directory,
                 };
                 bound.holds.hold_call(key, call, card).await
             })

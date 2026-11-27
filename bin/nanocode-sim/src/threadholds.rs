@@ -73,6 +73,7 @@ fn held(world: &World, sides: &Sides, key: &str, id: u64) -> (String, String) {
         session_id: THREAD,
         tool: "send",
         turn_id: None,
+        directory: None,
     };
     let ours = driven(world, "a hold", sides.one.ledger().hold(key, call(), &card));
     let theirs = driven(world, "a hold", sides.holds.hold(key, call(), &card));

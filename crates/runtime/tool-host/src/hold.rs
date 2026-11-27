@@ -14,6 +14,7 @@ pub struct HoldCall<'a> {
     pub session_id: &'a str,
     pub tool: &'a str,
     pub turn_id: Option<&'a str>,
+    pub directory: Option<&'a str>,
 }
 
 pub enum Judgment {
@@ -82,12 +83,30 @@ pub trait HoldLedger: Send + Sync + 'static {
 pub struct Holds {
     ledger: Arc<dyn HoldLedger>,
     policy: Arc<dyn HoldPolicy>,
+    directory: Option<Arc<str>>,
 }
 
 impl Holds {
     #[must_use]
     pub fn new(policy: Arc<dyn HoldPolicy>, ledger: Arc<dyn HoldLedger>) -> Self {
-        Self { ledger, policy }
+        Self {
+            ledger,
+            policy,
+            directory: None,
+        }
+    }
+
+    #[must_use]
+    pub fn in_directory(&self, directory: impl Into<Arc<str>>) -> Self {
+        Self {
+            directory: Some(directory.into()),
+            ..self.clone()
+        }
+    }
+
+    #[must_use]
+    pub fn directory(&self) -> Option<&str> {
+        self.directory.as_deref()
     }
 
     #[must_use]
@@ -177,6 +196,7 @@ impl Holds {
             session_id: context.session_id(),
             tool: name,
             turn_id: context.turn_id(),
+            directory: self.directory.as_deref(),
         };
         match self.policy.judge(call()).await {
             Judgment::Run => Admission::Run,

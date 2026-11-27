@@ -17,8 +17,10 @@ mod embed {
         fn judge<'a>(&'a self, call: HoldCall<'a>) -> HostFuture<'a, Judgment> {
             Box::pin(async move {
                 eprintln!(
-                    "hold policy: session {} tool {}",
-                    call.session_id, call.tool
+                    "hold policy: session {} tool {} in {}",
+                    call.session_id,
+                    call.tool,
+                    call.directory.unwrap_or("-")
                 );
                 match call.tool == "Bash" && call.input.get().contains("rm -rf") {
                     true => Judgment::Refuse {
@@ -71,7 +73,10 @@ mod embed {
         }
     }
 
-    pub struct ByRole;
+    pub struct ByRole {
+        pub workspace: std::path::PathBuf,
+        pub spawned: std::sync::atomic::AtomicU32,
+    }
 
     impl SpawnRouter for ByRole {
         fn resolve<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
@@ -95,13 +100,26 @@ mod embed {
                 _ => nanocode::ClaudeModel::Sonnet55,
             };
             let reference = format!("role {role}");
+            let options = options
+                .harness_model(nanocode::ModelSelection::Claude(model))
+                .thinking(Thinking::Low);
+            let workdir = (role == "implement").then(|| {
+                let count = self
+                    .spawned
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.workspace
+                    .join("children")
+                    .join(format!("implement-{count}"))
+            });
             Box::pin(async move {
-                Ok(SpawnRoute {
-                    options: options
-                        .harness_model(nanocode::ModelSelection::Claude(model))
-                        .thinking(Thinking::Low),
-                    reference,
-                })
+                let options = match workdir {
+                    Some(workdir) => {
+                        std::fs::create_dir_all(&workdir)?;
+                        options.workdir(workdir)
+                    }
+                    None => options,
+                };
+                Ok(SpawnRoute { options, reference })
             })
         }
 
@@ -137,7 +155,7 @@ async fn run() -> Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 || args.first().is_some_and(|arg| arg == "--help") {
-        return Err("usage: bedrock_embed STORE_DIR WORKSPACE PROMPT...\nClaude on Amazon Bedrock with CLAUDE_CODE_USE_BEDROCK's variables (AWS_PROFILE, AWS_REGION, ...): a hold policy on every agent's tool calls, a spawn router by role, budgets on.".into());
+        return Err("usage: bedrock_embed STORE_DIR WORKSPACE [--resume SESSION] PROMPT...\nClaude on Amazon Bedrock with CLAUDE_CODE_USE_BEDROCK's variables (AWS_PROFILE, AWS_REGION, ...): a hold policy on every agent's tool calls, a spawn router by role, budgets on.".into());
     }
     let client = ClaudeClient::bedrock(ClaudeClient::http_client(), Bedrock::from_env()?);
     let store = nanocode::session_store(JsonlStore::open_async(&args[0]).await?)?;
@@ -146,22 +164,34 @@ async fn run() -> Result<()> {
         .durability(store)
         .workspace(&args[1])
         .holds(embed::holds())
-        .spawn_router(Arc::new(embed::ByRole))
+        .spawn_router(Arc::new(embed::ByRole {
+            workspace: std::path::PathBuf::from(&args[1]),
+            spawned: std::sync::atomic::AtomicU32::new(0),
+        }))
         .spawn_policy(embed::policy())
         .without_cua()
         .runner_management(false)
         .build_async()
         .await?;
     let outcome: Result<()> = async {
-        let (agent, _events) = runtime
-            .spawn()
-            .backend::<nanocode::Claude>()
-            .model(nanocode::ClaudeModel::Opus55)
-            .build()
-            .await?;
+        let (resume, prompt) = match args.get(2).map(String::as_str) {
+            Some("--resume") if args.len() > 4 => (Some(&args[3]), &args[4..]),
+            _ => (None, &args[2..]),
+        };
+        let (agent, _events) = match resume {
+            Some(session) => runtime.open_session(session).await?,
+            None => {
+                runtime
+                    .spawn()
+                    .backend::<nanocode::Claude>()
+                    .model(nanocode::ClaudeModel::Opus55)
+                    .build()
+                    .await?
+            }
+        };
         eprintln!("session {}", agent.session_id());
         let result = agent
-            .prompt(PromptRequest::new(args[2..].join(" ")))
+            .prompt(PromptRequest::new(prompt.join(" ")))
             .await?
             .result()
             .await?;

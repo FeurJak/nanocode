@@ -27,10 +27,16 @@ pub struct HarnessBuilder<D = NoFormats> {
     thinking_defaults: HashMap<HarnessFamily, Thinking>,
 
     recovery_store: Option<crate::durability::SessionStore>,
+    workspace: Option<Arc<std::path::Path>>,
     remote: Option<Arc<dyn AgentFactory>>,
 }
 
 impl<D: CheckpointFormats> HarnessBuilder<D> {
+    pub(crate) fn workspace(mut self, workspace: Arc<std::path::Path>) -> Self {
+        self.workspace = Some(workspace);
+        self
+    }
+
     pub(crate) fn remote_children(mut self, remote: Arc<dyn AgentFactory>) -> Self {
         self.remote = Some(remote);
         self
@@ -74,6 +80,7 @@ impl<D: CheckpointFormats> HarnessBuilder<D> {
                 thinking_defaults: self.thinking_defaults,
 
                 recovery_store: self.recovery_store,
+                workspace: self.workspace,
                 remote: self.remote,
                 children: None,
             }),
@@ -92,6 +99,7 @@ impl<D: CheckpointFormats> HarnessBuilder<D> {
                 thinking_defaults: self.thinking_defaults,
 
                 recovery_store: self.recovery_store,
+                workspace: self.workspace,
                 remote: self.remote,
                 children: Some(children),
             }),
@@ -221,11 +229,28 @@ struct Router {
     thinking_defaults: HashMap<HarnessFamily, Thinking>,
 
     recovery_store: Option<crate::durability::SessionStore>,
+    workspace: Option<Arc<std::path::Path>>,
     remote: Option<Arc<dyn AgentFactory>>,
 
     children: Option<std::sync::Weak<crate::runtime::Ownership>>,
 }
 impl Router {
+    async fn own_workdir(
+        &self,
+        checkpoint: &SessionCheckpoint,
+    ) -> nanocode_agent_core::Result<bool> {
+        let (Some(store), Some(workspace)) = (&self.recovery_store, &self.workspace) else {
+            return Ok(false);
+        };
+        let record = store
+            .record(checkpoint.session_id())
+            .await
+            .map_err(catalog_error)?;
+        Ok(record
+            .and_then(|record| record.workspace)
+            .is_some_and(|recorded| recorded.as_path() != &**workspace))
+    }
+
     fn default_model(&self, family: &HarnessFamily) -> ModelSelection {
         self.defaults
             .get(family)
@@ -380,6 +405,7 @@ impl AgentFactory for RoutedFactory {
                     parent.ensure_available().await?;
                     options.validate_harness()?;
                     if options.selected_provider().is_none()
+                        && options.selected_workdir().is_none()
                         && resolve_family(&parent, &options) == parent.harness_family()
                     {
                         if let Some(remote) = &inner.remote {
@@ -506,7 +532,10 @@ impl AgentFactory for RoutedFactory {
                             .map_err(|error| NanocodeError::InvalidCheckpoint(error.to_string()))?,
                         None => (checkpoint, None),
                     };
-                    if provider.is_none() && checkpoint.family() == parent.harness_family() {
+                    if provider.is_none()
+                        && checkpoint.family() == parent.harness_family()
+                        && !inner.own_workdir(&checkpoint).await?
+                    {
                         return parent
                             .restore_native_runtime(checkpoint, host_context)
                             .await;

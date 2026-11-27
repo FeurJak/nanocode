@@ -256,7 +256,10 @@ impl RuntimeBackend for ClaudeHarness {
                     .map_err(|error| NanocodeError::InvalidRequest(error.to_string()))?;
                 let prepare = |tools: nanocode_tool_host::Tools| {
                     let tools = match &holds {
-                        Some(holds) => tools.into_builder().holds(holds.clone()).build()?,
+                        Some(holds) => tools
+                            .into_builder()
+                            .holds(holds.in_directory(root.to_string_lossy()))
+                            .build()?,
                         None => tools,
                     };
                     services
