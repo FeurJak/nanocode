@@ -88,6 +88,42 @@
 | `nanocode-observability` | Tracing and OpenTelemetry setup |
 | `nanocode-telemetry` | GenAI span export, held request traces, and events as log lines and counters, for a server host's own subscriber |
 
+## Embedding
+
+A host builds agents through the `nanocode` facade alone. `crates/nanocode/examples/bedrock_embed.rs` runs every step below against Amazon Bedrock.
+
+| Need | API |
+| --- | --- |
+| Bash in the host process | `nanocode::shell::serve_if_requested()` first in `main`, then `nanocode::shell::install()` (unix) |
+| Claude on Bedrock | `ClaudeClient::bedrock(ClaudeClient::http_client(), Bedrock::from_env()?)`, or `Bedrock::new(BedrockConfig::from_lookup(..)?, lookup, sender)` |
+| The runtime | `Nanocode::builder().claude(ClaudeHarness::new(client)).durability(store).workspace(dir)` |
+| Tool call policy | `.holds(Holds::new(policy, ledger))` wraps the tools of every agent, subagents included |
+| Spawn routing | `.spawn_router(router)` and `.spawn_policy(policy)` |
+| A child's directory | `SpawnOptions::workdir(dir)` on the route |
+| Cost | `TurnResult::usage()` for the root, `runtime.subagents()?.tree_cost(root)` for the children |
+| Resume | `runtime.open_session(id)` reopens the root, and its subagents restore with it |
+
+`nanocode::claude::bedrock` reads Claude Code's variables: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_MANTLE`, `AWS_REGION`, `AWS_PROFILE`, `AWS_BEARER_TOKEN_BEDROCK`, `ANTHROPIC_BEDROCK_REGION_PREFIX`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`, `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_BEDROCK_MANTLE_BASE_URL` and `ENABLE_PROMPT_CACHING_1H`. Model names map to `global.anthropic.<model>` on bedrock-runtime, or to `anthropic.<model>` on bedrock-mantle with `CLAUDE_CODE_USE_MANTLE`.
+
+### Spawning
+
+The `spawn_agent` tool takes `role`, `task`, `model`, `thinking`, `output_contract` and, with `SpawnPolicy::budgets`, `budget_usd`. A `SpawnRouter` returns a `SpawnRoute` for each spawn. The route must select a model and thinking, and it may set a working directory. `bind` reports the child session the route produced.
+
+A child with a workdir runs its Bash, Read, Write and Edit tools there, and its system prompt names it. The session record keeps the directory, so a resumed child reopens in it. Other children share the runtime workspace.
+
+### Holds
+
+`HoldPolicy::judge` receives a `HoldCall`: session, turn, call id, tool name, input and `directory`, the working directory of the calling agent. It answers `Run`, `Refuse` or `Hold`. A `HoldLedger` records holds and their answers. `nanocode::turnlog::OneLog::ledger()` provides one, and a host that never holds can answer `running` with `None`.
+
+### Budgets
+
+The Claude driver prices each model call in `model.call.completed`. The registry adds that price to the child and to its ancestors' subtrees. Once a subtree reaches a budget, the spending child stops with a `budget_exceeded` output. Calls in flight at that moment can pass the budget, and backends without a per-call price are not stopped. `SubagentControl::set_budget` changes a budget and clears the stop.
+
+### Notes
+
+- Take `runtime.take_subagent_updates()` before the first spawn. Each agent build drops an unclaimed receiver.
+- `TreeCost` covers subagents only. The root's spend is the sum of its turns' usage, which the host keeps.
+
 ## Durability
 
 Each backend implements `DurableAgentExt`, `DurableBackendRegistration` and a `CheckpointFormat` in its own `durability` module, and the composed runtime registers them on the store it is given. Native hosts default to `nanocode-store-jsonl` in the Nanocode home. `SqlStore`, `RowStore` and `SessionLog` run over any `Sql` host: `nanocode-store-sql` natively, a host's own SQL (Durable Objects, D1, libSQL, sqlite-wasm) on WASM. Memory is the WASM default and is not durable.
