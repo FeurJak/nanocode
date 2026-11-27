@@ -573,6 +573,7 @@ dependencies = [
  "nanocode",
  "nanocode-agent-host",
  "nanocode-arguments",
+ "nanocode-aws",
  "nanocode-compression",
  "nanocode-computer-repl",
  "nanocode-executor",

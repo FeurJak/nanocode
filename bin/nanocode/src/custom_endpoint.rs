@@ -65,6 +65,20 @@ fn anthropic(clients: ModelClients) -> Result<ModelClients, String> {
     if clients.supplies_claude() {
         return Ok(clients);
     }
+    if crate::bedrock_claude::enabled() {
+        let bedrock = crate::bedrock_claude::BedrockClaude::from_env()?;
+        let url = crate::bedrock_claude::BedrockClaude::messages_url();
+        let clients = clients.unlisted_models(nanocode::HarnessFamily::Claude);
+        let http = nanocode::claude::ClaudeClient::http_client();
+        return Ok(clients.claude(move || {
+            nanocode::claude::ClaudeClient::with_auth_headers(
+                http.clone(),
+                url.clone(),
+                nanocode_http::types::header::HeaderMap::new(),
+            )
+            .with_http_layer(bedrock.clone())
+        }));
+    }
     if crate::vertex_claude::enabled() {
         let vertex = crate::vertex_claude::VertexClaude::from_env()?;
         let url = vertex.messages_url();

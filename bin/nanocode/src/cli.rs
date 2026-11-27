@@ -133,7 +133,7 @@ impl HarnessArg {
     }
     const CHOICES: [Choice; 3] = [
         Choice::new("codex").help("OpenAI Codex models (ChatGPT login)"),
-        Choice::new("claude").help("Anthropic Claude models (Claude Code login)"),
+        Choice::new("claude").help("Anthropic Claude models (Claude Code login, CLAUDE_CODE_USE_VERTEX=1 for Vertex AI, or CLAUDE_CODE_USE_BEDROCK=1 for Amazon Bedrock)"),
         Choice::new("antigravity").help(
             "Google Antigravity's engine on Gemini models (nanocode login google for a subscription, GEMINI_API_KEY, AGY_LLM_GATEWAY_URL, or Vertex AI after nanocode setup google)",
         ),
