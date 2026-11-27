@@ -102,6 +102,9 @@ pub enum AgentEventKind {
     #[serde(rename = "model.attempt.retrying")]
     ModelAttemptRetrying,
 
+    #[serde(rename = "model.fallback")]
+    ModelFallback,
+
     #[serde(rename = "model.connection.started")]
     ModelConnectionStarted,
 
@@ -214,6 +217,7 @@ impl AgentEvent {
             AgentEventKind::ModelAttemptStarted
             | AgentEventKind::ModelAttemptFailed
             | AgentEventKind::ModelAttemptRetrying
+            | AgentEventKind::ModelFallback
             | AgentEventKind::ModelConnectionStarted
             | AgentEventKind::ModelConnectionCompleted
             | AgentEventKind::ModelConnectionFailed => {

@@ -2118,6 +2118,7 @@ pub struct ClaudeClient {
 
     subscription_cache_tail: bool,
     hour_cache: HourCache,
+    refusal_fallbacks: Option<Arc<[String]>>,
     gzip_rejected: Arc<std::sync::atomic::AtomicBool>,
     http_layer: Option<Arc<dyn transport::Layer>>,
     root: Option<Arc<Root>>,
@@ -2175,6 +2176,7 @@ impl ClaudeClient {
             subscription_session: nanocode_platform::uuid_v4().to_string(),
             subscription_cache_tail: true,
             hour_cache: HourCache::Never,
+            refusal_fallbacks: None,
             gzip_rejected: Arc::default(),
             http_layer: None,
             root: None,
@@ -2230,6 +2232,7 @@ impl ClaudeClient {
             subscription_session: nanocode_platform::uuid_v4().to_string(),
             subscription_cache_tail: true,
             hour_cache: HourCache::Never,
+            refusal_fallbacks: None,
             gzip_rejected: Arc::default(),
             http_layer: None,
             root: None,
@@ -2251,6 +2254,7 @@ impl ClaudeClient {
             subscription_session: nanocode_platform::uuid_v4().to_string(),
             subscription_cache_tail: true,
             hour_cache: HourCache::Never,
+            refusal_fallbacks: None,
             gzip_rejected: Arc::default(),
             http_layer: None,
             root: None,
@@ -2393,6 +2397,19 @@ impl ClaudeClient {
     pub const fn with_hour_cache(mut self, hour_cache: HourCache) -> Self {
         self.hour_cache = hour_cache;
         self
+    }
+
+    #[must_use]
+    pub fn with_refusal_fallbacks(mut self, models: impl IntoIterator<Item = String>) -> Self {
+        self.refusal_fallbacks = Some(models.into_iter().collect());
+        self
+    }
+
+    #[must_use]
+    pub fn serves_refusal_fallback(&self, model: &str) -> bool {
+        self.refusal_fallbacks
+            .as_ref()
+            .is_none_or(|models| models.iter().any(|served| served == model))
     }
 
     #[must_use]

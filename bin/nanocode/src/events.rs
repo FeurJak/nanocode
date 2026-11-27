@@ -93,6 +93,18 @@ pub struct Usage {
     pub turns: u64,
 }
 
+pub fn fallback_notice(payload: &Value) -> String {
+    let text = |name: &str| payload[name].as_str().unwrap_or_default().to_owned();
+    match payload["outcome"].as_str() {
+        Some("returned") => format!(
+            "back on {} after {} answered the refused request",
+            text("model"),
+            text("fallback")
+        ),
+        _ => text("reason"),
+    }
+}
+
 pub fn retry_notice(payload: &Value) -> String {
     let attempt = payload["attempt"].as_u64().unwrap_or_default();
     let delay = Duration::from_nanos(payload["delay_ns"].as_u64().unwrap_or_default());
@@ -440,6 +452,13 @@ impl EventMapper {
                 transcript.push(CellKind::Notice(
                     NoticeLevel::Warning,
                     retry_notice(&payload),
+                ));
+                true
+            }
+            AgentEventKind::ModelFallback => {
+                transcript.push(CellKind::Notice(
+                    NoticeLevel::Warning,
+                    fallback_notice(&payload),
                 ));
                 true
             }

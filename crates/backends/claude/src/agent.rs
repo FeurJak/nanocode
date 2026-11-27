@@ -5324,6 +5324,49 @@ impl State {
             .then_some(crate::CacheTtl::OneHour)
     }
 
+    fn refusal_fallback_served(
+        &self,
+        events: &AgentEventPublisher,
+        index: u32,
+        model: &str,
+        fallback: &str,
+        details: Option<&Value>,
+    ) -> bool {
+        let served = self.client.serves_refusal_fallback(fallback);
+        let category = details
+            .and_then(|details| details.get("category"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let (outcome, reason) = match served {
+            true => (
+                "switched",
+                format!(
+                    "Claude's safety classifier refused the request ({category}); sending it again to {fallback}, which keeps its own prompt cache, so this request writes its prefix again"
+                ),
+            ),
+            false => (
+                "unavailable",
+                format!(
+                    "Claude's safety classifier refused the request ({category}); its fallback {fallback} is not served here, so the request stays on {model}"
+                ),
+            ),
+        };
+        self.emit(
+            events,
+            AgentEventKind::ModelFallback,
+            json!({
+                "model_call_index": index.saturating_add(1),
+                "outcome": outcome,
+                "model": model,
+                "fallback": fallback,
+                "category": category,
+                "returns_to_model": self.refusal_fallback_scope == RefusalFallbackScope::ReturnOnce,
+                "reason": reason,
+            }),
+        );
+        served
+    }
+
     fn restored_outlived_cache(&self) -> bool {
         let requested = self.requested_at.load(Ordering::SeqCst);
         requested != 0

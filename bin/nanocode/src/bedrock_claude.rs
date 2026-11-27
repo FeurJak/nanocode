@@ -16,6 +16,7 @@ const MODEL_PREFIX: &str = "anthropic.";
 const HOUR_CACHE: &str = "ENABLE_PROMPT_CACHING_1H";
 const REGION_PREFIX: &str = "ANTHROPIC_BEDROCK_REGION_PREFIX";
 const REGION_PREFIXES: [&str; 6] = ["global", "us", "eu", "apac", "jp", "au"];
+const RUNTIME_FALLBACKS: [&str; 3] = ["claude-opus-5", "claude-opus-4-8", "claude-sonnet-5"];
 const FAMILY_MODELS: [(&str, &[&str]); 3] = [
     ("opus", &["ANTHROPIC_DEFAULT_OPUS_MODEL"]),
     ("sonnet", &["ANTHROPIC_DEFAULT_SONNET_MODEL"]),
@@ -46,6 +47,22 @@ fn flag(name: &str) -> bool {
 
 pub fn enabled() -> bool {
     flag(USE_BEDROCK) || flag(USE_MANTLE)
+}
+
+pub fn refusal_fallbacks() -> Vec<String> {
+    RUNTIME_FALLBACKS
+        .iter()
+        .filter(|model| {
+            let family = FAMILY_MODELS
+                .iter()
+                .find(|(family, _)| model.contains(family))
+                .is_some_and(|(_, names)| names.iter().any(|name| env(name).is_some()));
+            !family
+                && default_model(model)
+                    .is_ok_and(|id| id == format!("{}.{MODEL_PREFIX}{model}", REGION_PREFIXES[0]))
+        })
+        .map(|model| (*model).to_owned())
+        .collect()
 }
 
 pub fn hour_cache() -> nanocode::claude::HourCache {

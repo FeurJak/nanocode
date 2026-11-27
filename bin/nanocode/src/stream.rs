@@ -100,8 +100,16 @@ impl<O: Write> Printer<O> {
                 | AgentEventKind::ToolCall
                 | AgentEventKind::RunError
                 | AgentEventKind::ModelAttemptRetrying
+                | AgentEventKind::ModelFallback
         ) {
             return Ok(());
+        }
+        if event.kind == AgentEventKind::ModelFallback {
+            let payload = serde_json::from_str::<Value>(event.payload.get()).unwrap_or_default();
+            return self.notice(&format!(
+                "nanocode: {}",
+                crate::events::fallback_notice(&payload)
+            ));
         }
         if event.kind == AgentEventKind::ModelAttemptRetrying {
             let payload = serde_json::from_str::<Value>(event.payload.get()).unwrap_or_default();

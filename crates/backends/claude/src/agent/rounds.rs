@@ -668,11 +668,20 @@ pub(super) fn run_rounds<'a>(
                 cursor.model_step_offset = 1;
                 cursor.model_receipt_start = Some(index.saturating_add(2));
             }
-            if response.stop_reason == Some(StopReason::Refusal)
-                && state.refusal_fallback_scope != RefusalFallbackScope::Off
-                && let Some(fallback) =
-                    refusal_fallback(&cursor.template.model, response.stop_details.as_ref())
-            {
+            let fallback = (response.stop_reason == Some(StopReason::Refusal)
+                && state.refusal_fallback_scope != RefusalFallbackScope::Off)
+                .then(|| refusal_fallback(&cursor.template.model, response.stop_details.as_ref()))
+                .flatten()
+                .filter(|fallback| {
+                    state.refusal_fallback_served(
+                        &request.events,
+                        index,
+                        &cursor.template.model,
+                        fallback,
+                        response.stop_details.as_ref(),
+                    )
+                });
+            if let Some(fallback) = fallback {
                 if cancel.is_cancelled() {
                     return Err(NanocodeError::TurnCancelled);
                 }
@@ -774,6 +783,17 @@ pub(super) fn run_rounds<'a>(
                 continue;
             }
             if let Some(main) = conversation.fallback_latch.served() {
+                state.emit(
+                    &request.events,
+                    AgentEventKind::ModelFallback,
+                    json!({
+                        "model_call_index": index.saturating_add(1),
+                        "outcome": "returned",
+                        "model": &main,
+                        "fallback": &cursor.template.model,
+                        "reason": "the fallback model served the refused request",
+                    }),
+                );
                 nanocode_trace::info!(
                     target: "nanocode_claude",
                     session_id = %state.session_id,
