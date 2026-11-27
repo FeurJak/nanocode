@@ -1,7 +1,7 @@
 use crate::encode::base64_decode_sha256;
 use crate::error::{Error, Operation};
 use crate::request::ByteRange;
-use crate::sign::SHA256_BYTES;
+use nanocode_aws::SHA256_BYTES;
 
 const STATUS_OK: u16 = 200;
 const STATUS_NO_CONTENT: u16 = 204;

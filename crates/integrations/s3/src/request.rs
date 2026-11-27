@@ -2,8 +2,9 @@ use nanocode_http::Method;
 
 use crate::encode::{base64, hex, uri_encode, utc};
 use crate::error::{ConfigError, Error};
-use crate::sign::{ALGORITHM, Canonical, SHA256_BYTES, scope, signature, signed_header_names};
+use nanocode_aws::{ALGORITHM, Canonical, SHA256_BYTES, Scope, signature, signed_header_names};
 
+const SERVICE: &str = "s3";
 pub const KEY_BYTES_MAX: usize = 1_024;
 pub const PRESIGN_EXPIRES_SECONDS_MAX: u64 = 604_800;
 const BUCKET_BYTES_MIN: usize = 3;
@@ -267,6 +268,13 @@ impl Config {
         Ok(Target { host, path })
     }
 
+    fn scope(&self) -> Scope<'_> {
+        Scope {
+            region: &self.region,
+            service: SERVICE,
+        }
+    }
+
     fn url(&self, target: &Target) -> String {
         format!("{}{}{}", self.scheme.prefix(), target.host, target.path)
     }
@@ -292,11 +300,11 @@ impl Config {
             headers: &headers,
             payload_sha256: &payload_sha256,
         };
-        let signature = signature(&self.secret_access_key, &self.region, &time, &canonical);
+        let signature = signature(&self.secret_access_key, self.scope(), &time, &canonical);
         let authorization = format!(
             "{ALGORITHM} Credential={}/{}, SignedHeaders={}, Signature={signature}",
             self.access_key_id,
-            scope(&time, &self.region),
+            self.scope().text(&time),
             signed_header_names(&headers)
         );
         headers.push(("authorization", authorization));
@@ -390,7 +398,7 @@ impl Config {
         headers.push(("host", target.host.clone()));
         headers.sort_by(|left, right| left.0.cmp(right.0));
         let mut query = String::new();
-        let credential = format!("{}/{}", self.access_key_id, scope(&time, &self.region));
+        let credential = format!("{}/{}", self.access_key_id, self.scope().text(&time));
         let pairs = [
             ("X-Amz-Algorithm", ALGORITHM.to_owned()),
             ("X-Amz-Credential", credential),
@@ -414,7 +422,7 @@ impl Config {
             headers: &headers,
             payload_sha256: UNSIGNED_PAYLOAD,
         };
-        let signature = signature(&self.secret_access_key, &self.region, &time, &canonical);
+        let signature = signature(&self.secret_access_key, self.scope(), &time, &canonical);
         let url = format!("{}?{query}&X-Amz-Signature={signature}", self.url(&target));
         headers.retain(|(name, _)| *name != "host");
         Ok(Presigned {

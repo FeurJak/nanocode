@@ -3,7 +3,7 @@ use crate::request::{ByteRange, Config, Prepared, Presigned};
 use crate::response::{
     Head, Put, delete_status, error_code, get_expect, head_response, put_status, wants_error_code,
 };
-use crate::sign::SHA256_BYTES;
+use nanocode_aws::SHA256_BYTES;
 
 const MILLIS_PER_SECOND: u64 = 1_000;
 

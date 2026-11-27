@@ -12,6 +12,7 @@ repository.workspace = true
 description = "S3 client for immutable content-addressed blobs: SigV4 signing, put-if-absent, ranged get, head, delete and presigned URLs"
 
 [dependencies]
+nanocode-aws.workspace = true
 nanocode-digest.workspace = true
 nanocode-http.workspace = true
 

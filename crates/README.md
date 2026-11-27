@@ -36,6 +36,7 @@
 | `nanocode-http`, `nanocode-zstd`, `nanocode-tls` | HTTP layer contracts and retry rules, a streaming zstd decoder, cached TLS configuration |
 | `nanocode-mcp`, `nanocode-mcp-http` | The MCP client: portable session engine; native Streamable HTTP and OAuth |
 | `nanocode-google-auth` | Google Cloud access tokens from Application Default Credentials: user, service account, impersonated and workload identity credentials, the metadata server, gcloud |
+| `nanocode-aws` | AWS request signing and credentials: SigV4 for any service, environment keys, Bedrock bearer tokens, CLI profiles (SSO, assumed roles), ECS container and EC2 instance credentials, the region from the environment or the profile |
 | `nanocode-schema` | JSON Schema validation for output contracts |
 | `nanocode-home` | The Nanocode home, AGENTS.md and skill discovery, shell detection, user services |
 | `nanocode-image`, `nanocode-audio` | Prompt image preparation; audio token accounting |
@@ -82,7 +83,7 @@
 | `nanocode-sandbox` | Commands confined to read-only paths, one writable directory and an allowlisting egress proxy, optionally each in its own cgroup v2 group with CPU, memory, pids and io limits |
 | `nanocode-store-jsonl` | The append-only JSONL store, one file per session: the CLI's default |
 | `nanocode-store-sql` | `Sql` hosts for SQLite (`SqliteSql`), Postgres (`PostgresSql`) and a host's own sqlx pool or transaction (`SqlxSql`, `SqlxTransaction`, `commit_staged`) |
-| `nanocode-s3` | An S3 client for immutable content-addressed blobs: SigV4 signing, put-if-absent, ranged get, head, delete and presigned URLs |
+| `nanocode-s3` | An S3 client for immutable content-addressed blobs: SigV4 signing (through `nanocode-aws`), put-if-absent, ranged get, head, delete and presigned URLs |
 | `nanocode-kube` | A Kubernetes API client over `nanocode-http`: server-side apply, get, list and watch from a resourceVersion with bookmarks, 410 Gone surfaced for relists, bounded event buffers, a `Transport` trait a fake API server can stand in for, in-cluster ServiceAccount and kubeconfig (token or client certificate) credentials, and typed Deployment, DaemonSet, Service, ConfigMap, Lease and Node |
 | `nanocode-observability` | Tracing and OpenTelemetry setup |
 | `nanocode-telemetry` | GenAI span export, held request traces, and events as log lines and counters, for a server host's own subscriber |

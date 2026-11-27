@@ -295,6 +295,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-aws"
+version = "0.7.0"
+dependencies = [
+ "nanocode-bytes",
+ "nanocode-digest",
+ "nanocode-http",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-url",
+ "serde_json",
+]
+
+[[package]]
 name = "nanocode-backend-antigravity"
 version = "0.7.0"
 dependencies = [
@@ -1125,6 +1138,7 @@ dependencies = [
 name = "nanocode-s3"
 version = "0.7.0"
 dependencies = [
+ "nanocode-aws",
  "nanocode-digest",
  "nanocode-http",
  "nanocode-platform",
