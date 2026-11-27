@@ -13,6 +13,8 @@ const SKIP_BEDROCK_AUTH: &str = "CLAUDE_CODE_SKIP_BEDROCK_AUTH";
 const DEFAULT_REGION: &str = "us-east-1";
 const MANTLE_SERVICE: &str = "bedrock-mantle";
 const MODEL_PREFIX: &str = "anthropic.";
+const REGION_PREFIX: &str = "ANTHROPIC_BEDROCK_REGION_PREFIX";
+const REGION_PREFIXES: [&str; 6] = ["global", "us", "eu", "apac", "jp", "au"];
 const FAMILY_MODELS: [(&str, &[&str]); 3] = [
     ("opus", &["ANTHROPIC_DEFAULT_OPUS_MODEL"]),
     ("sonnet", &["ANTHROPIC_DEFAULT_SONNET_MODEL"]),
@@ -45,17 +47,37 @@ pub fn enabled() -> bool {
     flag(USE_BEDROCK) || flag(USE_MANTLE)
 }
 
-fn bedrock_model(model: &str) -> String {
+fn default_model(model: &str) -> Result<String, Error> {
+    if flag(USE_MANTLE) {
+        return Ok(format!("{MODEL_PREFIX}{model}"));
+    }
+    let prefix = match env(REGION_PREFIX) {
+        Some(prefix) if REGION_PREFIXES.contains(&prefix.as_str()) => prefix,
+        Some(prefix) => {
+            return Err(Error::new(format!(
+                "Claude on Amazon Bedrock: {REGION_PREFIX}={prefix} is not one of {}",
+                REGION_PREFIXES.join(", ")
+            )));
+        }
+        None => REGION_PREFIXES[0].to_owned(),
+    };
+    Ok(format!("{prefix}.{MODEL_PREFIX}{model}"))
+}
+
+fn bedrock_model(model: &str) -> Result<String, Error> {
     if model.starts_with("arn:") || model.contains(MODEL_PREFIX) {
-        return model.to_owned();
+        return Ok(model.to_owned());
     }
     let lower = model.to_ascii_lowercase();
-    FAMILY_MODELS
+    match FAMILY_MODELS
         .iter()
         .filter(|(family, _)| lower.contains(family))
         .flat_map(|(_, names)| names.iter())
         .find_map(|name| env(name))
-        .unwrap_or_else(|| format!("{MODEL_PREFIX}{model}"))
+    {
+        Some(configured) => Ok(configured),
+        None => default_model(model),
+    }
 }
 
 fn is_mantle_model(model: &str) -> bool {
@@ -183,7 +205,7 @@ impl BedrockClaude {
             .ok_or_else(|| {
                 Error::new("Claude on Amazon Bedrock: the Messages request names no model")
             })?;
-        let model = bedrock_model(requested);
+        let model = bedrock_model(requested)?;
         if !is_mantle_model(&model) {
             crate::bedrock_runtime::rewrite(request, body, &resolved.runtime, &model)?;
             return Ok(Route::Runtime);
