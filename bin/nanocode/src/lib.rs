@@ -6,6 +6,7 @@ mod app;
 mod arguments;
 mod attempts;
 mod bedrock_claude;
+mod bedrock_runtime;
 mod cells;
 mod cli;
 mod commands;

@@ -9,6 +9,7 @@ pub const USE_BEDROCK: &str = "CLAUDE_CODE_USE_BEDROCK";
 pub const USE_MANTLE: &str = "CLAUDE_CODE_USE_MANTLE";
 const MANTLE_BASE_URL: &str = "ANTHROPIC_BEDROCK_MANTLE_BASE_URL";
 const SKIP_MANTLE_AUTH: &str = "CLAUDE_CODE_SKIP_MANTLE_AUTH";
+const SKIP_BEDROCK_AUTH: &str = "CLAUDE_CODE_SKIP_BEDROCK_AUTH";
 const DEFAULT_REGION: &str = "us-east-1";
 const MANTLE_SERVICE: &str = "bedrock-mantle";
 const MODEL_PREFIX: &str = "anthropic.";
@@ -61,11 +62,34 @@ fn is_mantle_model(model: &str) -> bool {
     model.starts_with(MODEL_PREFIX) && !model.contains(':')
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Mantle,
+    Runtime,
+}
+
+impl Route {
+    const fn service(self) -> &'static str {
+        match self {
+            Self::Mantle => MANTLE_SERVICE,
+            Self::Runtime => crate::bedrock_runtime::SERVICE,
+        }
+    }
+
+    fn skips_auth(self) -> bool {
+        match self {
+            Self::Mantle => flag(SKIP_MANTLE_AUTH),
+            Self::Runtime => flag(SKIP_BEDROCK_AUTH),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Resolved {
-    auth: Option<AwsAuth>,
+    auth: Result<AwsAuth, String>,
     region: String,
     mantle: String,
+    runtime: String,
 }
 
 struct Shared {
@@ -77,6 +101,18 @@ struct Shared {
 #[derive(Clone)]
 pub struct BedrockClaude {
     shared: Arc<Shared>,
+}
+
+fn host_region(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let host = rest.split(['/', ':', '?']).next()?;
+    let mut labels = host.split('.');
+    let service = labels.next()?;
+    let region = labels.next()?;
+    let domain = labels.collect::<Vec<_>>().join(".");
+    let known = matches!(service, "bedrock-mantle" | "bedrock-runtime")
+        && matches!(domain.as_str(), "api.aws" | "amazonaws.com");
+    known.then(|| region.to_owned())
 }
 
 fn mantle_base(region: &str) -> String {
@@ -119,19 +155,13 @@ impl BedrockClaude {
                 let region = nanocode_aws::region(&lookup)
                     .await
                     .unwrap_or_else(|| DEFAULT_REGION.to_owned());
-                let auth = match flag(SKIP_MANTLE_AUTH) {
-                    true => None,
-                    false => Some(
-                        AwsAuth::discover(&lookup, Arc::clone(&shared.sender))
-                            .await
-                            .map_err(|error| {
-                                format!("Claude on Amazon Bedrock ({USE_BEDROCK}): {error}")
-                            })?,
-                    ),
-                };
+                let auth = AwsAuth::discover(&lookup, Arc::clone(&shared.sender))
+                    .await
+                    .map_err(|error| format!("Claude on Amazon Bedrock ({USE_BEDROCK}): {error}"));
                 let resolved = Resolved {
                     auth,
                     mantle: mantle_base(&region),
+                    runtime: crate::bedrock_runtime::base(&region),
                     region,
                 };
                 shared.resolved.set(Some(resolved.clone()));
@@ -140,7 +170,7 @@ impl BedrockClaude {
             .await
     }
 
-    fn rewrite(request: &mut Request, resolved: &Resolved) -> Result<(), Error> {
+    fn rewrite(request: &mut Request, resolved: &Resolved) -> Result<Route, Error> {
         let mut body: serde_json::Map<String, serde_json::Value> =
             serde_json::from_slice(&request.body).map_err(|error| {
                 Error::new(format!(
@@ -155,9 +185,8 @@ impl BedrockClaude {
             })?;
         let model = bedrock_model(requested);
         if !is_mantle_model(&model) {
-            return Err(Error::new(format!(
-                "Claude on Amazon Bedrock: {model} is not a bedrock-mantle model id (anthropic.<model>); set ANTHROPIC_DEFAULT_OPUS_MODEL, ANTHROPIC_DEFAULT_SONNET_MODEL or ANTHROPIC_DEFAULT_HAIKU_MODEL to one"
-            )));
+            crate::bedrock_runtime::rewrite(request, body, &resolved.runtime, &model)?;
+            return Ok(Route::Runtime);
         }
         if model != requested {
             body.insert("model".to_owned(), serde_json::Value::String(model));
@@ -168,20 +197,23 @@ impl BedrockClaude {
         request.url = format!("{}/v1/messages", resolved.mantle);
         request.headers.remove("x-api-key");
         request.headers.remove(AUTHORIZATION);
-        Ok(())
+        Ok(Route::Mantle)
     }
 
     async fn authorize(
         resolved: &Resolved,
+        route: Route,
         request: &mut Request,
     ) -> Result<Option<Authorized>, Error> {
-        let Some(auth) = &resolved.auth else {
+        if route.skips_auth() {
             return Ok(None);
-        };
+        }
+        let region = host_region(&request.url).unwrap_or_else(|| resolved.region.clone());
         let scope = Scope {
-            region: &resolved.region,
-            service: MANTLE_SERVICE,
+            region: &region,
+            service: route.service(),
         };
+        let auth = resolved.auth.as_ref().map_err(Error::new)?;
         auth.authorize(request, scope)
             .await
             .map(Some)
@@ -217,25 +249,31 @@ impl Layer for BedrockClaude {
                 return next.send(request).await;
             }
             let resolved = self.resolve().await.map_err(Error::new)?;
-            Self::rewrite(&mut request, &resolved)?;
+            let route = Self::rewrite(&mut request, &resolved)?;
+            let translate = |response: Response| match route {
+                Route::Mantle => response,
+                Route::Runtime => crate::bedrock_runtime::response(response),
+            };
             let retry = request.clone();
-            let authorized = Self::authorize(&resolved, &mut request).await?;
+            let authorized = Self::authorize(&resolved, route, &mut request).await?;
             let response = next.send(request).await?;
-            let (Some(auth), Some(authorized)) = (&resolved.auth, authorized) else {
-                return Ok(response);
+            let Some(authorized) = authorized else {
+                return Ok(translate(response));
             };
             if response.status.is_success() || authorized == Authorized::Bearer {
-                return Ok(response);
+                return Ok(translate(response));
             }
             let status = response.status.as_u16();
             let (response, body) = buffered(response).await?;
             if !expired(status, &body) {
                 return Ok(response);
             }
-            auth.invalidate(&authorized);
+            if let Ok(auth) = &resolved.auth {
+                auth.invalidate(&authorized);
+            }
             let mut retry = retry;
-            Self::authorize(&resolved, &mut retry).await?;
-            next.send(retry).await
+            Self::authorize(&resolved, route, &mut retry).await?;
+            next.send(retry).await.map(translate)
         })
     }
 }
