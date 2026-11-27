@@ -343,6 +343,13 @@ impl AntigravityHarness {
             Some(tools) => tools.materialize(handle.clone()),
             None => Tools::builder().without_defaults().build(),
         }
+        .and_then(|selected| match &settings.holds {
+            Some(holds) => selected
+                .into_builder()
+                .holds(holds.in_directory(workspace.to_string_lossy()))
+                .build(),
+            None => Ok(selected),
+        })
         .map_err(|error| invalid(error.to_string()))?;
         let selected = services
             .prepare_tools(

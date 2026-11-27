@@ -228,12 +228,18 @@ impl RuntimeBackend for CodexHarness {
                 let tools = settings
                     .tools
                     .unwrap_or_else(|| AgentTools::Shared(nanocode_tool_host::Tools::default()));
+                let holds = settings
+                    .holds
+                    .map(|holds| holds.in_directory(workspace.to_string_lossy()));
                 let process_store = spec
                     .durable_state
                     .as_ref()
                     .map(|state| state.shared_store());
                 builder = builder.tools_factory(move |handle| {
                     let mut selected = tools.materialize(handle.clone())?;
+                    if let Some(holds) = &holds {
+                        selected = selected.into_builder().holds(holds.clone()).build()?;
+                    }
                     selected = services.prepare_tools(&handle, selected, process_store.clone())?;
                     #[cfg(not(target_family = "wasm"))]
                     if !selected.has_code_mode_host()

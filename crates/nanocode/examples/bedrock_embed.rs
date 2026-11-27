@@ -96,20 +96,19 @@ mod embed {
             Self: 'async_trait,
         {
             let model = match role {
-                "explore" => nanocode::ClaudeModel::Haiku55,
-                _ => nanocode::ClaudeModel::Sonnet55,
+                "explore" => nanocode::ModelSelection::Claude(nanocode::ClaudeModel::Haiku55),
+                "codex" => nanocode::ModelSelection::Codex(nanocode::Model::Luna),
+                _ => nanocode::ModelSelection::Claude(nanocode::ClaudeModel::Sonnet55),
             };
             let reference = format!("role {role}");
-            let options = options
-                .harness_model(nanocode::ModelSelection::Claude(model))
-                .thinking(Thinking::Low);
-            let workdir = (role == "implement").then(|| {
+            let options = options.harness_model(model).thinking(Thinking::Low);
+            let workdir = matches!(role, "implement" | "codex").then(|| {
                 let count = self
                     .spawned
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 self.workspace
                     .join("children")
-                    .join(format!("implement-{count}"))
+                    .join(format!("{role}-{count}"))
             });
             Box::pin(async move {
                 let options = match workdir {
@@ -155,12 +154,22 @@ async fn run() -> Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 || args.first().is_some_and(|arg| arg == "--help") {
-        return Err("usage: bedrock_embed STORE_DIR WORKSPACE [--resume SESSION] PROMPT...\nClaude on Amazon Bedrock with CLAUDE_CODE_USE_BEDROCK's variables (AWS_PROFILE, AWS_REGION, ...): a hold policy on every agent's tool calls, a spawn router by role, budgets on.".into());
+        return Err("usage: bedrock_embed STORE_DIR WORKSPACE [--resume SESSION] PROMPT...\nClaude on Amazon Bedrock with CLAUDE_CODE_USE_BEDROCK's variables (AWS_PROFILE, AWS_REGION, ...): a hold policy on every agent's tool calls, a spawn router by role (implement and codex children get their own directory), budgets on. NANOCODE_EXAMPLE_OPENAI_BASE points the Codex harness, used by codex children, at a Responses endpoint.".into());
     }
     let client = ClaudeClient::bedrock(ClaudeClient::http_client(), Bedrock::from_env()?);
     let store = nanocode::session_store(JsonlStore::open_async(&args[0]).await?)?;
     let runtime = Nanocode::builder()
         .claude(ClaudeHarness::new(client))
+        .openai(match std::env::var("NANOCODE_EXAMPLE_OPENAI_BASE") {
+            Ok(base) => nanocode::OpenAi::builder(nanocode::codex::OpenAiAuth::api_key(
+                std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+            ))
+            .api_base_url(base)
+            .transport(nanocode::codex::transport::ResponsesTransport::Https)
+            .websocket_warmup(false)
+            .build()?,
+            Err(_) => nanocode::OpenAi::default(),
+        })
         .durability(store)
         .workspace(&args[1])
         .holds(embed::holds())
