@@ -196,14 +196,36 @@ async fn run() -> Result<()> {
             .result()
             .await?;
         println!("{}", result.final_message());
-        eprintln!("root usage {:?}", result.usage());
+        eprintln!(
+            "root turn usd {:?}",
+            result
+                .usage()
+                .and_then(|usage| usage.estimated_cost())
+                .map(|cost| cost.amount().decimal())
+        );
         if let Some(control) = runtime.subagents() {
-            for entry in control.agents(agent.session_id()).await? {
+            let cost = control.tree_cost(agent.session_id()).await?;
+            for entry in cost.agents() {
                 eprintln!(
-                    "child {} role {} model {:?} budget {:?} usage {:?}",
-                    entry.agent_id, entry.role, entry.model, entry.budget_usd, entry.usage
+                    "child {} role {} usd {:?} budget {:?} status {:?}",
+                    entry.agent_id,
+                    entry.role,
+                    entry.usage.cost_usd.map(|usd| usd.decimal()),
+                    entry.budget_usd.map(|usd| usd.decimal()),
+                    entry.status
                 );
             }
+            for (role, usage) in cost.by_role() {
+                eprintln!(
+                    "role {role}: {} turns, usd {:?}",
+                    usage.completed_turns,
+                    usage.cost_usd.map(|usd| usd.decimal())
+                );
+            }
+            eprintln!(
+                "children total usd {:?}",
+                cost.total().cost_usd.map(|usd| usd.decimal())
+            );
         }
         agent.flush().await?;
         Ok(())

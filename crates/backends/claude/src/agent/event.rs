@@ -89,6 +89,8 @@ pub(super) struct ModelCallUsage {
     pub(super) input_tokens_details: InputTokensDetails,
     pub(super) output_tokens: u64,
     pub(super) total_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) estimated_cost_nano_usd: Option<u64>,
 }
 
 #[derive(Serialize)]

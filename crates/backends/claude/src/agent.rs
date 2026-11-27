@@ -5368,6 +5368,23 @@ impl State {
         served
     }
 
+    fn call_cost(
+        &self,
+        model: &str,
+        usage: &crate::Usage,
+        speed: Option<crate::Speed>,
+    ) -> Option<EstimatedUsdCost> {
+        let route = self.client.inference_route(model);
+        model
+            .parse::<nanocode_agent_core::ClaudeModel>()
+            .ok()?
+            .estimate_cost_on(
+                usage.tokens(self.cache_ttl()),
+                speed == Some(crate::Speed::Fast),
+                route,
+            )
+    }
+
     fn restored_outlived_cache(&self) -> bool {
         let requested = self.requested_at.load(Ordering::SeqCst);
         requested != 0

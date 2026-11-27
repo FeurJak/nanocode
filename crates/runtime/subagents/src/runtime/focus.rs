@@ -9,6 +9,73 @@ use std::sync::Arc;
 
 mod control;
 
+#[derive(Default)]
+pub struct TreeCost {
+    agents: Vec<AgentDirectoryEntry>,
+}
+
+impl TreeCost {
+    const fn of(agents: Vec<AgentDirectoryEntry>) -> Self {
+        Self { agents }
+    }
+
+    #[must_use]
+    pub fn agents(&self) -> &[AgentDirectoryEntry] {
+        &self.agents
+    }
+
+    #[must_use]
+    pub fn total(&self) -> nanocode_agent_core::AgentUsage {
+        let mut total = nanocode_agent_core::AgentUsage::default();
+        for agent in &self.agents {
+            total.add(&agent.usage);
+        }
+        total
+    }
+
+    #[must_use]
+    pub fn subtree(&self, id: crate::model::AgentId) -> nanocode_agent_core::AgentUsage {
+        let mut total = nanocode_agent_core::AgentUsage::default();
+        let mut within = vec![id];
+        let mut index = 0;
+        while let Some(current) = within.get(index).copied() {
+            index += 1;
+            for agent in &self.agents {
+                if agent.agent_id == current {
+                    total.add(&agent.usage);
+                }
+                if agent.parent_agent_id == Some(current) && !within.contains(&agent.agent_id) {
+                    within.push(agent.agent_id);
+                }
+            }
+        }
+        total
+    }
+
+    #[must_use]
+    pub fn by_role(&self) -> std::collections::BTreeMap<&str, nanocode_agent_core::AgentUsage> {
+        let mut roles = std::collections::BTreeMap::<&str, nanocode_agent_core::AgentUsage>::new();
+        for agent in &self.agents {
+            roles.entry(&agent.role).or_default().add(&agent.usage);
+        }
+        roles
+    }
+
+    #[must_use]
+    pub fn by_model(&self) -> std::collections::BTreeMap<String, nanocode_agent_core::AgentUsage> {
+        let mut models =
+            std::collections::BTreeMap::<String, nanocode_agent_core::AgentUsage>::new();
+        for agent in &self.agents {
+            let model = agent
+                .model
+                .as_ref()
+                .map_or_else(String::new, |model| model.as_str().to_owned());
+            models.entry(model).or_default().add(&agent.usage);
+        }
+        models
+    }
+}
+
 struct SideQuestion {
     lease: Option<SideQuestionLease>,
     registry: Arc<Registry>,
@@ -68,6 +135,10 @@ impl SubagentControl {
 
     pub async fn agents(&self, root_session_id: &str) -> std::io::Result<Vec<AgentDirectoryEntry>> {
         control::agents(self, root_session_id).await
+    }
+
+    pub async fn tree_cost(&self, root_session_id: &str) -> std::io::Result<TreeCost> {
+        Ok(TreeCost::of(control::agents(self, root_session_id).await?))
     }
 
     pub async fn agents_page(

@@ -70,6 +70,40 @@ impl AgentUsage {
     pub const fn is_empty(&self) -> bool {
         self.completed_turns == 0
     }
+
+    pub fn add_spend(&mut self, spent: UsdAmount) {
+        if spent.nano_usd() == 0 {
+            return;
+        }
+        self.cost_usd = Some(self.cost_usd.unwrap_or_default().saturating_add(spent));
+        self.estimated_cost_turns = self.estimated_cost_turns.saturating_add(1);
+    }
+
+    pub fn add(&mut self, other: &Self) {
+        self.completed_turns = self.completed_turns.saturating_add(other.completed_turns);
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(other.cached_input_tokens);
+        self.cache_write_input_tokens = self
+            .cache_write_input_tokens
+            .saturating_add(other.cache_write_input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.reasoning_output_tokens = self
+            .reasoning_output_tokens
+            .saturating_add(other.reasoning_output_tokens);
+        self.cost_usd = match (self.cost_usd, other.cost_usd) {
+            (Some(own), Some(added)) => Some(own.saturating_add(added)),
+            (own, added) => own.or(added),
+        };
+        self.estimated_cost_turns = self
+            .estimated_cost_turns
+            .saturating_add(other.estimated_cost_turns);
+        self.unpriced_turns = self.unpriced_turns.saturating_add(other.unpriced_turns);
+        self.hedge_input_tokens = self
+            .hedge_input_tokens
+            .saturating_add(other.hedge_input_tokens);
+    }
 }
 
 const fn is_zero(value: &u64) -> bool {

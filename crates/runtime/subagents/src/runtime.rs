@@ -48,9 +48,11 @@ pub(crate) type RegistryFuture<'a, T> = nanocode_sync::future::LocalBoxFuture<'a
 pub type ProvidersLoader = Arc<dyn Fn() -> RegistryFuture<'static, ()> + Send + Sync>;
 
 mod activity;
+mod budget;
 mod completion;
 mod delivery;
 mod focus;
+pub use focus::TreeCost;
 mod journal;
 mod lifecycle;
 mod restore;
@@ -324,6 +326,10 @@ pub(super) struct ChildSession {
     pub(super) settled_revision: Option<u64>,
 
     pub(super) usage: AgentUsage,
+
+    pub(super) turn_spend_nano_usd: u64,
+
+    pub(super) over_budget: bool,
 
     pub(super) in_flight_progress: durable::OmittedProgress,
 
@@ -5328,6 +5334,7 @@ impl Registry {
                     .get_mut(&root)
                     .and_then(|scope| scope.sessions.get_mut(&id))?;
                 session.descriptor.budget_usd = budget;
+                session.over_budget = false;
                 let mut descriptor = session.descriptor.clone();
                 descriptor.task = session.binding_task.clone();
                 Some((descriptor, session.summary()))
@@ -5944,6 +5951,8 @@ impl Registry {
                         in_spawning_turn: false,
                         settled_revision: None,
                         usage: AgentUsage::default(),
+                        turn_spend_nano_usd: 0,
+                        over_budget: false,
                         in_flight_progress: durable::OmittedProgress::default(),
                         hibernated: None,
                         hibernations: 0,
@@ -8883,6 +8892,8 @@ impl ChildSession {
             in_spawning_turn: false,
             settled_revision: None,
             usage: AgentUsage::default(),
+            turn_spend_nano_usd: 0,
+            over_budget: false,
             in_flight_progress: durable::OmittedProgress::default(),
             hibernated: None,
             hibernations: 0,
@@ -9259,6 +9270,12 @@ pub(super) fn forward_events(
                 {
                     tracked.push(TrackedEvent::Call(kind, call));
                 }
+                if kind == AgentEventKind::ModelCallCompleted
+                    && let Some(nano_usd) = call_cost(&event)
+                    && let Some(registry) = registry.upgrade()
+                {
+                    registry.charge(&root_session_id, id, nano_usd).await;
+                }
                 let _ = send_update(
                     &updates,
                     &root_session_id,
@@ -9294,6 +9311,13 @@ pub(super) fn forward_events(
                 .await;
         }
     })
+}
+
+fn call_cost(event: &nanocode_agent_core::events::AgentEvent) -> Option<u64> {
+    serde_json::from_str::<Value>(event.payload.get())
+        .ok()?
+        .pointer("/usage/estimated_cost_nano_usd")?
+        .as_u64()
 }
 
 fn parent_call<'a>(call_id: &'a str, parent_call_id: Option<&'a str>) -> Option<&'a str> {

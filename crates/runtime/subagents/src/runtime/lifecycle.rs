@@ -132,12 +132,15 @@ pub(super) fn harness_turn_finished<'a>(
                 session.in_flight_calls = Vec::new();
                 session.in_flight_omitted = 0;
                 session.in_flight_progress = durable::OmittedProgress::default();
-                if let Ok(TurnResult {
-                    usage: Some(usage), ..
-                }) = &result
-                {
-                    session.usage.record(usage);
+                match &result {
+                    Ok(TurnResult {
+                        usage: Some(usage), ..
+                    }) => session.usage.record(usage),
+                    _ => session
+                        .usage
+                        .add_spend(UsdAmount::from_nano_usd(session.turn_spend_nano_usd)),
                 }
+                session.turn_spend_nano_usd = 0;
                 let follow_up_output = session.follow_up_output.take();
                 let kept =
                     result.is_ok() && submitted_output.is_none() && follow_up_output.is_some();

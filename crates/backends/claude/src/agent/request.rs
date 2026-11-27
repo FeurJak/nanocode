@@ -69,6 +69,9 @@ pub(super) fn request_response<'a>(
                         },
                         output_tokens: response.usage.output_tokens,
                         total_tokens: input_tokens.saturating_add(response.usage.output_tokens),
+                        estimated_cost_nano_usd: state
+                            .call_cost(&response.model, &response.usage, speed)
+                            .map(|cost| cost.amount().nano_usd()),
                     },
                     speed: match speed {
                         Some(crate::Speed::Fast) => "fast",

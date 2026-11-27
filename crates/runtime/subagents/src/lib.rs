@@ -40,7 +40,7 @@ pub use runtime::{
     AgentDirectoryEntry, AgentSummary, COMPLETION_INSTRUCTIONS_LEAD, CompletionPrompt,
     CompletionStatus, MessageReceipt, ParentResolver, PendingTurnResolver, ProvidersLoader,
     Registry, Restoration, RunningSubagents, SessionReleased, SubagentActivity, SubagentCompletion,
-    SubagentControl, channel, completion_continuation_prompt, completion_retry_delay,
+    SubagentControl, TreeCost, channel, completion_continuation_prompt, completion_retry_delay,
     parse_completion_prompt, resumable_sessions,
 };
 pub use tools::{
