@@ -135,14 +135,14 @@ def run_check(task, path, check, files):
 def checks(task, path):
     files = changed(task, path)
     results = {check["name"]: run_check(task, path, check, files) for check in task.get("checks", [])}
-    reference = task.get("reference")
-    if reference:
+    references = task.get("reference", [])
+    for reference in [references] if isinstance(references, dict) else references:
         copied = []
         for source, dest in reference["files"].items():
             target = os.path.join(path, dest)
             open(target, "w").write(git(task["repo"], "show", f"{reference['commit']}:{source}"))
             copied.append(target)
-        results["reference"] = run_check(task, path, reference, files)
+        results[reference.get("name", "reference")] = run_check(task, path, reference, files)
         for target in copied:
             os.remove(target)
     footprint = task.get("footprint", [])

@@ -66,6 +66,10 @@ A task is a JSON file. Keep task files, prompts and results out of the repositor
   counts in its output. With `count`, it also records how many output lines match that regular
   expression; `only_changed` keeps only the lines that name a changed file, for a type check whose base
   already has errors.
+- **Several reference specs.** `reference` may be a list of such objects, each with a `name`, so each
+  original spec is reported on its own. A spec that imports a helper the prompt never names fails to
+  compile against a correct replay that named it differently; report it beside the specs that test
+  through existing entry points, not as a failure of the run.
 - **`{changed}`** in a command is replaced by the changed files that still exist.
 
 Run `replay.py check <task> <label> --commit <commit>` on `base` and on the task's commit before measuring
