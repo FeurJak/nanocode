@@ -75,6 +75,8 @@ pub(super) fn run(
             stashed_draft: None,
             dragging: None,
             autoscroll_at: None,
+            herdr: nanocode::herdr::Reporter::from_env(),
+            outcome: None,
             clock_deadline: None,
             btw: HashMap::new(),
             next_btw: 0,

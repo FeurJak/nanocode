@@ -45,6 +45,7 @@ pub type Harness = nanocode_agent::Harness<Defaults>;
 pub type HarnessBuilder = nanocode_agent::HarnessBuilder<Defaults>;
 #[cfg(not(target_family = "wasm"))]
 pub use nanocode_agent_host as runners;
+pub use nanocode_agent_host::herdr;
 #[cfg(unix)]
 pub use nanocode_agent_host::shell;
 pub use nanocode_backend_codex::CodexBuilder;

@@ -109,6 +109,8 @@ pub(super) fn exec(
                 answer("");
             });
         }
+        let herdr = nanocode::herdr::Reporter::from_env();
+        report(&herdr, nanocode::herdr::State::Working, &prompt);
         let outcome: Result<()> = async {
             for pending in pending {
                 eprintln!("nanocode: resuming interrupted turn {}", pending.id);
@@ -155,6 +157,14 @@ pub(super) fn exec(
             Ok(())
         }
         .await;
+        match &outcome {
+            Ok(()) => report(
+                &herdr,
+                nanocode::herdr::State::Done,
+                &format!("session {}", agent.session_id()),
+            ),
+            Err(error) => report(&herdr, nanocode::herdr::State::Error, &error.to_string()),
+        }
         let mut stderr = std::io::stderr();
         if let Some(status) = host.config.clients.describe() {
             drop(writeln!(stderr, "{status}"));
@@ -186,4 +196,19 @@ pub(super) fn exec(
         archived?;
         Ok(())
     })
+}
+
+fn report(herdr: &nanocode::herdr::Reporter, state: nanocode::herdr::State, message: &str) {
+    let Some(sequence) = herdr.changed(state, message) else {
+        return;
+    };
+    let written = match std::io::stdout().is_terminal() {
+        true => std::io::stdout()
+            .write_all(sequence.as_bytes())
+            .and_then(|()| std::io::stdout().flush()),
+        false => std::io::stderr().write_all(sequence.as_bytes()),
+    };
+    if let Err(error) = written {
+        nanocode_trace::debug!(%error, "the Herdr status was not written");
+    }
 }

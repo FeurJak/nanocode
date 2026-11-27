@@ -102,6 +102,7 @@ A host builds agents through the `nanocode` facade alone. `crates/nanocode/examp
 | A child's directory | `SpawnOptions::workdir(dir)` on the route |
 | Cost | `TurnResult::usage()` for the root, `runtime.subagents()?.tree_cost(root)` for the children |
 | Resume | `runtime.open_session(id)` reopens the root, and its subagents restore with it |
+| Herdr status | `nanocode::herdr::Reporter::from_env()` and `changed(state, message)` give the OSC 7501 report to write. A `HoldLedger` reports `State::Blocked(Kind::Permission)` when it holds a call |
 
 `nanocode::claude::bedrock` reads Claude Code's variables: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_MANTLE`, `AWS_REGION`, `AWS_PROFILE`, `AWS_BEARER_TOKEN_BEDROCK`, `ANTHROPIC_BEDROCK_REGION_PREFIX`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`, `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_BEDROCK_MANTLE_BASE_URL` and `ENABLE_PROMPT_CACHING_1H`. Model names map to `global.anthropic.<model>` on bedrock-runtime, or to `anthropic.<model>` on bedrock-mantle with `CLAUDE_CODE_USE_MANTLE`.
 

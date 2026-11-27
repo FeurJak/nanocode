@@ -24,6 +24,7 @@ pub use nanocode_tool_runtime::attachment::{
 #[cfg(not(target_family = "wasm"))]
 mod cell_journals;
 mod computer;
+pub mod herdr;
 #[cfg(not(target_family = "wasm"))]
 mod process_routes;
 #[cfg(not(target_family = "wasm"))]

@@ -19,6 +19,7 @@ nanocode-tool-host.workspace = true
 nanocode-tool-contracts.workspace = true
 nanocode-process-contracts.workspace = true
 nanocode-sync.workspace = true
+nanocode-sys.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

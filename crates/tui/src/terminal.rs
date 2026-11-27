@@ -479,6 +479,10 @@ impl TerminalSession {
         execute(&mut self.output, &bytes)
     }
 
+    pub fn report(&mut self, sequence: &str) -> io::Result<()> {
+        execute(&mut self.output, sequence.as_bytes())
+    }
+
     #[must_use]
     pub const fn mouse_capture(&self) -> bool {
         self.options.mouse_capture

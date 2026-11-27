@@ -325,6 +325,8 @@ pub struct App {
     stashed_draft: Option<String>,
     dragging: Option<bool>,
     autoscroll_at: Option<Instant>,
+    herdr: nanocode::herdr::Reporter,
+    outcome: Option<nanocode::herdr::State>,
     pub(crate) clock_deadline: Option<Instant>,
     pub(crate) btw: HashMap<u64, (Option<nanocode::subagents::AgentId>, usize)>,
     pub(crate) next_btw: u64,
@@ -604,6 +606,11 @@ impl App {
                             return Err(error.into());
                         }
                     };
+                if let Some(sequence) = self.herdr_status()
+                    && let Err(error) = terminal.report(&sequence)
+                {
+                    nanocode_trace::debug!(%error, "the Herdr status was not written");
+                }
                 if !animated {
                     if let Err(error) = terminal.draw(|frame| view::draw(self, frame)) {
                         span.record("otel.status_code", "ERROR");
@@ -757,6 +764,21 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn herdr_status(&self) -> Option<String> {
+        let working = !matches!(self.turn, TurnState::Idle) || self.starting;
+        let state = match (working, self.outcome) {
+            (true, _) => nanocode::herdr::State::Working,
+            (false, Some(outcome)) => outcome,
+            (false, None) => nanocode::herdr::State::Idle,
+        };
+        let message = self
+            .agent
+            .as_ref()
+            .map(|agent| format!("session {}", agent.session_id()))
+            .unwrap_or_default();
+        self.herdr.changed(state, &message)
     }
 
     fn animating(&self) -> bool {
@@ -1378,6 +1400,12 @@ impl App {
             && !self.starting
         {
             self.turn = TurnState::External(Instant::now());
+        }
+        if event.kind == AgentEventKind::RunCompleted {
+            self.outcome = Some(nanocode::herdr::State::Done);
+        }
+        if event.kind == AgentEventKind::RunFailed {
+            self.outcome = Some(nanocode::herdr::State::Error);
         }
         if event.kind.is_terminal() && matches!(self.turn, TurnState::External(_)) {
             self.turn = TurnState::Idle;
