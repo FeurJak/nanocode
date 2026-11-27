@@ -193,7 +193,8 @@ impl BedrockConfig {
         RUNTIME_FALLBACKS
             .iter()
             .filter(|model| {
-                self.pin(model).is_none()
+                crate::sim::mutated(crate::sim::Mutation::FallbackUnchecked)
+                    || self.pin(model).is_none()
                     && self.model_id(model)
                         == format!("{}.{MODEL_PREFIX}{model}", REGION_PREFIXES[0])
             })

@@ -132,6 +132,7 @@ fn translate(message: &Message) -> Result<Option<Vec<u8>>, Error> {
     match (message.text(":message-type"), message.text(":event-type")) {
         (Some("event"), Some("chunk")) => chunk(message).map(Some),
         (Some("event"), _) => Ok(None),
+        _ if crate::sim::mutated(crate::sim::Mutation::ExceptionIgnored) => Ok(None),
         _ => Ok(Some(exception(message))),
     }
 }

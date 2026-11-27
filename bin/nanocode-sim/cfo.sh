@@ -634,6 +634,16 @@ default_table='
 1 scale_skewed pass --scenario scale --load skewed
 1 scale_skewed_twice pass --scenario scale --load skewed --twice
 1 canary_scale_ignore_hot canary:16 --scenario scale --load skewed --mutation ignore_hot
+8 bedrock pass --scenario bedrock
+2 bedrock_twice pass --scenario bedrock --twice
+1 canary_bedrock_skips_message_crc canary:64 --scenario bedrock --mutation skips_message_crc
+1 canary_bedrock_skips_prelude_crc canary:64 --scenario bedrock --mutation skips_prelude_crc
+1 canary_bedrock_single_encoded_path canary:64 --scenario bedrock --mutation single_encoded_path
+1 canary_bedrock_exception_ignored canary:64 --scenario bedrock --mutation exception_ignored
+1 canary_bedrock_fallback_unchecked canary:64 --scenario bedrock --mutation fallback_unchecked
+8 cache_policy pass --scenario cache_policy
+2 cache_policy_twice pass --scenario cache_policy --twice
+1 canary_cache_policy_restored_ignored canary:64 --scenario cache_policy --mutation restored_ignored
 '
 default_known='
 '

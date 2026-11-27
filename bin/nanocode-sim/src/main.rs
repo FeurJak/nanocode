@@ -17,6 +17,8 @@ mod children;
 mod claudefacts;
 mod codexfacts;
 mod controlplane;
+mod bedrock;
+mod cachepolicy;
 mod cost;
 mod disk;
 mod dispatcher;
@@ -119,6 +121,8 @@ use crate::{
     cellcalls::{CellCallsMutation, CellCallsStats},
     children::ChildMutation,
     controlplane::{ControlplaneMutation, ControlplaneStats},
+    bedrock::{BedrockMutation, BedrockStats},
+    cachepolicy::{CachePolicyMutation, CachePolicyStats},
     cost::{CostMutation, CostStats},
     dispatcher::{DispatcherMutation, DispatcherStats},
     durable::{DurableMutation, DurableStats},
@@ -202,6 +206,8 @@ enum Scenario {
     Dns,
     Board,
     Controlplane,
+    Bedrock,
+    CachePolicy,
     Cost,
     Plog,
     Secrets,
@@ -271,6 +277,8 @@ struct Args {
     tasks: TasksMutation,
     board: BoardMutation,
     controlplane: ControlplaneMutation,
+    bedrock: BedrockMutation,
+    cache_policy: CachePolicyMutation,
     cost: CostMutation,
     plog: PlogMutation,
     secrets: SecretsMutation,
@@ -326,7 +334,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|antigravity_durable|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|lease|durable|scale|gc_unwind|interp_drop|held_await|holds|slog|append|one_log_facts|migrated|kv_lease|scope|thread_scope|pg_pool] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--chain-bytes BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|antigravity_durable|inbox_stress|capture|executor|dns|board|board_shards|controlplane|bedrock|cache_policy|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|lease|durable|scale|gc_unwind|interp_drop|held_await|holds|slog|append|one_log_facts|migrated|kv_lease|scope|thread_scope|pg_pool] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--chain-bytes BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -343,6 +351,8 @@ fn usage() -> ExitCode {
        executor: [--mutation {}]
        dns: [--mutation cut_answer|drop_search]
        board: [--mutation {}]
+       bedrock: [--mutation {}]
+       cache_policy: [--mutation {}]
        cost: [--mutation {}]
        plog: [--mutation {}]
        secrets: [--mutation {}]
@@ -396,6 +406,8 @@ fn usage() -> ExitCode {
         requestclose::names(),
         TasksMutation::names(),
         BoardMutation::names(),
+        BedrockMutation::names(),
+        CachePolicyMutation::names(),
         CostMutation::names(),
         plog::names(),
         secrets::names(),
@@ -492,6 +504,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut tasks = TasksMutation::None;
     let mut board = BoardMutation::None;
     let mut controlplane = ControlplaneMutation::None;
+    let mut bedrock = BedrockMutation::None;
+    let mut cache_policy = CachePolicyMutation::None;
     let mut cost = CostMutation::None;
     let mut plog = PlogMutation::None;
     let mut secrets = SecretsMutation::None;
@@ -611,6 +625,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "executor" => Scenario::Executor,
                     "board" => Scenario::Board,
                     "controlplane" => Scenario::Controlplane,
+                    "bedrock" => Scenario::Bedrock,
+                    "cache_policy" => Scenario::CachePolicy,
                     "cost" => Scenario::Cost,
                     "plog" => Scenario::Plog,
                     "secrets" => Scenario::Secrets,
@@ -704,6 +720,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::Controlplane, Some(name)) => {
             controlplane = ControlplaneMutation::parse(name)?;
         }
+        (Scenario::Bedrock, Some(name)) => bedrock = BedrockMutation::parse(name)?,
+        (Scenario::CachePolicy, Some(name)) => cache_policy = CachePolicyMutation::parse(name)?,
         (Scenario::Cost, Some(name)) => cost = CostMutation::parse(name)?,
         (Scenario::Plog, Some(name)) => plog = PlogMutation::parse(name)?,
         (Scenario::Secrets, Some(name)) => secrets = SecretsMutation::parse(name)?,
@@ -807,6 +825,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
         tasks,
         board,
         controlplane,
+        bedrock,
+        cache_policy,
         cost,
         plog,
         secrets,
@@ -937,6 +957,12 @@ fn scenario_replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::BoardShards {
         return board_shards::replay(seed, args.board_shards);
+    }
+    if args.scenario == Scenario::Bedrock {
+        return bedrock::replay(seed, args.bedrock);
+    }
+    if args.scenario == Scenario::CachePolicy {
+        return cachepolicy::replay(seed, args.cache_policy);
     }
     if args.scenario == Scenario::Cost {
         return cost::replay(seed, args.cost);
@@ -1389,6 +1415,8 @@ fn mutations() -> ExitCode {
     add("executor", TasksMutation::names());
     add("board", BoardMutation::names());
     add("controlplane", ControlplaneMutation::names());
+    add("bedrock", BedrockMutation::names());
+    add("cache_policy", CachePolicyMutation::names());
     add("cost", CostMutation::names());
     add("plog", plog::names());
     add("secrets", secrets::names());
@@ -1485,6 +1513,8 @@ struct Totals {
     tasks_totals: TasksStats,
     board_totals: BoardStats,
     controlplane_totals: ControlplaneStats,
+    bedrock_totals: BedrockStats,
+    cache_policy_totals: CachePolicyStats,
     cost_totals: CostStats,
     plog_totals: PlogStats,
     secrets_totals: SecretsStats,
@@ -1554,6 +1584,8 @@ impl Totals {
         self.tasks_totals.add(&other.tasks_totals);
         self.board_totals.add(&other.board_totals);
         self.controlplane_totals.add(&other.controlplane_totals);
+        self.bedrock_totals.add(&other.bedrock_totals);
+        self.cache_policy_totals.add(&other.cache_policy_totals);
         self.cost_totals.add(&other.cost_totals);
         self.plog_totals.add(&other.plog_totals);
         self.secrets_totals.add(&other.secrets_totals);
@@ -1737,6 +1769,20 @@ fn judge_one(seed: u64, args: &Args, totals: &mut Totals, caught: &mut Caught) -
             args.twice,
             args.options.verbose,
             &mut totals.controlplane_totals,
+        ),
+        Scenario::Bedrock => bedrock::judge(
+            seed,
+            args.bedrock,
+            args.twice,
+            args.options.verbose,
+            &mut totals.bedrock_totals,
+        ),
+        Scenario::CachePolicy => cachepolicy::judge(
+            seed,
+            args.cache_policy,
+            args.twice,
+            args.options.verbose,
+            &mut totals.cache_policy_totals,
         ),
         Scenario::Cost => cost::judge(
             seed,
@@ -2169,6 +2215,9 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::Board && args.board != BoardMutation::None)
         || (args.scenario == Scenario::Controlplane
             && args.controlplane != ControlplaneMutation::None)
+        || (args.scenario == Scenario::Bedrock && args.bedrock != BedrockMutation::None)
+        || (args.scenario == Scenario::CachePolicy
+            && args.cache_policy != CachePolicyMutation::None)
         || (args.scenario == Scenario::Cost && args.cost != CostMutation::None)
         || (args.scenario == Scenario::Plog && args.plog != PlogMutation::None)
         || (args.scenario == Scenario::Secrets && args.secrets != SecretsMutation::None)
@@ -2288,6 +2337,8 @@ fn main() -> ExitCode {
         tasks_totals,
         board_totals,
         controlplane_totals,
+        bedrock_totals,
+        cache_policy_totals,
         cost_totals,
         plog_totals,
         secrets_totals,
@@ -2513,6 +2564,26 @@ fn main() -> ExitCode {
             args.twice,
             args.controlplane,
             &controlplane_totals,
+        );
+    }
+    if args.scenario == Scenario::Bedrock {
+        return bedrock::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.bedrock,
+            &bedrock_totals,
+        );
+    }
+    if args.scenario == Scenario::CachePolicy {
+        return cachepolicy::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.cache_policy,
+            &cache_policy_totals,
         );
     }
     if args.scenario == Scenario::Cost {

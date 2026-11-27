@@ -21,6 +21,7 @@ use serde_json::Value;
 mod admission;
 mod auth;
 pub mod bedrock;
+pub mod sim;
 #[cfg(not(target_family = "wasm"))]
 mod claude_code;
 #[cfg(not(target_family = "wasm"))]
@@ -2108,6 +2109,32 @@ pub enum HourCache {
     Never,
     AfterIdle,
     Always,
+}
+
+pub const CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LastRequest {
+    None,
+    InProcess { elapsed: Duration },
+    Stored { unix_seconds: u64 },
+}
+
+impl HourCache {
+    #[must_use]
+    pub fn outlived(self, last: LastRequest, now_unix_seconds: u64) -> bool {
+        if self != Self::AfterIdle {
+            return false;
+        }
+        match last {
+            LastRequest::None => false,
+            LastRequest::InProcess { elapsed } => elapsed > CACHE_LIFETIME,
+            LastRequest::Stored { .. } if sim::mutated(sim::Mutation::RestoredIgnored) => false,
+            LastRequest::Stored { unix_seconds } => {
+                now_unix_seconds.saturating_sub(unix_seconds) > CACHE_LIFETIME.as_secs()
+            }
+        }
+    }
 }
 
 #[derive(Clone)]

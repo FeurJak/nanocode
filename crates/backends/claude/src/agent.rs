@@ -81,7 +81,7 @@ const RETRY_CAP_MS: u64 = 32_000;
 const RETRY_JITTER_PERCENT: u64 = 25;
 const THROTTLED_ATTEMPTS: u32 = 10;
 const THROTTLED_WAIT: Duration = Duration::from_secs(180);
-const CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60);
+const CACHE_LIFETIME: Duration = crate::CACHE_LIFETIME;
 const HOUR_CACHE_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
 fn truncate_middle(text: &str, max_tokens: u64) -> String {
@@ -5385,21 +5385,22 @@ impl State {
             )
     }
 
-    fn restored_outlived_cache(&self) -> bool {
-        let requested = self.requested_at.load(Ordering::SeqCst);
-        requested != 0
-            && (nanocode_platform::unix_millis() / 1000).saturating_sub(requested)
-                > CACHE_LIFETIME.as_secs()
-    }
-
     fn outlived_cache(&self) -> bool {
+        let last = self.requested.read(|requested| match requested {
+            Some(at) => crate::LastRequest::InProcess {
+                elapsed: nanocode_platform::elapsed(*at),
+            },
+            None => match self.requested_at.load(Ordering::SeqCst) {
+                0 => crate::LastRequest::None,
+                unix_seconds => crate::LastRequest::Stored { unix_seconds },
+            },
+        });
         let outlived = self.automatic_cache
-            && self.client.hour_cache() == crate::HourCache::AfterIdle
             && self.cache_ttl().is_none()
-            && self.requested.read(|requested| match requested {
-                Some(at) => nanocode_platform::elapsed(*at) > CACHE_LIFETIME,
-                None => self.restored_outlived_cache(),
-            });
+            && self
+                .client
+                .hour_cache()
+                .outlived(last, nanocode_platform::unix_millis() / 1000);
         if outlived {
             self.cache_one_hour.store(true, Ordering::SeqCst);
         }

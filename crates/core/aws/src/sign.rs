@@ -168,7 +168,10 @@ pub fn sign_request(
         None => host.to_owned(),
     };
     let mut path = String::new();
-    uri_encode(&mut path, url.path(), true);
+    match crate::sim::mutated(crate::sim::Mutation::SingleEncodedPath) {
+        true => path.push_str(url.path()),
+        false => uri_encode(&mut path, url.path(), true),
+    }
     if path.is_empty() {
         path.push('/');
     }

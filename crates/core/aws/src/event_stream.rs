@@ -169,7 +169,7 @@ impl Decoder {
             return Ok(None);
         };
         let actual = crc32(0, &self.buffer[..2 * LENGTH_BYTES]);
-        if actual != prelude_crc {
+        if actual != prelude_crc && !crate::sim::mutated(crate::sim::Mutation::SkipsPreludeCrc) {
             return Err(DecodeError::PreludeCrc {
                 expected: prelude_crc,
                 actual,
@@ -192,7 +192,7 @@ impl Decoder {
         let (body, crc) = frame.split_at(length - CRC_BYTES);
         let expected = u32::from_be_bytes(crc.try_into().unwrap_or_default());
         let actual = crc32(0, body);
-        if actual != expected {
+        if actual != expected && !crate::sim::mutated(crate::sim::Mutation::SkipsMessageCrc) {
             return Err(DecodeError::MessageCrc { expected, actual });
         }
         let (header_slice, payload) = body[PRELUDE_BYTES..].split_at(header_length);
