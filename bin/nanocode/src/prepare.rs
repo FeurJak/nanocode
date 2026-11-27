@@ -181,6 +181,7 @@ pub(super) fn prepare<'a>(
                 .map_err(|error| format!("--max-output-tokens: {error}"))?,
             compact_instructions: args.compact_instructions,
             codex_direct: args.codex_orchestration == Some(cli::CodexOrchestrationArg::Direct),
+            claude_direct: args.claude_orchestration == Some(cli::ClaudeOrchestrationArg::Direct),
             codesign: !args.no_codesign,
             no_reasoning_replay: args.no_reasoning_replay,
             tool_output_token_limit: args

@@ -495,6 +495,7 @@ pub struct HostConfig {
     pub max_output_tokens: Option<u32>,
     pub compact_instructions: bool,
     pub codex_direct: bool,
+    pub claude_direct: bool,
     pub codesign: bool,
     pub no_reasoning_replay: bool,
     pub tool_output_token_limit: Option<usize>,
@@ -767,6 +768,7 @@ impl Host {
         let context_window = config.context_window;
         let listed = config.clients.listing_windows();
         let max_output = config.max_output_tokens;
+        let claude_direct = config.claude_direct;
         let tool_result_tokens = config.tool_result_tokens;
         let compact_instructions = config.compact_instructions;
         let working_state = config.working_state;
@@ -848,6 +850,7 @@ impl Host {
                 .clone()
                 .filter(|_| route(request) == Some(Route::Tempo))
         })
+        .direct_tools_for(move |_| claude_direct)
         .direct_subagents(config.subagents == Subagents::AllModels)
         .headless(config.headless)
         .codesign(config.codesign)

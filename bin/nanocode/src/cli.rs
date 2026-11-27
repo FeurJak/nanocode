@@ -183,6 +183,24 @@ impl CodexOrchestrationArg {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClaudeOrchestrationArg {
+    CodeMode,
+    Direct,
+}
+
+impl ClaudeOrchestrationArg {
+    const ALL: [Self; 2] = [Self::CodeMode, Self::Direct];
+    const CHOICES: [Choice; 2] = [
+        Choice::new("code-mode").help(
+            "Claude models call their tools from JavaScript cells (exec and wait; the default)",
+        ),
+        Choice::new("direct").help(
+            "Claude models call Bash, Read, Edit and the other tools directly, as Claude Code does",
+        ),
+    ];
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AttemptPickArg {
     Verifier,
     SelfCheck,
@@ -405,6 +423,10 @@ const SESSION: Group = Group::new(&[
         .long("codex-orchestration")
         .env("NANOCODE_CODEX_ORCHESTRATION")
         .help("How Codex models call tools: code-mode (the default, as Codex CLI does) or direct"),
+    Argument::value("claude_orchestration", "MODE", Parser::Choice(&ClaudeOrchestrationArg::CHOICES))
+        .long("claude-orchestration")
+        .env("NANOCODE_CLAUDE_ORCHESTRATION")
+        .help("How Claude models call tools: code-mode (the default) or direct, as Claude Code does"),
     Argument::flag("no_codesign")
         .long("no-codesign")
         .env("NANOCODE_NO_CODESIGN")
@@ -907,6 +929,7 @@ pub struct SessionArgs {
     pub tool_result_tokens: Option<u64>,
     pub lean_tool_arguments: bool,
     pub codex_orchestration: Option<CodexOrchestrationArg>,
+    pub claude_orchestration: Option<ClaudeOrchestrationArg>,
     pub no_codesign: bool,
     pub no_subagents: bool,
     pub subagents: bool,
@@ -1062,6 +1085,9 @@ impl SessionArgs {
             codex_orchestration: matches
                 .choice("codex_orchestration")
                 .map(|index| CodexOrchestrationArg::ALL[index]),
+            claude_orchestration: matches
+                .choice("claude_orchestration")
+                .map(|index| ClaudeOrchestrationArg::ALL[index]),
             no_codesign: matches.flag("no_codesign"),
             no_subagents: matches.flag("no_subagents"),
             subagents: matches.flag("subagents"),
@@ -1110,6 +1136,7 @@ impl SessionArgs {
             tool_result_tokens: self.tool_result_tokens.or(root.tool_result_tokens),
             lean_tool_arguments: self.lean_tool_arguments || root.lean_tool_arguments,
             codex_orchestration: self.codex_orchestration.or(root.codex_orchestration),
+            claude_orchestration: self.claude_orchestration.or(root.claude_orchestration),
             no_codesign: self.no_codesign || root.no_codesign,
             no_subagents: self.no_subagents || root.no_subagents,
             subagents: self.subagents || root.subagents,
