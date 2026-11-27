@@ -2035,9 +2035,9 @@ impl Exec<'_> {
                     None => return bad_argument(id),
                 }
             }
-            INTL_ENABLED => Value::bool(crate::EMBED),
+            INTL_ENABLED => Value::bool(crate::INTL),
             // The six are consecutive (builtins/intrinsics.d.ts).
-            INTL_CREATE..=INTL_LOCALES if crate::EMBED => {
+            INTL_CREATE..=INTL_LOCALES if crate::INTL => {
                 let args = [a0, arg(self, 1), arg(self, 2), arg(self, 3), arg(self, 4)];
                 match crate::builtins::intl::intrinsic(self.heap, id - INTL_CREATE, args)? {
                     Some(v) => v,

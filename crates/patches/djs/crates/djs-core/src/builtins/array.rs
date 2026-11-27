@@ -126,7 +126,7 @@ pub(crate) fn sort_by_key(heap: &mut Heap, list: Obj, comparefn: Value) -> Resul
         for (k, v) in keyed {
             strings.push_out((heap.contiguous(k.as_string().unwrap_or(Str(0)))?, v));
         }
-        if matches!(comparator, Comparator::Locale(_)) && crate::EMBED {
+        if matches!(comparator, Comparator::Locale(_)) && crate::INTL {
             // localeCompare is Intl's collation, not code-unit order.
             let mut units: Vec<(Vec<u16>, Value)> = crate::buf::vec_with_capacity(strings.len());
             for &(s, v) in &strings {

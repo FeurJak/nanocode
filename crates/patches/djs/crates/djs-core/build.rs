@@ -56,9 +56,10 @@ fn fnv(mut h: u32, bytes: &[u8]) -> u32 {
 }
 
 /// The enabled features of this crate, sorted, without `default` and `unicode` (which only
-/// name others, D2411) and `unsafe-heap`, which changes how the arena is accessed but no
-/// result or image (D2520): the base snapshot, built by a host build without it, loads into
-/// a build with it, and images move freely between the two. `embed` counts (D3175): its
+/// name others, D2411), `unsafe-heap`, which changes how the arena is accessed but no
+/// result or image (D2520), and `intl`, whose locale data lives outside the heap: the base
+/// snapshot, built by a host build without them, loads into a build with them, and images
+/// move freely between the builds. `embed` counts (D3175): its
 /// base has builtins the others leave out.
 fn features() -> Vec<String> {
     enabled_features()
@@ -69,6 +70,7 @@ fn features() -> Vec<String> {
             f != "default"
                 && f != "unicode"
                 && f != "unsafe-heap"
+                && f != "intl"
         })
         .collect()
 }

@@ -23,5 +23,8 @@ unicode = ["djs-core/unicode", "djs-prelude/unicode"]
 djs-core = { path = "../djs-core", default-features = false, features = ["full", "embed"] }
 djs-prelude = { path = "../djs-prelude", default-features = false, features = ["raw", "full", "embed"] }
 
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+djs-core = { path = "../djs-core", default-features = false, features = ["full", "embed", "intl"] }
+
 [target.'cfg(target_family = "wasm")'.dependencies]
 djs-core = { path = "../djs-core", default-features = false, features = ["full", "embed", "unsafe-heap"] }

@@ -23,6 +23,8 @@ pub const EMBED: bool = cfg!(feature = "embed");
 /// the module goal is a SyntaxError and the module API fails. Names what the gated code is.
 pub const MODULES: bool = EMBED;
 
+pub const INTL: bool = cfg!(feature = "intl");
+
 // `embed`'s base image is a full one (D3175): no prelude leaves out the slim families but
 // keeps the embed-only builtins.
 #[cfg(all(feature = "embed", not(feature = "full")))]

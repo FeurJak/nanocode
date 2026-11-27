@@ -14,7 +14,7 @@ doctest = false
 djs-libm = { version = "0.0.0", path = "../djs-libm" }
 
 [features]
-default = ["full", "unicode", "embed"]
+default = ["full", "unicode", "embed", "intl"]
 # Everything djs implements. Off, the build is slim (D2411, docs/slim-codemode.md): no typed
 # arrays/ArrayBuffer/DataView, Iterator helpers or `Iterator`, BigInt, WeakRef/
 # FinalizationRegistry, DisposableStack/AsyncDisposableStack/SuppressedError, and no
@@ -28,6 +28,7 @@ full = []
 # (D020). An image feature: the base of a build without it leaves out the builtins tagged
 # `// @embed-only` (builtins/gen/prelude-noembed.js). Needs `full`.
 embed = []
+intl = ["embed"]
 # The Unicode tables: both features below.
 unicode = ["regexp-unicode-props", "unicode-normalization"]
 # `\p{..}` / `\P{..}` in regular expressions: about 21 KB of Unicode property tables
