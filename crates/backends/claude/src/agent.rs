@@ -5319,17 +5319,25 @@ impl State {
     }
 
     fn cache_ttl(&self) -> Option<crate::CacheTtl> {
-        self.cache_one_hour
-            .load(Ordering::SeqCst)
+        (self.cache_one_hour.load(Ordering::SeqCst)
+            || self.client.hour_cache() == crate::HourCache::Always)
             .then_some(crate::CacheTtl::OneHour)
+    }
+
+    fn restored_outlived_cache(&self) -> bool {
+        let requested = self.requested_at.load(Ordering::SeqCst);
+        requested != 0
+            && (nanocode_platform::unix_millis() / 1000).saturating_sub(requested)
+                > CACHE_LIFETIME.as_secs()
     }
 
     fn outlived_cache(&self) -> bool {
         let outlived = self.automatic_cache
-            && self.client.uses_subscription()
+            && self.client.hour_cache() == crate::HourCache::AfterIdle
             && self.cache_ttl().is_none()
-            && self.requested.read(|requested| {
-                requested.is_some_and(|at| nanocode_platform::elapsed(at) > CACHE_LIFETIME)
+            && self.requested.read(|requested| match requested {
+                Some(at) => nanocode_platform::elapsed(*at) > CACHE_LIFETIME,
+                None => self.restored_outlived_cache(),
             });
         if outlived {
             self.cache_one_hour.store(true, Ordering::SeqCst);

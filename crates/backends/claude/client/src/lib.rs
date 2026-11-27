@@ -2098,6 +2098,14 @@ enum HttpConnection {
     Transport(Arc<dyn transport::HttpTransport>),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HourCache {
+    #[default]
+    Never,
+    AfterIdle,
+    Always,
+}
+
 #[derive(Clone)]
 pub struct ClaudeClient {
     admission: Arc<admission::Admission>,
@@ -2109,6 +2117,7 @@ pub struct ClaudeClient {
     subscription_session: String,
 
     subscription_cache_tail: bool,
+    hour_cache: HourCache,
     gzip_rejected: Arc<std::sync::atomic::AtomicBool>,
     http_layer: Option<Arc<dyn transport::Layer>>,
     root: Option<Arc<Root>>,
@@ -2165,6 +2174,7 @@ impl ClaudeClient {
             subscription_identity: SubscriptionIdentity::default(),
             subscription_session: nanocode_platform::uuid_v4().to_string(),
             subscription_cache_tail: true,
+            hour_cache: HourCache::Never,
             gzip_rejected: Arc::default(),
             http_layer: None,
             root: None,
@@ -2219,6 +2229,7 @@ impl ClaudeClient {
             subscription_identity: SubscriptionIdentity::default(),
             subscription_session: nanocode_platform::uuid_v4().to_string(),
             subscription_cache_tail: true,
+            hour_cache: HourCache::Never,
             gzip_rejected: Arc::default(),
             http_layer: None,
             root: None,
@@ -2239,6 +2250,7 @@ impl ClaudeClient {
             subscription_identity: SubscriptionIdentity::default(),
             subscription_session: nanocode_platform::uuid_v4().to_string(),
             subscription_cache_tail: true,
+            hour_cache: HourCache::Never,
             gzip_rejected: Arc::default(),
             http_layer: None,
             root: None,
@@ -2375,6 +2387,20 @@ impl ClaudeClient {
     #[must_use]
     pub const fn uses_subscription(&self) -> bool {
         self.subscription_compatibility
+    }
+
+    #[must_use]
+    pub const fn with_hour_cache(mut self, hour_cache: HourCache) -> Self {
+        self.hour_cache = hour_cache;
+        self
+    }
+
+    #[must_use]
+    pub const fn hour_cache(&self) -> HourCache {
+        match (self.hour_cache, self.subscription_compatibility) {
+            (HourCache::Never, true) => HourCache::AfterIdle,
+            (hour_cache, _) => hour_cache,
+        }
     }
 
     #[cfg_attr(target_family = "wasm", allow(clippy::missing_const_for_fn))]
