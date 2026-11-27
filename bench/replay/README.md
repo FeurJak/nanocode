@@ -7,11 +7,16 @@ before the task, with the same prompt and the same Forge context, and no run can
 
 ## What a run does
 
-1. **Slot.** It clones the task's repository (`git clone --shared`, so it is fast and takes almost no
-   space) at `base`, the commit the task started from. It checks out the task's branch and removes the
-   remote, so nothing can be pushed. `links` symlinks large untracked directories, such as `node_modules`,
+1. **Slot.** It fetches `base`, the commit the task started from, into a new repository: only the
+   commits reachable from `base`, with blobs fetched on demand from a stripped shared clone of the
+   task's repository that has no other refs. So the run cannot read the task's own commit or any later
+   one, even by id. It checks out the task's branch; the remote has a push URL that does not exist,
+   so nothing can be pushed. `links` symlinks large untracked directories, such as `node_modules`,
    from an existing checkout (`link_from`).
-2. **Forge context.** It copies the Impl's plan files into the slot's `.forge/current`. Of `decisions.md` it
+2. **Forge context.** It copies the Impl's plan files into the slot's `.forge/current`. With
+   `forge_context.repo` and `forge_context.commit`, it reads them from that commit of the vault, with
+   `from` a path in it: take the checkpoint from just before the task was handed out, because a later
+   snapshot already shows the task done and cites its evidence. Of `decisions.md` it
    keeps only the first `decisions_lines` lines, the header, because the decisions the task itself took
    would give the answer away. With `"impl": true` it also makes a read-only clone at `base` to stand in for
    the Impl worktree, so the prompt's "read from the Impl worktree" never reaches the finished work.
@@ -23,7 +28,12 @@ before the task, with the same prompt and the same Forge context, and no run can
 4. **Run.** It runs `nanocode exec` in the slot, with the original task prompt (paths rewritten by
    `rewrite`) after the agent's text (`agent`, front matter dropped). The model, `-t` effort and
    `--claude-orchestration` are as given.
-5. **Checks.** It runs each check in `checks` in the slot, then copies the original commit's test files in
+5. **Forbidden reads.** The slot holds nothing past `base`, but the run is not sandboxed: it can read
+   any path on the machine. The harness scans every tool call of the run for the original repository's
+   path, each reference commit's id and the strings in `forbidden` (other checkouts of the repository,
+   the vault), and records them as `forbidden_reads` and `forbidden_tool_calls`. A run with any is not
+   a clean replay.
+6. **Checks.** It runs each check in `checks` in the slot, then copies the original commit's test files in
    (`reference.files`, under a new name so they sit beside the run's own tests) and runs
    `reference.command`. It reports the files changed outside `footprint`, any `protected` file touched,
    the commits made and any uncommitted changes.

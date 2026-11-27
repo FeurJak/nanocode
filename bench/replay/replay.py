@@ -59,12 +59,39 @@ def forge_stub(task):
     return forge
 
 
+def context_file(context, name):
+    if context.get("commit"):
+        return git(expand(context["repo"]), "show", f"{context['commit']}:{context['from']}/{name}") + "\n"
+    return open(os.path.join(expand(context["from"]), name)).read()
+
+
+def source(task, commit):
+    path = os.path.join(task["work"], "source")
+    if not os.path.isdir(path):
+        subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", task["repo"], path], check=True)
+        git(path, "config", "uploadpack.allowFilter", "true")
+        git(path, "config", "uploadpack.allowReachableSHA1InWant", "true")
+        git(path, "config", "remote.origin.pushurl", "/nonexistent/replay-never-pushes")
+        git(path, "config", "remote.origin.fetch", "+refs/replay-none/*:refs/replay-none/*")
+        git(path, "symbolic-ref", "HEAD", "refs/heads/replay-none")
+        for ref in git(path, "for-each-ref", "--format=%(refname)").splitlines():
+            git(path, "update-ref", "-d", ref)
+    git(path, "update-ref", f"refs/heads/replay-{commit}", git(task["repo"], "rev-parse", f"{commit}^{{commit}}"))
+    return path, f"replay-{commit}"
+
+
 def slot(task, label, commit=None):
     path = os.path.join(task["work"], f"slot-{label}")
     shutil.rmtree(path, ignore_errors=True)
-    subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", task["repo"], path], check=True)
-    git(path, "remote", "remove", "origin")
-    git(path, "checkout", "-q", "-b", task.get("branch", "replay"), commit or task["base"])
+    origin, ref = source(task, commit or task["base"])
+    git(task["work"], "init", "-q", path)
+    for key, value in (("url", origin), ("pushurl", "/nonexistent/replay-never-pushes"), ("promisor", "true"),
+                       ("partialclonefilter", "blob:none"), ("fetch", "+refs/replay-none/*:refs/replay-none/*")):
+        git(path, "config", f"remote.origin.{key}", value)
+    git(path, "fetch", "-q", "--filter=blob:none", "origin", ref)
+    git(path, "checkout", "-q", "-b", task.get("branch", "replay"), "FETCH_HEAD")
+    if ref != f"replay-{task['base']}":
+        git(origin, "update-ref", "-d", f"refs/heads/{ref}")
     for link in task.get("links", []):
         os.symlink(os.path.join(task["link_from"], link), os.path.join(path, link))
     context = task.get("forge_context")
@@ -72,9 +99,9 @@ def slot(task, label, commit=None):
         current = os.path.join(path, ".forge", "current")
         os.makedirs(os.path.join(current, "tasks"), exist_ok=True)
         for name in context.get("files", []):
-            shutil.copy(os.path.join(expand(context["from"]), name), os.path.join(current, name))
+            open(os.path.join(current, name), "w").write(context_file(context, name))
         if context.get("decisions_lines"):
-            lines = open(os.path.join(expand(context["from"]), "decisions.md")).read().splitlines()
+            lines = context_file(context, "decisions.md").splitlines()
             open(os.path.join(current, "decisions.md"), "w").write("\n".join(lines[:context["decisions_lines"]]) + "\n")
         with open(os.path.join(path, ".git", "info", "exclude"), "a") as exclude:
             exclude.write("/.forge/\n")
@@ -154,10 +181,30 @@ def checks(task, path):
             "commits": commits, "uncommitted": len(dirty)}
 
 
-def usage(log, session, model):
+def forbidden(task):
+    marks = [task["repo"], *task.get("forbidden", [])]
+    for reference in [task["reference"]] if isinstance(task.get("reference"), dict) else task.get("reference", []):
+        marks.append(git(task["repo"], "rev-parse", "--short=7", reference["commit"]))
+    return [expand(mark) for mark in marks]
+
+
+def reads(mine, marks):
+    seen = {}
+    for row in mine[-1:]:
+        for message in row["body"].get("messages", []):
+            for block in message.get("content") if isinstance(message.get("content"), list) else []:
+                if block.get("type") == "tool_use":
+                    found = [mark for mark in marks if re.search(re.escape(mark) + r"(?![\w-])", json.dumps(block["input"]))]
+                    if found:
+                        seen[block["id"]] = found
+    return sorted({mark for found in seen.values() for mark in found}), len(seen)
+
+
+def usage(log, session, model, marks):
     price = PRICES[model]
     rows = [json.loads(line) for line in open(log)] if os.path.exists(log) else []
     mine = [row for row in rows if session in json.dumps(row["body"].get("metadata", {}))]
+    touched, calls_touching = reads(mine, marks)
     calls = []
     for row in mine:
         use = row["usage"]
@@ -168,7 +215,8 @@ def usage(log, session, model):
                       "write_1h": creation.get("ephemeral_1h_input_tokens", 0), "output": use.get("output_tokens", 0)})
     sums = {key: sum(call[key] for call in calls) for key in price}
     usd = sum(sums[key] * price[key] for key in price) / 1e6
-    return {"requests": len(calls), **sums, "usd": round(usd, 4), "calls": calls}
+    return {"requests": len(calls), **sums, "usd": round(usd, 4), "calls": calls,
+            "forbidden_reads": touched, "forbidden_tool_calls": calls_touching}
 
 
 def run(task, label, model, orchestration, effort, idle, hour_cache, log, port):
@@ -195,7 +243,7 @@ def run(task, label, model, orchestration, effort, idle, hour_cache, log, port):
     calls = open(forge_log).read().splitlines() if os.path.exists(forge_log) else []
     return {"run": label, "task": task["name"], "model": model, "orchestration": orchestration, "effort": effort,
             "idle": idle, "hour_cache": hour_cache, "exit": done.returncode, "wall_s": wall, "session": session,
-            **usage(log, session, model), **checks(task, path),
+            **usage(log, session, model, forbidden(task)), **checks(task, path),
             "forge_calls": {kind: sum(line.startswith(kind) for line in calls)
                             for kind in ("ship decide", "board post", "commit", "ship task")},
             "report": done.stdout.strip()[-600:]}
@@ -212,6 +260,7 @@ def rounds(task, args):
         if model not in PRICES:
             sys.exit(f"replay.py has no price for {model}: add its rates from crates/core/agent-types/src/pricing.rs")
     impl(task)
+    forge_stub(task)
     for number in range(args.first, args.first + args.rounds):
         threads = []
         for model, orchestration in variants:
