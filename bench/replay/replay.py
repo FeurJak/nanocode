@@ -99,7 +99,13 @@ def slot(task, label, commit=None):
         current = os.path.join(path, ".forge", "current")
         os.makedirs(os.path.join(current, "tasks"), exist_ok=True)
         for name in context.get("files", []):
-            open(os.path.join(current, name), "w").write(context_file(context, name))
+            body = context_file(context, name)
+            for file, old, new in context.get("edits", []):
+                if file == name:
+                    if old not in body:
+                        sys.exit(f"forge_context edit for {name} does not match: {old}")
+                    body = body.replace(old, new)
+            open(os.path.join(current, name), "w").write(body)
         if context.get("decisions_lines"):
             lines = context_file(context, "decisions.md").splitlines()
             open(os.path.join(current, "decisions.md"), "w").write("\n".join(lines[:context["decisions_lines"]]) + "\n")

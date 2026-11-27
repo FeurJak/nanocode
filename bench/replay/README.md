@@ -16,7 +16,9 @@ before the task, with the same prompt and the same Forge context, and no run can
 2. **Forge context.** It copies the Impl's plan files into the slot's `.forge/current`. With
    `forge_context.repo` and `forge_context.commit`, it reads them from that commit of the vault, with
    `from` a path in it: take the checkpoint from just before the task was handed out, because a later
-   snapshot already shows the task done and cites its evidence. Of `decisions.md` it
+   snapshot already shows the task done and cites its evidence. When no checkpoint predates the task,
+   take the first one after it and undo what the task changed with `forge_context.edits`, a list of
+   `[file, old, new]` replacements; one that does not match stops the run. Of `decisions.md` it
    keeps only the first `decisions_lines` lines, the header, because the decisions the task itself took
    would give the answer away. With `"impl": true` it also makes a read-only clone at `base` to stand in for
    the Impl worktree, so the prompt's "read from the Impl worktree" never reaches the finished work.
