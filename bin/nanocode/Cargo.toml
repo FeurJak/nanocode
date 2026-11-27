@@ -47,7 +47,6 @@ nanocode-observability = { path = "../../crates/integrations/observability", ver
 nanocode-store-jsonl = { path = "../../crates/integrations/store-jsonl", version = "0.7.0" }
 nanocode-sync.workspace = true
 nanocode-http.workspace = true
-nanocode-aws.workspace = true
 nanocode-tempo.workspace = true
 nanocode-tui = { path = "../../crates/tui", version = "0.7.0" }
 serde_json = { workspace = true, features = ["preserve_order"] }

@@ -65,23 +65,13 @@ fn anthropic(clients: ModelClients) -> Result<ModelClients, String> {
     if clients.supplies_claude() {
         return Ok(clients);
     }
-    if crate::bedrock_claude::enabled() {
-        let bedrock = crate::bedrock_claude::BedrockClaude::from_env()?;
-        let url = crate::bedrock_claude::BedrockClaude::messages_url();
-        let hour_cache = crate::bedrock_claude::hour_cache();
-        let fallbacks = crate::bedrock_claude::refusal_fallbacks();
+    if nanocode::claude::bedrock::enabled(&|name| std::env::var(name).ok()) {
+        let bedrock =
+            nanocode::claude::bedrock::Bedrock::from_env().map_err(|error| error.to_string())?;
         let clients = clients.unlisted_models(nanocode::HarnessFamily::Claude);
         let http = nanocode::claude::ClaudeClient::http_client();
         return Ok(clients.claude(move || {
-            nanocode::claude::ClaudeClient::with_auth_headers(
-                http.clone(),
-                url.clone(),
-                nanocode_http::types::header::HeaderMap::new(),
-            )
-            .with_http_layer(bedrock.clone())
-            .with_hour_cache(hour_cache)
-            .with_refusal_fallbacks(fallbacks.clone())
-            .with_inference_route(crate::bedrock_claude::inference_route)
+            nanocode::claude::ClaudeClient::bedrock(http.clone(), bedrock.clone())
         }));
     }
     if crate::vertex_claude::enabled() {

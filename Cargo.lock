@@ -394,6 +394,7 @@ version = "0.7.0"
 dependencies = [
  "memchr",
  "nanocode-agent-types",
+ "nanocode-aws",
  "nanocode-bytes",
  "nanocode-digest",
  "nanocode-executor",
@@ -574,7 +575,6 @@ dependencies = [
  "nanocode",
  "nanocode-agent-host",
  "nanocode-arguments",
- "nanocode-aws",
  "nanocode-compression",
  "nanocode-computer-repl",
  "nanocode-executor",

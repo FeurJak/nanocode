@@ -20,6 +20,7 @@ use serde_json::Value;
 
 mod admission;
 mod auth;
+pub mod bedrock;
 #[cfg(not(target_family = "wasm"))]
 mod claude_code;
 #[cfg(not(target_family = "wasm"))]

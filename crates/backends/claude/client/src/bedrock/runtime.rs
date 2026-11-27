@@ -5,24 +5,13 @@ use nanocode_sync::StreamExt;
 use nanocode_sys::base64::STANDARD;
 use serde_json::{Map, Value};
 
-pub const SERVICE: &str = "bedrock";
+pub(super) const SERVICE: &str = "bedrock";
 const VERSION: &str = "bedrock-2023-05-31";
-const BASE_URL: &str = "ANTHROPIC_BEDROCK_BASE_URL";
 const EVENT_STREAM: &str = "application/vnd.amazon.eventstream";
 const SERVER_SENT_EVENTS: &str = "text/event-stream";
 const BETA_HEADER: &str = "anthropic-beta";
 
-pub fn base(region: &str) -> String {
-    std::env::var(BASE_URL)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| format!("https://bedrock-runtime.{region}.amazonaws.com"))
-        .trim_end_matches('/')
-        .to_owned()
-}
-
-pub fn rewrite(
+pub(super) fn rewrite(
     request: &mut Request,
     mut body: Map<String, Value>,
     base: &str,
@@ -187,7 +176,7 @@ async fn step(mut frames: Frames) -> Option<(Result<Vec<u8>, Error>, Frames)> {
     None
 }
 
-pub fn response(response: Response) -> Response {
+pub(super) fn response(response: Response) -> Response {
     let streamed = response
         .headers
         .get(CONTENT_TYPE)

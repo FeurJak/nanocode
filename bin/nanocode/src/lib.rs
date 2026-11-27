@@ -5,8 +5,6 @@ mod app;
 #[cfg(target_os = "linux")]
 mod arguments;
 mod attempts;
-mod bedrock_claude;
-mod bedrock_runtime;
 mod cells;
 mod cli;
 mod commands;
