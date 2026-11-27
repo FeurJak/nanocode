@@ -1,6 +1,7 @@
 mod credentials;
 mod discover;
 mod encode;
+pub mod event_stream;
 mod sign;
 mod source;
 mod time;

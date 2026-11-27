@@ -36,7 +36,7 @@
 | `nanocode-http`, `nanocode-zstd`, `nanocode-tls` | HTTP layer contracts and retry rules, a streaming zstd decoder, cached TLS configuration |
 | `nanocode-mcp`, `nanocode-mcp-http` | The MCP client: portable session engine; native Streamable HTTP and OAuth |
 | `nanocode-google-auth` | Google Cloud access tokens from Application Default Credentials: user, service account, impersonated and workload identity credentials, the metadata server, gcloud |
-| `nanocode-aws` | AWS request signing and credentials: SigV4 for any service, environment keys, Bedrock bearer tokens, CLI profiles (SSO, assumed roles), ECS container and EC2 instance credentials, the region from the environment or the profile |
+| `nanocode-aws` | AWS request signing and credentials: SigV4 for any service, the event-stream decoder (prelude and message CRC32 checked), environment keys, Bedrock bearer tokens, CLI profiles (SSO, assumed roles), ECS container and EC2 instance credentials, the region from the environment or the profile |
 | `nanocode-schema` | JSON Schema validation for output contracts |
 | `nanocode-home` | The Nanocode home, AGENTS.md and skill discovery, shell detection, user services |
 | `nanocode-image`, `nanocode-audio` | Prompt image preparation; audio token accounting |

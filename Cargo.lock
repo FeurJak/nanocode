@@ -299,6 +299,7 @@ name = "nanocode-aws"
 version = "0.7.0"
 dependencies = [
  "nanocode-bytes",
+ "nanocode-compression",
  "nanocode-digest",
  "nanocode-http",
  "nanocode-platform",

@@ -11,6 +11,7 @@ description = "AWS request signing and credentials: SigV4 for any service, envir
 
 [dependencies]
 nanocode-bytes.workspace = true
+nanocode-compression.workspace = true
 nanocode-digest.workspace = true
 nanocode-http.workspace = true
 nanocode-platform.workspace = true
