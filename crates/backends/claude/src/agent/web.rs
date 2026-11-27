@@ -70,7 +70,7 @@ impl Side {
             let response = collect_stream(first, stream)
                 .await
                 .map_err(|error| error.to_string())?;
-            super::spend_aside(session_id, &self.model, &response.usage);
+            super::spend_aside(&self.client, session_id, &self.model, &response.usage);
             Ok(response)
         })
     }

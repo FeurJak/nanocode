@@ -213,12 +213,13 @@ fn add_usage(total: &mut Usage, usage: &Usage) {
 static SPENT_ASIDE: std::sync::LazyLock<nanocode_sync::AtomMap<String, Usage>> =
     std::sync::LazyLock::new(nanocode_sync::AtomMap::default);
 
-fn spend_aside(session_id: &str, model: &str, usage: &Usage) {
+fn spend_aside(client: &ClaudeClient, session_id: &str, model: &str, usage: &Usage) {
     let mut usage = usage.clone();
+    let route = client.inference_route(model);
     usage.estimated_cost = model
         .parse::<nanocode_agent_core::ClaudeModel>()
         .ok()
-        .and_then(|model| model.estimate_cost(usage.tokens(None), false));
+        .and_then(|model| model.estimate_cost_on(usage.tokens(None), false, route));
     SPENT_ASIDE.update(|spent| match spent.get_mut(session_id) {
         Some(total) => add_usage(total, &usage),
         None => {
@@ -2144,7 +2145,7 @@ async fn nested_web_search(
         let response = collect_stream(first, stream)
             .await
             .map_err(|_| "nested search stream failed")?;
-        spend_aside(session_id, model, &response.usage);
+        spend_aside(client, session_id, model, &response.usage);
         if response.role != Role::Assistant {
             return Err("nested search response is not assistant".into());
         }
@@ -5406,10 +5407,11 @@ impl State {
                 )
             },
         );
+        let route = self.client.inference_route(&model);
         model
             .parse::<nanocode_agent_core::ClaudeModel>()
             .ok()?
-            .estimate_cost(usage.tokens(ttl), speed == Some(crate::Speed::Fast))
+            .estimate_cost_on(usage.tokens(ttl), speed == Some(crate::Speed::Fast), route)
     }
 
     fn speed(&self) -> Option<crate::Speed> {

@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+pub use nanocode_agent_types::InferenceRoute;
 use nanocode_agent_types::{ClaudeTokens, EstimatedUsdCost, UsdAmount};
 use nanocode_sync::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize};
@@ -2098,6 +2099,8 @@ enum HttpConnection {
     Transport(Arc<dyn transport::HttpTransport>),
 }
 
+type RouteOf = dyn Fn(&str) -> nanocode_agent_types::InferenceRoute + Send + Sync;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HourCache {
     #[default]
@@ -2119,6 +2122,7 @@ pub struct ClaudeClient {
     subscription_cache_tail: bool,
     hour_cache: HourCache,
     refusal_fallbacks: Option<Arc<[String]>>,
+    inference_route: Option<Arc<RouteOf>>,
     gzip_rejected: Arc<std::sync::atomic::AtomicBool>,
     http_layer: Option<Arc<dyn transport::Layer>>,
     root: Option<Arc<Root>>,
@@ -2177,6 +2181,7 @@ impl ClaudeClient {
             subscription_cache_tail: true,
             hour_cache: HourCache::Never,
             refusal_fallbacks: None,
+            inference_route: None,
             gzip_rejected: Arc::default(),
             http_layer: None,
             root: None,
@@ -2233,6 +2238,7 @@ impl ClaudeClient {
             subscription_cache_tail: true,
             hour_cache: HourCache::Never,
             refusal_fallbacks: None,
+            inference_route: None,
             gzip_rejected: Arc::default(),
             http_layer: None,
             root: None,
@@ -2255,6 +2261,7 @@ impl ClaudeClient {
             subscription_cache_tail: true,
             hour_cache: HourCache::Never,
             refusal_fallbacks: None,
+            inference_route: None,
             gzip_rejected: Arc::default(),
             http_layer: None,
             root: None,
@@ -2397,6 +2404,22 @@ impl ClaudeClient {
     pub const fn with_hour_cache(mut self, hour_cache: HourCache) -> Self {
         self.hour_cache = hour_cache;
         self
+    }
+
+    #[must_use]
+    pub fn with_inference_route(
+        mut self,
+        route: impl Fn(&str) -> nanocode_agent_types::InferenceRoute + Send + Sync + 'static,
+    ) -> Self {
+        self.inference_route = Some(Arc::new(route));
+        self
+    }
+
+    #[must_use]
+    pub fn inference_route(&self, model: &str) -> nanocode_agent_types::InferenceRoute {
+        self.inference_route
+            .as_ref()
+            .map_or_else(Default::default, |route| route(model))
     }
 
     #[must_use]

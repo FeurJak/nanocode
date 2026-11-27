@@ -81,6 +81,7 @@ fn anthropic(clients: ModelClients) -> Result<ModelClients, String> {
             .with_http_layer(bedrock.clone())
             .with_hour_cache(hour_cache)
             .with_refusal_fallbacks(fallbacks.clone())
+            .with_inference_route(crate::bedrock_claude::inference_route)
         }));
     }
     if crate::vertex_claude::enabled() {

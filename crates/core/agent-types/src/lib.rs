@@ -12,7 +12,7 @@ pub use harness::{
     ClaudeModel, HarnessFamily, ModelCapabilities, ModelInfo, ModelSelection, ModelTransport,
     model_catalog,
 };
-pub use pricing::ClaudeTokens;
+pub use pricing::{ClaudeTokens, InferenceRoute};
 pub use usage::{
     AgentUsage, CostStatus, EstimatedUsdCost, ReportedTurnUsage, ServiceTier, TurnUsage,
     UsageRecord, UsdAmount,

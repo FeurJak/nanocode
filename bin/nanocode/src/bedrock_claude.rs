@@ -65,6 +65,18 @@ pub fn refusal_fallbacks() -> Vec<String> {
         .collect()
 }
 
+pub fn inference_route(model: &str) -> nanocode::claude::InferenceRoute {
+    let regional = bedrock_model(model).is_ok_and(|id| {
+        REGION_PREFIXES[1..]
+            .iter()
+            .any(|prefix| id.starts_with(&format!("{prefix}.{MODEL_PREFIX}")))
+    });
+    match regional {
+        true => nanocode::claude::InferenceRoute::Regional,
+        false => nanocode::claude::InferenceRoute::Global,
+    }
+}
+
 pub fn hour_cache() -> nanocode::claude::HourCache {
     match flag(HOUR_CACHE) {
         true => nanocode::claude::HourCache::Always,

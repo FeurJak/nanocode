@@ -49,10 +49,40 @@ const fn rates(
 }
 
 const HAIKU_55_STANDARD_PROMPT_TOKENS: u64 = 100_000;
+const REGIONAL_PERCENT: u64 = 110;
+const PERCENT: u64 = 100;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InferenceRoute {
+    #[default]
+    Global,
+    Regional,
+}
+
+impl InferenceRoute {
+    const fn scale(self, amount: UsdAmount) -> UsdAmount {
+        match self {
+            Self::Global => amount,
+            Self::Regional => UsdAmount::from_nano_usd(
+                amount.nano_usd().saturating_mul(REGIONAL_PERCENT) / PERCENT,
+            ),
+        }
+    }
+}
 
 impl ClaudeModel {
     #[must_use]
     pub fn estimate_cost(self, tokens: ClaudeTokens, fast_mode: bool) -> Option<EstimatedUsdCost> {
+        self.estimate_cost_on(tokens, fast_mode, InferenceRoute::Global)
+    }
+
+    #[must_use]
+    pub fn estimate_cost_on(
+        self,
+        tokens: ClaudeTokens,
+        fast_mode: bool,
+        route: InferenceRoute,
+    ) -> Option<EstimatedUsdCost> {
         let rates = self.rates(tokens.prompt_tokens(), fast_mode)?;
         let cache_write =
             UsdAmount::saturating_mul(tokens.cache_write_5m_input_tokens, rates.cache_write_5m)
@@ -61,10 +91,16 @@ impl ClaudeModel {
                     rates.cache_write_1h,
                 ));
         Some(EstimatedUsdCost::new(
-            UsdAmount::saturating_mul(tokens.input_tokens, rates.input),
-            UsdAmount::saturating_mul(tokens.cache_read_input_tokens, rates.cache_read),
-            cache_write,
-            UsdAmount::saturating_mul(tokens.output_tokens, rates.output),
+            route.scale(UsdAmount::saturating_mul(tokens.input_tokens, rates.input)),
+            route.scale(UsdAmount::saturating_mul(
+                tokens.cache_read_input_tokens,
+                rates.cache_read,
+            )),
+            route.scale(cache_write),
+            route.scale(UsdAmount::saturating_mul(
+                tokens.output_tokens,
+                rates.output,
+            )),
             ServiceTier::from_fast_mode(fast_mode),
         ))
     }
