@@ -202,11 +202,15 @@ fn report(herdr: &nanocode::herdr::Reporter, state: nanocode::herdr::State, mess
     let Some(sequence) = herdr.changed(state, message) else {
         return;
     };
-    let written = match std::io::stdout().is_terminal() {
-        true => std::io::stdout()
+    let written = match (
+        std::io::stdout().is_terminal(),
+        std::io::stderr().is_terminal(),
+    ) {
+        (true, _) => std::io::stdout()
             .write_all(sequence.as_bytes())
             .and_then(|()| std::io::stdout().flush()),
-        false => std::io::stderr().write_all(sequence.as_bytes()),
+        (false, true) => std::io::stderr().write_all(sequence.as_bytes()),
+        (false, false) => Ok(()),
     };
     if let Err(error) = written {
         nanocode_trace::debug!(%error, "the Herdr status was not written");
