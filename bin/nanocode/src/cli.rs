@@ -387,6 +387,10 @@ const SESSION: Group = Group::new(&[
     Argument::value("tool_output_token_limit", "TOKENS", Parser::U64)
         .long("tool-output-token-limit")
         .help("Codex harness: cut each tool output of a custom model to this many tokens (4 bytes each), head and tail kept, as Codex CLI's tool_output_token_limit does (defaults to 2500, Codex CLI's 10,000 bytes)"),
+    Argument::value("tool_result_tokens", "TOKENS", Parser::U64)
+        .long("tool-result-tokens")
+        .env("NANOCODE_TOOL_RESULT_TOKENS")
+        .help("Claude harness: cut each tool result (exec and wait cells, and direct Bash, Grep, Read and other tools) to this many tokens (4 characters each), head and tail kept on line boundaries, with a marker naming the omitted lines and how to read them (defaults to 12,000 for cells and 25,000 for direct tools, Read uncut)"),
     Argument::flag("lean_tool_arguments")
         .long("lean-tool-arguments")
         .help("Codex harness: offer a custom model exec_command with only cmd, workdir and yield_time_ms and write_stdin without max_output_tokens, so it emits no default arguments; off unless set"),
@@ -900,6 +904,7 @@ pub struct SessionArgs {
     pub no_alt_screen: bool,
     pub no_reasoning_replay: bool,
     pub tool_output_token_limit: Option<u64>,
+    pub tool_result_tokens: Option<u64>,
     pub lean_tool_arguments: bool,
     pub codex_orchestration: Option<CodexOrchestrationArg>,
     pub no_codesign: bool,
@@ -1052,6 +1057,7 @@ impl SessionArgs {
             no_alt_screen: matches.flag("no_alt_screen"),
             no_reasoning_replay: matches.flag("no_reasoning_replay"),
             tool_output_token_limit: matches.u64("tool_output_token_limit"),
+            tool_result_tokens: matches.u64("tool_result_tokens"),
             lean_tool_arguments: matches.flag("lean_tool_arguments"),
             codex_orchestration: matches
                 .choice("codex_orchestration")
@@ -1101,6 +1107,7 @@ impl SessionArgs {
             tool_output_token_limit: self
                 .tool_output_token_limit
                 .or(root.tool_output_token_limit),
+            tool_result_tokens: self.tool_result_tokens.or(root.tool_result_tokens),
             lean_tool_arguments: self.lean_tool_arguments || root.lean_tool_arguments,
             codex_orchestration: self.codex_orchestration.or(root.codex_orchestration),
             no_codesign: self.no_codesign || root.no_codesign,

@@ -156,6 +156,7 @@ impl Family for ClaudeFold {
         Ok(ClaudeDecision::Template {
             request,
             tool_result_tokens: TOOL_RESULT_TOKENS,
+            direct_tool_result_tokens: None,
         })
     }
 

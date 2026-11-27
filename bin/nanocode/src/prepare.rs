@@ -189,6 +189,13 @@ pub(super) fn prepare<'a>(
                 .transpose()
                 .map_err(|error| format!("--tool-output-token-limit: {error}"))?,
             lean_tool_arguments: args.lean_tool_arguments,
+            tool_result_tokens: args
+                .tool_result_tokens
+                .map(|tokens| {
+                    std::num::NonZeroU64::new(tokens)
+                        .ok_or("--tool-result-tokens must be at least 1")
+                })
+                .transpose()?,
             working_state: working_state_policy(args)?,
             hedge: hedge_policy(args)?,
         };

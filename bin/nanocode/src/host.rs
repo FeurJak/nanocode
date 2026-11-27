@@ -499,6 +499,7 @@ pub struct HostConfig {
     pub no_reasoning_replay: bool,
     pub tool_output_token_limit: Option<usize>,
     pub lean_tool_arguments: bool,
+    pub tool_result_tokens: Option<std::num::NonZeroU64>,
     pub working_state: Option<nanocode::oai::session::working_state::WorkingStatePolicy>,
     pub hedge: nanocode::hedge::HedgePolicy,
 }
@@ -766,6 +767,7 @@ impl Host {
         let context_window = config.context_window;
         let listed = config.clients.listing_windows();
         let max_output = config.max_output_tokens;
+        let tool_result_tokens = config.tool_result_tokens;
         let compact_instructions = config.compact_instructions;
         let working_state = config.working_state;
         if let (Some(tokens), Some(maximum)) = (
@@ -853,6 +855,12 @@ impl Host {
             let builder = builder
                 .hedging(std::sync::Arc::clone(&hedging))
                 .omit_custom_model_thinking(no_reasoning_replay);
+            let builder = match tool_result_tokens {
+                Some(tokens) => builder
+                    .tool_result_tokens(tokens)
+                    .direct_tool_result_tokens(tokens),
+                None => builder,
+            };
             let builder = match max_output {
                 Some(tokens) => builder.max_tokens(tokens),
                 None if builder.knows_max_tokens() => builder,

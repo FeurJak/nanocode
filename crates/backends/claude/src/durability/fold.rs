@@ -20,6 +20,8 @@ pub enum ClaudeDecision {
     Template {
         request: MessagesRequest,
         tool_result_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direct_tool_result_tokens: Option<u64>,
     },
     Message(Message),
     Admitted {
@@ -62,6 +64,7 @@ struct Queued {
 struct Template {
     request: MessagesRequest,
     tool_result_tokens: u64,
+    direct_tool_result_tokens: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -216,10 +219,14 @@ impl ClaudeFold {
         &self.messages
     }
 
-    pub(crate) fn template(&self) -> Option<(&MessagesRequest, u64)> {
-        self.template
-            .as_ref()
-            .map(|template| (&template.request, template.tool_result_tokens))
+    pub(crate) fn template(&self) -> Option<(&MessagesRequest, u64, Option<u64>)> {
+        self.template.as_ref().map(|template| {
+            (
+                &template.request,
+                template.tool_result_tokens,
+                template.direct_tool_result_tokens,
+            )
+        })
     }
 
     pub(crate) fn previous_message_id(&self) -> Option<&str> {
@@ -313,6 +320,7 @@ impl ClaudeFold {
             Template {
                 request,
                 tool_result_tokens: crate::agent::TOOL_RESULT_TOKEN_LIMIT,
+                direct_tool_result_tokens: None,
             }
         });
         Ok(())
@@ -498,12 +506,15 @@ impl ClaudeFold {
             return Ok(());
         }
         let wire: ToolOutputWire = decode(seq, "tool output", result.output)?;
-        let tokens = self
-            .template
-            .as_ref()
-            .map_or(crate::agent::TOOL_RESULT_TOKEN_LIMIT, |template| {
-                template.tool_result_tokens
-            });
+        let tokens = self.template.as_ref().map_or(
+            (crate::agent::TOOL_RESULT_TOKEN_LIMIT, None),
+            |template| {
+                (
+                    template.tool_result_tokens,
+                    template.direct_tool_result_tokens,
+                )
+            },
+        );
         let (_, call) = self.call(seq, &result.call_id)?;
         if !call.intended {
             return Err(rejected(
@@ -561,6 +572,7 @@ impl ClaudeFold {
                 ClaudeDecision::Template {
                     request,
                     tool_result_tokens,
+                    direct_tool_result_tokens,
                 },
                 _,
             ) => {
@@ -570,6 +582,7 @@ impl ClaudeFold {
                 self.template = Some(Template {
                     request: request.clone(),
                     tool_result_tokens: *tool_result_tokens,
+                    direct_tool_result_tokens: *direct_tool_result_tokens,
                 });
                 Ok(())
             }
@@ -683,7 +696,7 @@ fn rendered(
     id: &str,
     name: &str,
     wire: ToolOutputWire,
-    tokens: u64,
+    tokens: (u64, Option<u64>),
 ) -> Result<Option<ContentBlock>, String> {
     let output = ToolOutput::from_wire(wire).map_err(|error| error.to_string())?;
     let reply = crate::claude_tools::tool_reply(output)?;
@@ -692,17 +705,7 @@ fn rendered(
     {
         return Ok(None);
     }
-    let content = match name {
-        "Read" => reply.content,
-        "exec" | "wait" => crate::agent::bound_tool_result(reply.content, tokens).0,
-        _ => {
-            crate::agent::bound_tool_result(
-                reply.content,
-                crate::agent::DIRECT_TOOL_RESULT_TOKEN_LIMIT,
-            )
-            .0
-        }
-    };
+    let content = crate::agent::bounded_result(name, reply.content, tokens.0, tokens.1).0;
     Ok(Some(ContentBlock::ToolResult {
         tool_use_id: id.to_owned(),
         content,

@@ -108,11 +108,33 @@ fn truncate_middle(text: &str, max_tokens: u64) -> String {
         })
         .map_or(0, |(start, c)| start + c.len_utf8())
         .max(head);
+    let head = text[..head].rfind('\n').map_or(head, |at| at + 1);
+    let tail = text[tail..]
+        .find('\n')
+        .map_or(tail, |at| tail + at + 1)
+        .max(head);
+    let omitted = estimate_text_tokens(&text[head..tail]);
     format!(
-        "{}…{} tokens truncated…{}",
+        "{}{}{}",
         &text[..head],
-        total - max_tokens,
+        omission(text, head, tail, omitted),
         &text[tail..]
+    )
+}
+
+fn omission(text: &str, head: usize, tail: usize, omitted: u64) -> String {
+    let lines = text.lines().count();
+    let first = text[..head].matches('\n').count() + 1;
+    let last = text[..tail].matches('\n').count().max(first);
+    if lines < 2 || head == tail {
+        return format!(
+            "…{omitted} tokens truncated: characters {head}–{tail} of {} are not shown. This tool result was cut to fit its token budget; to read them, run the command again with a narrower output…",
+            text.len()
+        );
+    }
+    format!(
+        "…{omitted} tokens truncated: lines {first}–{last} of {lines} are not shown. This tool result was cut to fit its token budget; to read those lines, run the command again narrowed to them (for example sed -n '{first},{last}p', head, tail or grep), or Read the file with offset {first} and limit {}…\n",
+        last + 1 - first
     )
 }
 
@@ -123,6 +145,20 @@ pub(crate) fn stored_messages<'de, D: serde::Deserializer<'de>>(
         .into_iter()
         .map(HistoryMessage::into_message)
         .collect())
+}
+
+pub(crate) fn bounded_result(
+    name: &str,
+    content: ToolResultContent,
+    cells: u64,
+    direct: Option<u64>,
+) -> (ToolResultContent, Option<usize>) {
+    match (name, direct) {
+        ("exec" | "wait", _) => bound_tool_result(content, cells),
+        ("Read", None) => (content, None),
+        (_, Some(direct)) => bound_tool_result(content, direct),
+        (_, None) => bound_tool_result(content, DIRECT_TOOL_RESULT_TOKEN_LIMIT),
+    }
 }
 
 pub(crate) fn bound_tool_result(
@@ -933,6 +969,7 @@ pub struct ClaudeBuilder {
     result_effort: Option<crate::Effort>,
     stop_at_target: bool,
     tool_result_tokens: Option<std::num::NonZeroU64>,
+    direct_tool_result_tokens: Option<std::num::NonZeroU64>,
     tool_result_clearing: Option<(usize, u64)>,
     clearing_cache_floors: bool,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
@@ -1043,6 +1080,7 @@ impl ClaudeBuilder {
             result_effort: None,
             stop_at_target: false,
             tool_result_tokens: None,
+            direct_tool_result_tokens: None,
             tool_result_clearing: None,
             clearing_cache_floors: false,
             spawn_factory: None,
@@ -1616,6 +1654,11 @@ impl ClaudeBuilder {
 
     pub const fn tool_result_tokens(mut self, limit: std::num::NonZeroU64) -> Self {
         self.tool_result_tokens = Some(limit);
+        self
+    }
+
+    pub const fn direct_tool_result_tokens(mut self, limit: std::num::NonZeroU64) -> Self {
+        self.direct_tool_result_tokens = Some(limit);
         self
     }
 
@@ -3653,6 +3696,7 @@ struct State {
     result_effort: Option<crate::Effort>,
     stop_at_target: bool,
     tool_result_tokens: Option<std::num::NonZeroU64>,
+    direct_tool_result_tokens: Option<std::num::NonZeroU64>,
     tool_result_clearing: Option<(usize, u64)>,
     clearing_cache_floors: bool,
     working_directory: Option<crate::environment::WorkingDirectory>,

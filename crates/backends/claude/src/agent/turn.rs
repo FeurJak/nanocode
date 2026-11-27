@@ -216,16 +216,14 @@ pub(super) fn call_tool<'a>(
             &state.images,
         )
         .await?;
-        let (content, original_bytes) = match name {
-            "Read" => (content, None),
-            "exec" | "wait" => bound_tool_result(
-                content,
-                state
-                    .tool_result_tokens
-                    .map_or(TOOL_RESULT_TOKEN_LIMIT, std::num::NonZeroU64::get),
-            ),
-            _ => bound_tool_result(content, DIRECT_TOOL_RESULT_TOKEN_LIMIT),
-        };
+        let (content, original_bytes) = crate::agent::bounded_result(
+            name,
+            content,
+            state.tool_result_tokens_bound(),
+            state
+                .direct_tool_result_tokens
+                .map(std::num::NonZeroU64::get),
+        );
         state.emit(
             events,
             AgentEventKind::ToolResult,

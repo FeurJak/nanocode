@@ -55,7 +55,7 @@ impl State {
         self.policy.as_deref()?.facts()
     }
 
-    fn tool_result_tokens_bound(&self) -> u64 {
+    pub(super) fn tool_result_tokens_bound(&self) -> u64 {
         self.tool_result_tokens
             .map_or(TOOL_RESULT_TOKEN_LIMIT, std::num::NonZeroU64::get)
     }
@@ -70,6 +70,9 @@ impl State {
             return Ok(());
         };
         let tokens = self.tool_result_tokens_bound();
+        let direct = self
+            .direct_tool_result_tokens
+            .map(std::num::NonZeroU64::get);
         let template = folded_template(template);
         let (container, previous_message_id) = carried;
         let diagnosed = template.diagnostics.is_some();
@@ -81,7 +84,7 @@ impl State {
             .read(move |fold| {
                 let (container, previous_message_id) = carried;
                 (
-                    fold.template() != Some((&template, tokens)),
+                    fold.template() != Some((&template, tokens, direct)),
                     fold.container() != container.as_deref()
                         || (diagnosed
                             && fold.previous_message_id() != previous_message_id.as_deref()),
@@ -93,6 +96,7 @@ impl State {
             let decision = ClaudeDecision::Template {
                 request: template,
                 tool_result_tokens: tokens,
+                direct_tool_result_tokens: direct,
             };
             facts.commit(decided(decision)).await?;
         }
