@@ -211,7 +211,8 @@ def rounds(task, args):
     for model, _ in variants:
         if model not in PRICES:
             sys.exit(f"replay.py has no price for {model}: add its rates from crates/core/agent-types/src/pricing.rs")
-    for number in range(1, args.rounds + 1):
+    impl(task)
+    for number in range(args.first, args.first + args.rounds):
         threads = []
         for model, orchestration in variants:
             label = f"r{number}-{model.split('-')[1]}-{orchestration}"
@@ -275,6 +276,7 @@ def main():
     commands.choices["run"].add_argument("--model", default="claude-opus-5-5")
     commands.choices["run"].add_argument("--orchestration", default="code-mode", choices=["code-mode", "direct"])
     commands.choices["rounds"].add_argument("--rounds", type=int, default=2)
+    commands.choices["rounds"].add_argument("--first", type=int, default=1)
     commands.choices["rounds"].add_argument("--variant", action="append", required=True)
     check = commands.add_parser("check")
     check.add_argument("task")
