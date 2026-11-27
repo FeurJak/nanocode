@@ -31,6 +31,11 @@ nanocode-tool-runtime.workspace = true
 nanocode-process.workspace = true
 nanocode-executor.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+nanocode-psh.workspace = true
+nanocode-psh-embedded.workspace = true
+psh.workspace = true
+
 [features]
 # Computer use (trycua cua-driver and the browser extension). Off, the host
 # offers no computer tools and reports why.

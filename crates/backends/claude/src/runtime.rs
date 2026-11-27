@@ -240,6 +240,7 @@ impl RuntimeBackend for ClaudeHarness {
                 });
             }
             let tools = settings.tools;
+            let holds = settings.holds;
             #[cfg(not(target_family = "wasm"))]
             let providers = settings.providers;
             let root = workspace.to_path_buf();
@@ -253,7 +254,11 @@ impl RuntimeBackend for ClaudeHarness {
                     .map(|tools| tools.materialize(handle.clone()))
                     .transpose()
                     .map_err(|error| NanocodeError::InvalidRequest(error.to_string()))?;
-                let prepare = |tools| {
+                let prepare = |tools: nanocode_tool_host::Tools| {
+                    let tools = match &holds {
+                        Some(holds) => tools.into_builder().holds(holds.clone()).build()?,
+                        None => tools,
+                    };
                     services
                         .prepare_tools(&handle, tools, process_store.clone())
                         .map_err(|error| NanocodeError::InvalidRequest(error.to_string()))

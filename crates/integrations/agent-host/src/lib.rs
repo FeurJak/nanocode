@@ -28,6 +28,8 @@ mod computer;
 mod process_routes;
 #[cfg(not(target_family = "wasm"))]
 mod runners;
+#[cfg(unix)]
+pub mod shell;
 
 #[derive(Clone)]
 pub struct Defaults<C, A, F = ()> {

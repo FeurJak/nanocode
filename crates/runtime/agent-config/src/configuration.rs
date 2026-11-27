@@ -36,6 +36,7 @@ pub struct Settings {
     pub model_instructions: Vec<(ModelSelection, Arc<str>)>,
     pub images: Option<ImageHistory>,
     pub tools: Option<AgentTools>,
+    pub holds: Option<nanocode_tool_host::hold::Holds>,
     #[cfg(not(target_family = "wasm"))]
     pub providers: Vec<Arc<dyn nanocode_tool_host::runtime::DynamicToolProvider>>,
 }
@@ -50,6 +51,7 @@ impl Settings {
             },
             images: self.images.or_else(|| fallback.images.clone()),
             tools: self.tools.or_else(|| fallback.tools.clone()),
+            holds: self.holds.or_else(|| fallback.holds.clone()),
             #[cfg(not(target_family = "wasm"))]
             providers: match self.providers.is_empty() {
                 true => fallback.providers.clone(),

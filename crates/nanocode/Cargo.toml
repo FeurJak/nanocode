@@ -34,6 +34,8 @@ nanocode-turnlog.workspace = true
 nanocode-agent-config.workspace = true
 nanocode-agent-core.workspace = true
 nanocode-code-mode = { path = "../runtime/code-mode", version = "0.7.0"   }
+nanocode-cost-fold.workspace = true
+nanocode-http.workspace = true
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 nanocode-computer = { workspace = true, optional = true }

@@ -27,7 +27,7 @@ pub mod sim;
 pub use authority::{AuthorityError, RootAgentAuthority};
 pub use policy::{SpawnPolicy, SpawnPolicyError, SpawnProvider};
 pub use roster::{SubagentNode, SubagentRoster};
-pub use routing::{SpawnDecision, SpawnRoute, SpawnRouter};
+pub use routing::{RouteFuture, SpawnDecision, SpawnRoute, SpawnRouter};
 mod task_tree;
 mod tools;
 

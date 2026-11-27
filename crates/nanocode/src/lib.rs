@@ -45,6 +45,8 @@ pub type Harness = nanocode_agent::Harness<Defaults>;
 pub type HarnessBuilder = nanocode_agent::HarnessBuilder<Defaults>;
 #[cfg(not(target_family = "wasm"))]
 pub use nanocode_agent_host as runners;
+#[cfg(unix)]
+pub use nanocode_agent_host::shell;
 pub use nanocode_backend_codex::CodexBuilder;
 
 pub use nanocode_agent::{CustomModel, Model, ReasoningMode, Thinking};
@@ -331,6 +333,12 @@ pub use nanocode_backend_codex::client as codex;
 
 #[doc(inline)]
 pub use nanocode_backend_codex::client::transport::layer as http;
+
+#[doc(inline)]
+pub use nanocode_http::types as http_types;
+
+#[doc(inline)]
+pub use nanocode_cost_fold as cost;
 
 pub mod tools;
 

@@ -36,11 +36,19 @@ pub(crate) struct Wiring {
     pub(crate) owners: Weak<Ownership>,
     pub(crate) services: Weak<dyn crate::configuration::HostServices>,
     pub(crate) coordination: Option<Arc<dyn nanocode_subagents::Coordination>>,
+    pub(crate) router: Option<Arc<dyn nanocode_subagents::SpawnRouter>>,
+    pub(crate) policy: Option<nanocode_subagents::SpawnPolicy>,
 }
 
 pub(crate) fn open(wiring: Wiring) -> (Arc<dyn Delegates>, SubagentUpdates) {
     let (registry, control, updates) = nanocode_subagents::channel(wiring.limit);
     registry.set_coordination(wiring.coordination);
+    if let Some(router) = wiring.router {
+        registry.set_spawn_router(router);
+    }
+    if let Some(policy) = wiring.policy {
+        registry.set_spawn_policy(policy);
+    }
     if wiring.continuation {
         let owners = wiring.owners;
         registry.set_parent_resolver(Arc::new(move |session_id: &str| {

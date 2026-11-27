@@ -79,6 +79,12 @@ macro_rules! tool_methods {
             self.data.settings.tools = Some(AgentTools::PerAgent(Arc::new(factory)));
             self
         }
+
+        #[must_use]
+        pub fn holds(mut self, holds: nanocode_tool_host::hold::Holds) -> Self {
+            self.data.settings.holds = Some(holds);
+            self
+        }
     };
 }
 
@@ -107,6 +113,8 @@ struct Assembly {
     subagents_disabled: bool,
     subagent_continuation_disabled: bool,
     subagent_coordination: Option<Arc<dyn nanocode_subagents::Coordination>>,
+    spawn_router: Option<Arc<dyn nanocode_subagents::SpawnRouter>>,
+    spawn_policy: Option<nanocode_subagents::SpawnPolicy>,
 }
 
 impl<B, D: RuntimeDefaults> RuntimeBuilder<B, D> {
@@ -183,6 +191,18 @@ impl<B, D: RuntimeDefaults> RuntimeBuilder<B, D> {
         coordination: Arc<dyn nanocode_subagents::Coordination>,
     ) -> Self {
         self.data.subagent_coordination = Some(coordination);
+        self
+    }
+
+    #[must_use]
+    pub fn spawn_router(mut self, router: Arc<dyn nanocode_subagents::SpawnRouter>) -> Self {
+        self.data.spawn_router = Some(router);
+        self
+    }
+
+    #[must_use]
+    pub fn spawn_policy(mut self, policy: nanocode_subagents::SpawnPolicy) -> Self {
+        self.data.spawn_policy = Some(policy);
         self
     }
 
@@ -432,6 +452,8 @@ fn assemble(
                 owners: Arc::downgrade(&ownership),
                 services: Arc::downgrade(&services),
                 coordination: data.subagent_coordination.clone(),
+                router: data.spawn_router.clone(),
+                policy: data.spawn_policy.clone(),
             });
             (Some(delegates), Some(updates))
         }
