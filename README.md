@@ -25,6 +25,8 @@ nc
 
 `nc default` saves the harness, model, thinking and tier every new session starts with: `nc default claude opus high fast`. `nc default` alone shows them and where they come from, and `nc default reset` clears them. `--model`, `--harness`, `--thinking`, `--tier` and `NANOCODE_MODEL` still win for one run.
 
+MCP servers, the Herdr status and usage records are set in `config.json`; [docs/interactive.md](docs/interactive.md) describes them and what the TUI does not do yet.
+
 ## The SDK
 
 ```toml
