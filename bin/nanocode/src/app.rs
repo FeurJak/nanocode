@@ -146,6 +146,11 @@ pub enum AppEvent {
     Notice(NoticeLevel, String),
     SignIn(bool),
     Hook(crate::hook::Report),
+    UserCommand {
+        name: String,
+        arguments: String,
+        found: std::result::Result<Option<String>, String>,
+    },
     Applied(std::result::Result<(ModelSelection, Thinking, ServiceTier, String), String>),
 }
 
@@ -180,6 +185,7 @@ impl AppEvent {
             Self::Notice(..) => "notice",
             Self::SignIn(_) => "sign_in",
             Self::Hook(_) => "hook",
+            Self::UserCommand { .. } => "user_command",
             Self::Applied(_) => "applied",
         }
     }
@@ -335,6 +341,7 @@ pub struct App {
     title: Option<String>,
     signing_in: usize,
     pub(crate) asks: std::collections::VecDeque<crate::hook::Ask>,
+    pub(crate) command_span: Option<(String, String)>,
     pub(crate) clock_deadline: Option<Instant>,
     pub(crate) btw: HashMap<u64, (Option<nanocode::subagents::AgentId>, usize)>,
     pub(crate) next_btw: u64,
@@ -1161,6 +1168,24 @@ impl App {
                 self.notice(level, text);
                 Redraw::Immediate
             }
+            AppEvent::UserCommand {
+                name,
+                arguments,
+                found,
+            } => {
+                match found {
+                    Ok(Some(prompt)) => {
+                        self.command_span = Some((name, arguments));
+                        self.send(prompt, true);
+                    }
+                    Ok(None) => self.notice(
+                        NoticeLevel::Warning,
+                        format!("unknown command /{name}; try /help, or /commands for your own"),
+                    ),
+                    Err(error) => self.notice(NoticeLevel::Error, format!("/{name}: {error}")),
+                }
+                Redraw::Immediate
+            }
             AppEvent::Hook(crate::hook::Report::Notice(text)) => {
                 self.notice(NoticeLevel::Warning, text);
                 Redraw::Immediate
@@ -1642,6 +1667,9 @@ impl App {
         nanocode_tui::highlight::prewarm();
         if self.title.is_none() {
             self.title = Some(text.clone());
+        }
+        if let Some(usage) = &self.host.config.usage {
+            usage.command(agent.session_id(), self.command_span.take());
         }
         self.resuming = durable;
         self.resumes.insert(id.clone(), (sent.clone(), durable));
@@ -2408,6 +2436,10 @@ impl App {
             self.run_shell(command.trim().to_owned());
             return;
         }
+        self.send(text, queue);
+    }
+
+    fn send(&mut self, text: String, queue: bool) {
         if let Some(id) = self.focus {
             if !self.attachments.is_empty() {
                 self.flash("attachments go to the main thread; /agent returns to it");
@@ -2650,10 +2682,8 @@ impl App {
             "help" | "keys" | "?" => self.overlay = Some(Overlay::Help),
             "quit" | "exit" | "q" => self.quit = true,
             "reload" | "restart" => self.request_reload(true),
-            other => self.notice(
-                NoticeLevel::Warning,
-                format!("unknown command /{other}; try /help"),
-            ),
+            "commands" => self.list_user_commands(),
+            other => self.user_command(other, argument),
         }
     }
 

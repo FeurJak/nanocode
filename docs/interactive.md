@@ -84,10 +84,20 @@ Each entry of `hooks.pre_tool` is a command that sees a tool call before it runs
 - **Several hooks:** every matching entry runs, in order. The first refusal wins, then any ask.
 - **When a hook fails:** it may time out (`timeout` in milliseconds; 60 seconds by default, as in Claude Code), exit with another code, or fail to start. The call then runs, as in Claude Code, and the failure is shown in the transcript (on stderr in exec).
 
+### Your own commands
+
+A file `<name>.md` in `<workspace>/.nanocode/commands/` or `<home>/commands/` is the command `/<name>`. The project's file wins over the home one.
+
+- **Format:** the same as Claude Code's and OpenCode's command files, so those files can be copied or linked. Optional front matter between `---` lines gives a `description`, which `/commands` lists; other front matter keys are ignored.
+- **Arguments:** `/<name> some words` sends the body as the prompt, with `$ARGUMENTS` replaced by the words. A body without `$ARGUMENTS` gets them appended as `ARGUMENTS: …`. Other `$NAME`s, such as positional `$1`, are left for the model, because command bodies often hold shell.
+- **Where they run:** in the TUI, and in `nanocode exec "/<name> words"`. A built-in command with the same name wins.
+- **In usage records:** a command's turn, and every subagent call under it, records `command` (`/<name>`), `command_source` and `args`, until the next prompt starts a turn.
+
 ### Usage records
 
 - **What is written:** one JSON line per completed model call, root agent and subagents alike, appended to `~/.forge/telemetry/usage-YYYY-MM.jsonl` (or under `FORGE_USAGE_DIR`) in that ledger's schema 1:
   - `session`, `command_session` (the root session), and `parent` and `agent` (a subagent's spawning session and role).
+  - `command`, `command_source` and `args` while one of your commands runs; `null` otherwise.
   - `provider`, `model`, `cwd` and `message` (the response id).
   - `tokens`: `in`, `out`, `reasoning`, `cache_read`, `cache_write`; plus `cache_write_1h` when the call wrote the 1-hour cache.
   - `cost` in USD when nanocode prices the call, else `null`; plus `ms` and `finish`.
@@ -98,7 +108,7 @@ Each entry of `hooks.pre_tool` is a command that sees a tool call before it runs
 
 - **Approval only through a hook:** without a pre-tool hook, the CLI runs every tool call without asking; there are no built-in permission rules. There is no post-tool hook.
 - **No question tool:** the model cannot stop to ask the user, so `kind=question` is never reported.
-- **No user commands:** the slash commands are built in; there are no command files with arguments.
+- **Commands are plain prompts:** a command file is not shown in the `/` menu; `/commands` lists them. Its `model` and `agent` front matter is ignored, and it runs no shell or file includes.
 - **No plugins:** there is no plugin or event-hook API.
 - **MCP gaps:**
   - It does not run an OAuth sign-in from config (`oauth` must be `false`, with the credential in `headers`).
@@ -106,6 +116,6 @@ Each entry of `hooks.pre_tool` is a command that sees a tool call before it runs
   - It lists tools within the startup timeout, so there is no `timeout.catalog`.
   - It shows no MCP prompts as commands and no input forms for elicitation; it declines them.
   - It reads the config only at start; OpenCode reloads it on save.
-- **Usage records name no workflow command:** a record's `command`, `artifact`, `domain`, `repo` and `branch` are `null`, because nanocode does not know which command a turn serves. `provider` is inferred from the model and the Bedrock switch.
+- **Usage records name only your commands:** outside one of them, `command` is `null`. `artifact`, `domain`, `repo` and `branch` are always `null`. `provider` is inferred from the model and the Bedrock switch.
 - **No language servers or formatters:** nanocode has no LSP diagnostics and does not run formatters after edits.
 - **No shared server:** each `nanocode` process owns its sessions. There is no background server that several clients attach to.

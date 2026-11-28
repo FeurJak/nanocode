@@ -80,6 +80,7 @@ pub(super) fn run(
             title: None,
             signing_in: 0,
             asks: std::collections::VecDeque::new(),
+            command_span: None,
             clock_deadline: None,
             btw: HashMap::new(),
             next_btw: 0,

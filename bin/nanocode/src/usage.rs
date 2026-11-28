@@ -33,6 +33,7 @@ pub struct Ledger {
     lines: mpsc::Sender<Line>,
     cwd: PathBuf,
     children: Atom<HashMap<(String, AgentId), Child>>,
+    commands: Atom<HashMap<String, (String, String)>>,
     hour: Atom<HashMap<String, bool>>,
     calls: std::sync::atomic::AtomicU64,
 }
@@ -62,9 +63,21 @@ impl Ledger {
             lines,
             cwd: workspace.to_path_buf(),
             children: Atom::new(HashMap::new()),
+            commands: Atom::new(HashMap::new()),
             hour: Atom::new(HashMap::new()),
             calls: std::sync::atomic::AtomicU64::new(0),
         }))
+    }
+
+    pub fn command(&self, root: &str, command: Option<(String, String)>) {
+        self.commands.update(|commands| match &command {
+            Some(command) => {
+                commands.insert(root.to_owned(), command.clone());
+            }
+            None => {
+                commands.remove(root);
+            }
+        });
     }
 
     pub fn root_event(&self, session: &str, event: &AgentEvent) {
@@ -143,6 +156,7 @@ impl Ledger {
         let hour = self
             .hour
             .read(|sessions| sessions.get(session).copied().unwrap_or(false));
+        let command = self.commands.read(|commands| commands.get(root).cloned());
         let record = record(
             &payload,
             &Context {
@@ -154,6 +168,7 @@ impl Ledger {
                 cwd: &self.cwd,
                 call,
                 hour,
+                command: command.as_ref(),
             },
         );
         drop(self.lines.send(Line::Record(at, record.to_string())));
@@ -176,6 +191,7 @@ struct Context<'a> {
     cwd: &'a Path,
     call: u64,
     hour: bool,
+    command: Option<&'a (String, String)>,
 }
 
 fn record(payload: &Value, context: &Context<'_>) -> Value {
@@ -198,9 +214,9 @@ fn record(payload: &Value, context: &Context<'_>) -> Value {
         "v": SCHEMA,
         "ts": timestamp(context.at),
         "harness": "nanocode",
-        "command": null,
-        "command_source": null,
-        "args": null,
+        "command": context.command.map(|(name, _)| format!("/{name}")),
+        "command_source": context.command.map(|_| "hook"),
+        "args": context.command.map(|(_, arguments)| arguments).filter(|arguments| !arguments.is_empty()),
         "artifact": null,
         "domain": null,
         "session": context.session,

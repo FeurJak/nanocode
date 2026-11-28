@@ -1,4 +1,4 @@
-pub const COMMANDS: [(&str, &str); 37] = [
+pub const COMMANDS: [(&str, &str); 38] = [
     (
         "/model",
         "choose the model, thinking and speed for a new thread; tempo/<model> runs on the Tempo gateway; /default saves them for every new session",
@@ -35,6 +35,10 @@ pub const COMMANDS: [(&str, &str); 37] = [
         "answer an MPP service that asks for an email pass: /pass <email>, /pass <code>, or /pass alone to decline",
     ),
     ("/new", "start a new session"),
+    (
+        "/commands",
+        "list your own commands: <name>.md in .nanocode/commands or <home>/commands, run as /<name> [arguments]",
+    ),
     (
         "/mcp",
         "list the MCP servers from config.json (user and project), their state and their tools",

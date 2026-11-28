@@ -43,6 +43,31 @@ pub(super) fn exec(
             }
         });
         let host = prepared.host;
+        let (prompt, span) = match prompt
+            .strip_prefix('/')
+            .filter(|command| !command.starts_with('/'))
+        {
+            Some(command) => {
+                let (name, arguments) = command
+                    .split_once(char::is_whitespace)
+                    .map_or((command.trim(), ""), |(name, rest)| (name, rest.trim()));
+                let (home, workspace) = (prepared.home.clone(), host.config.workspace.clone());
+                let (name, arguments) = (name.to_owned(), arguments.to_owned());
+                let found = nanocode_platform::spawn_blocking({
+                    let (name, arguments) = (name.clone(), arguments.clone());
+                    move || {
+                        crate::user_commands::find(&home, &workspace, &name)
+                            .map(|command| command.map(|command| command.prompt(&arguments)))
+                    }
+                })
+                .await??;
+                match found {
+                    Some(expanded) => (expanded, Some((name, arguments))),
+                    None => (prompt, None),
+                }
+            }
+            None => (prompt, None),
+        };
         let ledger = host.config.usage.clone();
         if let (Some(ledger), Some(mut updates)) =
             (ledger.clone(), host.runtime.take_subagent_updates())
@@ -121,6 +146,9 @@ pub(super) fn exec(
         }
         let herdr = nanocode::herdr::Reporter::from_env(host.config.herdr);
         report(&herdr, nanocode::herdr::State::Working, &prompt);
+        if let Some(ledger) = &ledger {
+            ledger.command(agent.session_id(), span);
+        }
         let outcome: Result<()> = async {
             for pending in pending {
                 eprintln!("nanocode: resuming interrupted turn {}", pending.id);

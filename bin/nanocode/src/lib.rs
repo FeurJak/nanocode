@@ -34,6 +34,7 @@ mod stream;
 mod telemetry;
 mod tempo;
 mod usage;
+mod user_commands;
 mod vertex_claude;
 mod view;
 
