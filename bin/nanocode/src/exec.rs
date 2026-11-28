@@ -56,13 +56,26 @@ pub(super) fn exec(
                 let found = nanocode_platform::spawn_blocking({
                     let (name, arguments) = (name.clone(), arguments.clone());
                     move || {
-                        crate::user_commands::find(&home, &workspace, &name)
-                            .map(|command| command.map(|command| command.prompt(&arguments)))
+                        crate::user_commands::find(&home, &workspace, &name).and_then(|command| {
+                            command
+                                .map(|command| command.invoke(&arguments, &workspace))
+                                .transpose()
+                        })
                     }
                 })
                 .await??;
                 match found {
-                    Some(expanded) => (expanded, Some((name, arguments))),
+                    Some(invocation) => {
+                        if invocation.subagent == Some(true)
+                            || invocation.agent.is_some()
+                            || invocation.model.is_some()
+                        {
+                            eprintln!(
+                                "nanocode: exec runs /{name} in its own session; its model, agent and subagent settings apply in the TUI"
+                            );
+                        }
+                        (invocation.prompt, Some((name, arguments)))
+                    }
                     None => (prompt, None),
                 }
             }

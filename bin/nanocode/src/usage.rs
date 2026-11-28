@@ -34,6 +34,7 @@ pub struct Ledger {
     cwd: PathBuf,
     children: Atom<HashMap<(String, AgentId), Child>>,
     commands: Atom<HashMap<String, (String, String)>>,
+    child_commands: Atom<HashMap<(String, AgentId), (String, String)>>,
     hour: Atom<HashMap<String, bool>>,
     calls: std::sync::atomic::AtomicU64,
 }
@@ -64,6 +65,7 @@ impl Ledger {
             cwd: workspace.to_path_buf(),
             children: Atom::new(HashMap::new()),
             commands: Atom::new(HashMap::new()),
+            child_commands: Atom::new(HashMap::new()),
             hour: Atom::new(HashMap::new()),
             calls: std::sync::atomic::AtomicU64::new(0),
         }))
@@ -80,8 +82,14 @@ impl Ledger {
         });
     }
 
+    pub fn child_command(&self, root: &str, child: AgentId, command: (String, String)) {
+        self.child_commands.update(|commands| {
+            commands.insert((root.to_owned(), child), command.clone());
+        });
+    }
+
     pub fn root_event(&self, session: &str, event: &AgentEvent) {
-        self.event(session, session, None, None, event);
+        self.event(session, session, None, None, None, event);
     }
 
     pub fn update(&self, update: &ScopedAgentUpdate) {
@@ -117,7 +125,17 @@ impl Ledger {
                         },
                     );
                 let role = child.map(|child| child.role);
-                self.event(&session, root, Some(&parent), role.as_deref(), event);
+                let command = self
+                    .child_commands
+                    .read(|commands| commands.get(&(root.to_owned(), *id)).cloned());
+                self.event(
+                    &session,
+                    root,
+                    Some(&parent),
+                    role.as_deref(),
+                    command,
+                    event,
+                );
             }
             AgentUpdate::Status { .. }
             | AgentUpdate::Completion { .. }
@@ -131,6 +149,7 @@ impl Ledger {
         root: &str,
         parent: Option<&str>,
         agent: Option<&str>,
+        own_command: Option<(String, String)>,
         event: &AgentEvent,
     ) {
         if !matches!(
@@ -156,7 +175,8 @@ impl Ledger {
         let hour = self
             .hour
             .read(|sessions| sessions.get(session).copied().unwrap_or(false));
-        let command = self.commands.read(|commands| commands.get(root).cloned());
+        let command =
+            own_command.or_else(|| self.commands.read(|commands| commands.get(root).cloned()));
         let record = record(
             &payload,
             &Context {

@@ -109,12 +109,21 @@ Each entry of `hooks.post_tool` runs after a matching call succeeded, with Claud
 
 ### Your own commands
 
-A file `<name>.md` in `<workspace>/.nanocode/commands/` or `<home>/commands/` is the command `/<name>`. The project's file wins over the home one.
+A file `<name>.md` in `<workspace>/.nanocode/commands/` or `<home>/commands/` is the command `/<name>`. The project's file wins over the home one, and a built-in command keeps its name.
 
-- **Format:** the same as Claude Code's and OpenCode's command files, so those files can be copied or linked. Optional front matter between `---` lines gives a `description`, which `/commands` lists; other front matter keys are ignored.
-- **Arguments:** `/<name> some words` sends the body as the prompt, with `$ARGUMENTS` replaced by the words. A body without `$ARGUMENTS` gets them appended as `ARGUMENTS: …`. Other `$NAME`s, such as positional `$1`, are left for the model, because command bodies often hold shell.
-- **Where they run:** in the TUI, and in `nanocode exec "/<name> words"`. A built-in command with the same name wins.
-- **In usage records:** a command's turn, and every subagent call under it, records `command` (`/<name>`), `command_source` and `args`, until the next prompt starts a turn.
+- **Format:** OpenCode's and Claude Code's command files. Optional front matter between `---` lines can give:
+  - `description`, which `/commands` lists;
+  - `model` (`provider/model#variant` or a nanocode model id; `claude-sonnet-5.5` and `claude-sonnet-5-5` both work), `agent` and `subagent` (or the older `subtask`).
+- **Arguments:** as in OpenCode.
+  - `$ARGUMENTS` is the whole argument string.
+  - `$1`, `$2` … are words, grouped by single or double quotes, and the highest-numbered one takes the rest. Missing positions are empty.
+  - A body with no placeholder gets the arguments after a blank line.
+- **Shell blocks:** each `` !`command` `` runs in the workspace with `$SHELL` after the arguments are filled in. Its output, stdout then stderr, replaces it before the prompt is sent. Only use command files you trust.
+- **Where it runs:**
+  - In a subagent when `subagent: true`, or when `subagent` is left out and the file names an `agent` or a model other than the thread's. The subagent takes `agent` as its role (`general` when none) and the given model and thinking. The thread is told which subagent took the command, and the result comes back to it when the child finishes.
+  - Otherwise in the current thread, on the thread's model: nanocode fixes a thread's model.
+  - `nanocode exec "/<name> words"` always runs it in its own session.
+- **In usage records:** a command's turn, and every call of a subagent it started, records `command` (`/<name>`), `command_source` and `args`. A command run in the thread keeps that until the next prompt starts a turn.
 
 ### Usage records
 
@@ -163,7 +172,7 @@ python3 scripts/from-opencode.py --project ~/src/app --link
 
 - **Approval only through a hook:** without a pre-tool hook, the CLI runs every tool call without asking; there are no built-in permission rules. Hooks see tool calls only, with no session, prompt or stop events.
 - **Questions are options or text:** a question can't show option previews or take notes on an answer, and Codex models get Claude Code's tool rather than Codex's own `request_user_input`.
-- **Commands are plain prompts:** a command file is not shown in the `/` menu; `/commands` lists them. Its `model`, `agent` and `subagent` front matter is ignored, it runs no `!` shell blocks, and only `$ARGUMENTS` is filled.
+- **Commands:** a command file is not shown in the `/` menu; `/commands` lists them. `agent` names a subagent role, not a configured agent with its own prompt and tools.
 - **Skills are pointers:** `/skills` inserts the skill's name and its `SKILL.md` path into the prompt; the model is not told which skills exist unless you pick one.
 - **No plugins:** there is no plugin or event-hook API.
 - **MCP gaps:**

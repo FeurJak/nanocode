@@ -147,10 +147,10 @@ pub enum AppEvent {
     SignIn(bool),
     Hook(crate::hook::Report),
     Asked(crate::question::Asked),
+    CommandChild(String),
     UserCommand {
         name: String,
-        arguments: String,
-        found: std::result::Result<Option<String>, String>,
+        found: std::result::Result<Option<crate::user_commands::Invocation>, String>,
     },
     Applied(std::result::Result<(ModelSelection, Thinking, ServiceTier, String), String>),
 }
@@ -187,6 +187,7 @@ impl AppEvent {
             Self::SignIn(_) => "sign_in",
             Self::Hook(_) => "hook",
             Self::Asked(_) => "asked",
+            Self::CommandChild(_) => "command_child",
             Self::UserCommand { .. } => "user_command",
             Self::Applied(_) => "applied",
         }
@@ -1194,22 +1195,19 @@ impl App {
                 self.notice(level, text);
                 Redraw::Immediate
             }
-            AppEvent::UserCommand {
-                name,
-                arguments,
-                found,
-            } => {
+            AppEvent::UserCommand { name, found } => {
                 match found {
-                    Ok(Some(prompt)) => {
-                        self.command_span = Some((name, arguments));
-                        self.send(prompt, true);
-                    }
+                    Ok(Some(invocation)) => self.run_invocation(invocation),
                     Ok(None) => self.notice(
                         NoticeLevel::Warning,
                         format!("unknown command /{name}; try /help, or /commands for your own"),
                     ),
                     Err(error) => self.notice(NoticeLevel::Error, format!("/{name}: {error}")),
                 }
+                Redraw::Immediate
+            }
+            AppEvent::CommandChild(text) => {
+                self.send(text, true);
                 Redraw::Immediate
             }
             AppEvent::Asked(asked) => {
@@ -2473,7 +2471,7 @@ impl App {
         self.send(text, queue);
     }
 
-    fn send(&mut self, text: String, queue: bool) {
+    pub(crate) fn send(&mut self, text: String, queue: bool) {
         if let Some(id) = self.focus {
             if !self.attachments.is_empty() {
                 self.flash("attachments go to the main thread; /agent returns to it");

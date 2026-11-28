@@ -9011,6 +9011,18 @@ pub struct SubagentControl {
 }
 
 impl SubagentControl {
+    pub async fn start(
+        &self,
+        session_id: &str,
+        task: crate::AgentTask,
+        options: nanocode_agent_core::SpawnOptions,
+    ) -> crate::AgentToolResult<crate::AgentStartReport> {
+        let parent = self.registry.session_handle(session_id).ok_or_else(|| {
+            format!("session {session_id} has no agent the subagent runtime knows yet")
+        })?;
+        crate::start_agent_with(&parent, &self.registry, session_id, task, options).await
+    }
+
     pub async fn shutdown(&self) {
         self.registry.release_all().await;
     }
