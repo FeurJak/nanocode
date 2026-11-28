@@ -2543,6 +2543,7 @@ impl App {
             "fund" => self.fund(argument),
             "default" | "defaults" => self.save_defaults(argument),
             "account" => self.account(),
+            "mcp" => self.mcp(),
             "pass" => self.pass(argument),
             "resume" | "sessions" => self.open_session_picker(),
             "new" | "clear" => self.new_session(),

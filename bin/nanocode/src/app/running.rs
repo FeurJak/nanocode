@@ -75,7 +75,7 @@ pub(super) fn run(
             stashed_draft: None,
             dragging: None,
             autoscroll_at: None,
-            herdr: nanocode::herdr::Reporter::from_env(),
+            herdr: nanocode::herdr::Reporter::from_env(launch.host.config.herdr),
             outcome: None,
             title: None,
             signing_in: 0,

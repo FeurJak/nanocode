@@ -27,6 +27,13 @@ pub(super) fn prepare<'a>(
             );
         }
         let saved = defaults::load(&home).await?;
+        let configured = crate::config::load(&home, &workspace).await?;
+        let clients = configured
+            .servers
+            .iter()
+            .fold(clients, |clients, (name, server)| {
+                clients.mcp_server(name.clone(), server.clone())
+            });
         let saved_harness = saved.harness()?;
         let saved_model = saved.model.clone().filter(|_| {
             args.model.is_none()
@@ -199,6 +206,8 @@ pub(super) fn prepare<'a>(
                 .transpose()?,
             working_state: working_state_policy(args)?,
             hedge: hedge_policy(args)?,
+            mcp_configured: configured.configured,
+            herdr: configured.herdr,
         };
         let host = nanocode_trace::Instrument::instrument(
             Host::build(config, &model, thinking),

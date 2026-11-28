@@ -44,11 +44,12 @@ impl State {
     }
 }
 
-pub fn enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+pub fn enabled(lookup: &dyn Fn(&str) -> Option<String>, setting: Option<bool>) -> bool {
     let set = |name: &str| lookup(name).is_some_and(|value| !value.trim().is_empty());
-    match lookup(ENV).map(|value| value.trim().to_ascii_lowercase()) {
-        Some(value) if matches!(value.as_str(), "0" | "false" | "no") => false,
-        Some(value) if matches!(value.as_str(), "1" | "true" | "yes") => true,
+    match (lookup(ENV).map(|value| value.trim().to_ascii_lowercase()), setting) {
+        (Some(value), _) if matches!(value.as_str(), "0" | "false" | "no") => false,
+        (Some(value), _) if matches!(value.as_str(), "1" | "true" | "yes") => true,
+        (_, Some(setting)) => setting,
         _ => TERMINAL_VARIABLES.iter().any(|name| set(name)),
     }
 }
@@ -138,8 +139,8 @@ impl Reporter {
     }
 
     #[must_use]
-    pub fn from_env() -> Self {
-        Self::new(enabled(&|name| std::env::var(name).ok()))
+    pub fn from_env(setting: Option<bool>) -> Self {
+        Self::new(enabled(&|name| std::env::var(name).ok(), setting))
     }
 
     #[must_use]

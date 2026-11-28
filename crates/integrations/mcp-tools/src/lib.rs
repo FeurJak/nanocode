@@ -661,6 +661,25 @@ impl McpBuilder {
 
 #[cfg(not(target_family = "wasm"))]
 impl McpHandle {
+    pub fn tools(&self) -> McpFuture<'_, BTreeMap<String, Result<Vec<String>, McpServerError>>> {
+        Box::pin(async move {
+            self.state
+                .server_entries()
+                .await
+                .into_iter()
+                .map(|(server, entries)| {
+                    let names = entries.map(|entries| {
+                        entries
+                            .iter()
+                            .map(|entry| entry.definition.name().to_owned())
+                            .collect()
+                    });
+                    (server, names)
+                })
+                .collect()
+        })
+    }
+
     pub fn reload<'call>(
         &'call self,
         server_name: &'call str,

@@ -8,6 +8,7 @@ mod attempts;
 mod cells;
 mod cli;
 mod commands;
+mod config;
 #[cfg(unix)]
 mod cua;
 mod custom_endpoint;

@@ -479,6 +479,8 @@ pub enum Subagents {
 
 #[derive(Clone)]
 pub struct HostConfig {
+    pub mcp_configured: Vec<crate::config::Configured>,
+    pub herdr: Option<bool>,
     pub workspace: PathBuf,
     pub store: Option<SessionStore>,
     pub archiver: Option<nanocode_store_jsonl::JsonlArchiver>,
@@ -665,6 +667,7 @@ const fn kind_name(kind: GatewayArg) -> &'static str {
 pub struct Host {
     pub config: HostConfig,
     pub runtime: Nanocode,
+    pub mcp: Option<nanocode::tools::mcp::McpHandle>,
     hand: std::sync::Arc<nanocode_sync::Atom<Option<nanocode::HandDescription>>>,
 }
 
@@ -886,6 +889,7 @@ impl Host {
             .google(config.google.clone())
             .workspace(config.workspace.clone())
             .tool_environment(config.clients.tool_environment.clone());
+        let mut mcp_handle = None;
         if !config.clients.mcp_servers.is_empty() {
             let mcp = config
                 .clients
@@ -899,6 +903,7 @@ impl Host {
                     |mcp, (name, server)| mcp.server(name, server.clone()),
                 )
                 .build()?;
+            mcp_handle = Some(mcp.handle());
             builder = builder.tool_provider(mcp);
         }
         for runner in &config.runners {
@@ -922,6 +927,7 @@ impl Host {
         Ok(Self {
             config,
             runtime,
+            mcp: mcp_handle,
             hand,
         })
     }

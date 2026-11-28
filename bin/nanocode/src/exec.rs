@@ -109,7 +109,7 @@ pub(super) fn exec(
                 answer("");
             });
         }
-        let herdr = nanocode::herdr::Reporter::from_env();
+        let herdr = nanocode::herdr::Reporter::from_env(host.config.herdr);
         report(&herdr, nanocode::herdr::State::Working, &prompt);
         let outcome: Result<()> = async {
             for pending in pending {
