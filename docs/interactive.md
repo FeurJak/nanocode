@@ -127,11 +127,30 @@ A file `<name>.md` in `<workspace>/.nanocode/commands/` or `<home>/commands/` is
 - **When:** on when `~/.forge` exists; `"forge_usage"` turns it on or off.
 - **Reading it:** `forge usage` reads these rows like any other harness's.
 
+## Switching from OpenCode
+
+`scripts/from-opencode.py` copies an OpenCode setup into nanocode's files and never changes OpenCode's:
+
+```sh
+python3 scripts/from-opencode.py --global --link --claude-hooks ~/.claude/settings.json
+python3 scripts/from-opencode.py --project ~/src/app --link
+```
+
+- **What `--global` reads and writes:** `~/.config/opencode` into nanocode's home.
+- **What `--project DIR` reads and writes:** `DIR/opencode.json(c)` and `DIR/.opencode/` into `DIR/.nanocode/` and `DIR/.agents/skills/`.
+- **MCP servers:** the V2 block, or V1's servers with `enabled` turned into `disabled`, are merged into `config.json`. Servers that need what nanocode lacks are left out (an OAuth object), or their fields are dropped (`pool`, a non-legacy `protocol`, `codemode: false`, `timeout.catalog`), and the script says which.
+- **Commands:** command files (nested names become `a:b`) and JSON `commands` become command files. They are copied, or linked with `--link`. A file that differs is kept unless `--force`.
+- **Skills:** skill folders are linked.
+- **Hooks:** `--claude-hooks` takes the `PreToolUse` and `PostToolUse` command hooks of a Claude Code settings file.
+- **Warnings:** what nanocode will not honor is printed: `agent`, `model` or `subagent` front matter, `!` shell blocks, `$1` placeholders, and remote servers that relied on OAuth by default.
+- **Trying it first:** `--dry-run` prints the plan and writes nothing; running it again changes only what changed.
+
 ## Not there yet, against OpenCode
 
 - **Approval only through a hook:** without a pre-tool hook, the CLI runs every tool call without asking; there are no built-in permission rules. Hooks see tool calls only, with no session, prompt or stop events.
 - **Questions are options or text:** a question can't show option previews or take notes on an answer, and Codex models get Claude Code's tool rather than Codex's own `request_user_input`.
-- **Commands are plain prompts:** a command file is not shown in the `/` menu; `/commands` lists them. Its `model` and `agent` front matter is ignored, and it runs no shell or file includes.
+- **Commands are plain prompts:** a command file is not shown in the `/` menu; `/commands` lists them. Its `model`, `agent` and `subagent` front matter is ignored, it runs no `!` shell blocks, and only `$ARGUMENTS` is filled.
+- **Skills are pointers:** `/skills` inserts the skill's name and its `SKILL.md` path into the prompt; the model is not told which skills exist unless you pick one.
 - **No plugins:** there is no plugin or event-hook API.
 - **MCP gaps:**
   - It does not run an OAuth sign-in from config (`oauth` must be `false`, with the credential in `headers`).
