@@ -43,6 +43,16 @@ pub(super) fn exec(
             }
         });
         let host = prepared.host;
+        let ledger = host.config.usage.clone();
+        if let (Some(ledger), Some(mut updates)) =
+            (ledger.clone(), host.runtime.take_subagent_updates())
+        {
+            nanocode_platform::spawn_task(async move {
+                while let Some(update) = updates.recv().await {
+                    ledger.update(&update);
+                }
+            });
+        }
         let escalation = match (&args.escalate_model, args.escalate_after) {
             (Some(name), Some(after)) => Some((
                 escalation_model(&host, name, prepared.route, &prepared.model).await?,
@@ -122,6 +132,7 @@ pub(super) fn exec(
                     std::io::stderr(),
                     std::io::stderr().is_terminal(),
                     None,
+                    ledger.as_deref().map(|ledger| (ledger, agent.session_id())),
                 )
                 .await?;
             }
@@ -131,6 +142,7 @@ pub(super) fn exec(
                 std::io::stdout(),
                 terminal,
                 escalation.as_ref().map(|(_, after)| *after),
+                ledger.as_deref().map(|ledger| (ledger, agent.session_id())),
             )
             .await?;
             if let (true, Some((model, after))) = (stalled, &escalation) {
@@ -151,6 +163,7 @@ pub(super) fn exec(
                     std::io::stdout(),
                     terminal,
                     None,
+                    ledger.as_deref().map(|ledger| (ledger, agent.session_id())),
                 )
                 .await?;
             }
@@ -189,6 +202,9 @@ pub(super) fn exec(
             drop(writeln!(stderr, "session {}", agent.session_id()));
         }
         let shutdown = host.runtime.shutdown().await;
+        if let Some(ledger) = &ledger {
+            ledger.flush().await;
+        }
         let archived = host::archive(&host.config).boxed().await;
         outcome?;
         flushed?;

@@ -480,6 +480,7 @@ pub enum Subagents {
 #[derive(Clone)]
 pub struct HostConfig {
     pub mcp_configured: Vec<crate::config::Configured>,
+    pub usage: Option<std::sync::Arc<crate::usage::Ledger>>,
     pub herdr: Option<bool>,
     pub workspace: PathBuf,
     pub store: Option<SessionStore>,

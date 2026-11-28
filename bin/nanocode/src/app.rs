@@ -1118,7 +1118,12 @@ impl App {
                 Redraw::Streaming
             }
             AppEvent::Side { pane, update } => self.side_update(pane, update),
-            AppEvent::Subagent(update) => self.subagent(update),
+            AppEvent::Subagent(update) => {
+                if let Some(usage) = &self.host.config.usage {
+                    usage.update(&update);
+                }
+                self.subagent(update)
+            }
             AppEvent::RunnerListening(result) => {
                 match result {
                     Ok(server) => {
@@ -1400,6 +1405,9 @@ impl App {
             crate::model_call_started();
         }
         let session_id = self.agent.as_ref().map(Agent::session_id);
+        if let (Some(usage), Some(session)) = (&self.host.config.usage, session_id) {
+            usage.root_event(session, event);
+        }
         self.spans.event(event, session_id);
         if event.kind == AgentEventKind::ToolCall {
             self.mapper

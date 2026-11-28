@@ -162,6 +162,9 @@ pub(super) fn run(
             {
                 eprintln!("nanocode: shutdown did not complete cleanly: {error}");
             }
+            if let Some(usage) = &app.host.config.usage {
+                usage.flush().await;
+            }
             if let Err(error) = crate::host::archive(&app.host.config).await {
                 eprintln!("nanocode: could not archive the session: {error}");
             }

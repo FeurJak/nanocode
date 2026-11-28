@@ -20,6 +20,7 @@ struct File {
     #[serde(default)]
     mcp: Mcp,
     herdr: Option<bool>,
+    forge_usage: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -119,6 +120,7 @@ pub struct Config {
     pub servers: Vec<(String, McpServer)>,
     pub configured: Vec<Configured>,
     pub herdr: Option<bool>,
+    pub forge_usage: Option<bool>,
 }
 
 pub fn paths(home: &Path, workspace: &Path) -> [PathBuf; 2] {
@@ -138,6 +140,7 @@ fn read(paths: &[PathBuf], workspace: &Path) -> Result<Config> {
     let mut entries = BTreeMap::new();
     let mut defaults = Timeout::default();
     let mut herdr = None;
+    let mut forge_usage = None;
     for path in paths {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
@@ -155,11 +158,13 @@ fn read(paths: &[PathBuf], workspace: &Path) -> Result<Config> {
             execution: file.mcp.timeout.execution.or(defaults.execution),
         };
         herdr = file.herdr.or(herdr);
+        forge_usage = file.forge_usage.or(forge_usage);
     }
     let mut loaded = Config {
         servers: Vec::new(),
         configured: Vec::new(),
         herdr,
+        forge_usage,
     };
     for (name, (source, entry)) in entries {
         let place = |error: String| format!("{} mcp.servers.{name}: {error}", source.display());

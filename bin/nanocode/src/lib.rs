@@ -32,6 +32,7 @@ mod split;
 mod stream;
 mod telemetry;
 mod tempo;
+mod usage;
 mod vertex_claude;
 mod view;
 
@@ -671,6 +672,7 @@ async fn stream_turn(
     answers: impl Write,
     terminal: bool,
     stall: Option<u64>,
+    usage: Option<(&usage::Ledger, &str)>,
 ) -> Result<bool> {
     let mut printer = stream::Printer::new(std::io::BufWriter::new(answers), terminal);
     let control = turn.control();
@@ -695,6 +697,9 @@ async fn stream_turn(
             nanocode::agent::events::AgentEventKind::ModelCallStarted => model_call_started(),
             nanocode::agent::events::AgentEventKind::ToolCall => tool_call_started(&event.event),
             _ => {}
+        }
+        if let Some((ledger, session)) = usage {
+            ledger.root_event(session, &event.event);
         }
         printer.event(
             &event.event,

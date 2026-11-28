@@ -163,6 +163,8 @@ pub(super) fn prepare<'a>(
             nanocode_process::set_time_limit(std::time::Duration::from_secs(time_limit));
         }
         let runner_configs = host::runner_configs(&args.remote)?;
+        let usage =
+            crate::usage::Ledger::open(configured.forge_usage, &workspace)?.map(std::sync::Arc::new);
         let config = HostConfig {
             workspace,
             store,
@@ -207,6 +209,7 @@ pub(super) fn prepare<'a>(
             working_state: working_state_policy(args)?,
             hedge: hedge_policy(args)?,
             mcp_configured: configured.configured,
+            usage,
             herdr: configured.herdr,
         };
         let host = nanocode_trace::Instrument::instrument(
