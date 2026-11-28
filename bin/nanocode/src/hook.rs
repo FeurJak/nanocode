@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use nanocode::{
     HostFuture,
+    tools::ToolOutput,
     tools::hold::{
         Answer, HoldCall, HoldLedger, HoldPolicy, Holds, Judgment, LedgerError, Resumption, Running,
     },
@@ -37,6 +38,7 @@ pub enum Report {
 
 pub struct Hook {
     entries: Vec<Entry>,
+    after: Vec<Entry>,
     workspace: PathBuf,
     sink: Atom<Option<UnboundedSender<Report>>>,
 }
@@ -48,9 +50,10 @@ enum Decision {
 }
 
 impl Hook {
-    pub fn new(entries: Vec<Entry>, workspace: PathBuf) -> Self {
+    pub fn new(entries: Vec<Entry>, after: Vec<Entry>, workspace: PathBuf) -> Self {
         Self {
             entries,
+            after,
             workspace,
             sink: Atom::new(None),
         }
@@ -69,6 +72,61 @@ impl Hook {
             Some(sink) => drop(sink.send(Report::Notice(text))),
             None => eprintln!("nanocode: {text}"),
         }
+    }
+
+    async fn review(&self, call: &HoldCall<'_>, output: &ToolOutput) -> Option<String> {
+        let entries = self
+            .after
+            .iter()
+            .filter(|entry| matches(&entry.matcher, call.tool))
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            return None;
+        }
+        let cwd = call
+            .directory
+            .map_or_else(|| self.workspace.clone(), PathBuf::from);
+        let input = serde_json::from_str::<Value>(call.input.get())
+            .unwrap_or_else(|_| Value::String(call.input.get().to_owned()));
+        let response = output.output.structured_result();
+        let payload = json!({
+            "session_id": call.session_id,
+            "cwd": cwd.display().to_string(),
+            "permission_mode": "default",
+            "hook_event_name": "PostToolUse",
+            "tool_name": call.tool,
+            "tool_input": input,
+            "tool_response": response,
+            "tool_use_id": call.call_id,
+        })
+        .to_string();
+        let mut notes = Vec::new();
+        for entry in entries {
+            let outcome = match spawn(entry, &payload, &cwd).await {
+                Ok(finished) => {
+                    if finished.code == 0 && !finished.stderr.is_empty() {
+                        self.notice(format!(
+                            "the post-tool hook {:?} on {}: {}",
+                            entry.command.join(" "),
+                            call.tool,
+                            finished.stderr
+                        ));
+                    }
+                    reviewed(entry, finished)
+                }
+                Err(error) => Err(error),
+            };
+            match outcome {
+                Ok(Some(note)) => notes.push(note),
+                Ok(None) => {}
+                Err(error) => self.notice(format!(
+                    "the post-tool hook {:?} failed after {}: {error}",
+                    entry.command.join(" "),
+                    call.tool
+                )),
+            }
+        }
+        (!notes.is_empty()).then(|| notes.join("\n"))
     }
 
     async fn decide(&self, call: &HoldCall<'_>) -> Decision {
@@ -120,7 +178,27 @@ pub fn matches(matcher: &str, tool: &str) -> bool {
             })
 }
 
+struct Finished {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
 async fn run(entry: &Entry, payload: &str, cwd: &std::path::Path) -> Result<Decision, String> {
+    let finished = spawn(entry, payload, cwd).await?;
+    match finished.code {
+        0 => Ok(parsed(&finished.stdout)),
+        code if code == i32::from(REFUSED) => {
+            Ok(Decision::Deny(match finished.stderr.is_empty() {
+                true => "the pre-tool hook refused this call".to_owned(),
+                false => finished.stderr,
+            }))
+        }
+        code => Err(format!("it exited with {code}: {}", finished.stderr)),
+    }
+}
+
+async fn spawn(entry: &Entry, payload: &str, cwd: &std::path::Path) -> Result<Finished, String> {
     let (program, args) = entry.command.split_first().ok_or("its command is empty")?;
     let limit = entry
         .timeout
@@ -150,14 +228,44 @@ async fn run(entry: &Entry, payload: &str, cwd: &std::path::Path) -> Result<Deci
     .await
     .map_err(|_| format!("it ran past its {} ms timeout", limit.as_millis()))??;
     let stderr = String::from_utf8_lossy(&finished.stderr).trim().to_owned();
+    let stdout = String::from_utf8_lossy(&finished.stdout).into_owned();
     match finished.status.code() {
-        Some(0) => Ok(parsed(&String::from_utf8_lossy(&finished.stdout))),
-        Some(code) if code == i32::from(REFUSED) => Ok(Decision::Deny(match stderr.is_empty() {
-            true => "the pre-tool hook refused this call".to_owned(),
-            false => stderr,
-        })),
-        Some(code) => Err(format!("it exited with {code}: {stderr}")),
+        Some(code) => Ok(Finished {
+            code,
+            stdout,
+            stderr,
+        }),
         None => Err(format!("it was killed by a signal: {stderr}")),
+    }
+}
+
+fn reviewed(entry: &Entry, finished: Finished) -> Result<Option<String>, String> {
+    let command = entry.command.join(" ");
+    let blocking =
+        |text: &str| format!("PostToolUse hook blocking error from command: \"{command}\": {text}");
+    match finished.code {
+        0 => {
+            let Ok(reply) = serde_json::from_str::<Value>(finished.stdout.trim()) else {
+                return Ok(None);
+            };
+            let context = reply["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .filter(|context| !context.is_empty())
+                .map(|context| format!("PostToolUse hook additional context: {context}"));
+            let blocked = (reply["decision"].as_str() == Some("block")).then(|| {
+                blocking(
+                    reply["reason"]
+                        .as_str()
+                        .unwrap_or("the post-tool hook blocked this result"),
+                )
+            });
+            Ok(match (blocked, context) {
+                (Some(blocked), Some(context)) => Some(format!("{blocked}\n{context}")),
+                (blocked, context) => blocked.or(context),
+            })
+        }
+        code if code == i32::from(REFUSED) => Ok(Some(blocking(&finished.stderr))),
+        code => Err(format!("it exited with {code}: {}", finished.stderr)),
     }
 }
 
@@ -192,6 +300,14 @@ fn parsed(stdout: &str) -> Decision {
 }
 
 impl HoldPolicy for Hook {
+    fn after<'a>(
+        &'a self,
+        call: HoldCall<'a>,
+        output: &'a ToolOutput,
+    ) -> HostFuture<'a, Option<String>> {
+        Box::pin(async move { self.review(&call, output).await })
+    }
+
     fn judge<'a>(&'a self, call: HoldCall<'a>) -> HostFuture<'a, Judgment> {
         Box::pin(async move {
             match self.decide(&call).await {

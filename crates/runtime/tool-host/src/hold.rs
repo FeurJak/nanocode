@@ -31,6 +31,44 @@ pub enum Judgment {
 
 pub trait HoldPolicy: Send + Sync + 'static {
     fn judge<'a>(&'a self, call: HoldCall<'a>) -> HostFuture<'a, Judgment>;
+
+    fn after<'a>(
+        &'a self,
+        call: HoldCall<'a>,
+        output: &'a ToolOutput,
+    ) -> HostFuture<'a, Option<String>> {
+        let _ = (call, output);
+        Box::pin(async { None })
+    }
+}
+
+struct CallOwned {
+    call_id: String,
+    session_id: String,
+    turn_id: Option<String>,
+}
+
+impl CallOwned {
+    fn of(context: &ToolContext<'_>) -> Self {
+        Self {
+            call_id: context.call_id().to_owned(),
+            session_id: context.session_id().to_owned(),
+            turn_id: context.turn_id().map(str::to_owned),
+        }
+    }
+}
+
+fn noted(mut output: ToolOutput, note: String) -> ToolOutput {
+    match &mut output.output {
+        nanocode_tools::ToolOutputBody::Text(text) => {
+            text.push_str("\n\n");
+            text.push_str(&note);
+        }
+        nanocode_tools::ToolOutputBody::Content(content) => {
+            content.push(nanocode_tools::ToolOutputContent::InputText { text: note });
+        }
+    }
+    output
 }
 
 #[derive(Clone, Debug)]
@@ -212,6 +250,30 @@ impl Holds {
         }
     }
 
+    async fn reviewed(
+        &self,
+        name: &str,
+        raw: &RawValue,
+        call: &CallOwned,
+        output: ToolOutput,
+    ) -> ToolOutput {
+        if !output.success {
+            return output;
+        }
+        let call = HoldCall {
+            call_id: &call.call_id,
+            input: raw,
+            session_id: &call.session_id,
+            tool: name,
+            turn_id: call.turn_id.as_deref(),
+            directory: self.directory.as_deref(),
+        };
+        match self.policy.after(call, &output).await {
+            Some(note) => noted(output, note),
+            None => output,
+        }
+    }
+
     async fn released(&self, name: &str, key: &str) {
         if let Err(error) = self.ledger.release(key).await {
             nanocode_trace::warn!(%error, key, tool = %name, "a resumed held call ran but its release was not saved; it reads as uncertain until settled");
@@ -232,12 +294,19 @@ impl Holding {
             Ok(raw) => raw,
             Err(error) => return Ok(unreadable(name, error)),
         };
+        let owned = CallOwned::of(&context);
         match self.holds.admit(name, &raw, &context).await {
-            Admission::Run => self.inner.execute(input, context).await,
+            Admission::Run => match self.inner.execute(input, context).await {
+                Ok(output) => Ok(self.holds.reviewed(name, &raw, &owned, output).await),
+                Err(error) => Err(error),
+            },
             Admission::Resume { key } => {
                 let output = self.inner.execute(input, context).await;
                 self.holds.released(name, &key).await;
-                output
+                match output {
+                    Ok(output) => Ok(self.holds.reviewed(name, &raw, &owned, output).await),
+                    Err(error) => Err(error),
+                }
             }
             Admission::Answer(output) => Ok(output),
         }
@@ -271,12 +340,19 @@ mod provider {
                 Ok(raw) => raw,
                 Err(error) => return Some(unreadable(name, error)),
             };
+            let owned = super::CallOwned::of(&context);
             match self.holds.admit(name, &raw, &context).await {
-                Admission::Run => self.inner.execute(name, input, context).await,
+                Admission::Run => match self.inner.execute(name, input, context).await {
+                    Some(output) => Some(self.holds.reviewed(name, &raw, &owned, output).await),
+                    None => None,
+                },
                 Admission::Resume { key } => {
                     let output = self.inner.execute(name, input, context).await;
                     self.holds.released(name, &key).await;
-                    output
+                    match output {
+                        Some(output) => Some(self.holds.reviewed(name, &raw, &owned, output).await),
+                        None => None,
+                    }
                 }
                 Admission::Answer(output) => Some(output),
             }

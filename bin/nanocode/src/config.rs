@@ -29,6 +29,7 @@ struct File {
 #[serde(deny_unknown_fields)]
 struct Hooks {
     pre_tool: Option<Vec<crate::hook::Entry>>,
+    post_tool: Option<Vec<crate::hook::Entry>>,
 }
 
 #[derive(Default, Deserialize)]
@@ -130,6 +131,7 @@ pub struct Config {
     pub herdr: Option<bool>,
     pub forge_usage: Option<bool>,
     pub pre_tool: Vec<crate::hook::Entry>,
+    pub post_tool: Vec<crate::hook::Entry>,
 }
 
 pub fn paths(home: &Path, workspace: &Path) -> [PathBuf; 2] {
@@ -151,6 +153,7 @@ fn read(paths: &[PathBuf], workspace: &Path) -> Result<Config> {
     let mut herdr = None;
     let mut forge_usage = None;
     let mut pre_tool = Vec::new();
+    let mut post_tool = Vec::new();
     for path in paths {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
@@ -172,6 +175,9 @@ fn read(paths: &[PathBuf], workspace: &Path) -> Result<Config> {
         if let Some(entries) = file.hooks.pre_tool {
             pre_tool = entries;
         }
+        if let Some(entries) = file.hooks.post_tool {
+            post_tool = entries;
+        }
     }
     let mut loaded = Config {
         servers: Vec::new(),
@@ -179,6 +185,7 @@ fn read(paths: &[PathBuf], workspace: &Path) -> Result<Config> {
         herdr,
         forge_usage,
         pre_tool,
+        post_tool,
     };
     for (name, (source, entry)) in entries {
         let place = |error: String| format!("{} mcp.servers.{name}: {error}", source.display());

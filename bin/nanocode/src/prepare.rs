@@ -163,14 +163,16 @@ pub(super) fn prepare<'a>(
             nanocode_process::set_time_limit(std::time::Duration::from_secs(time_limit));
         }
         let runner_configs = host::runner_configs(&args.remote)?;
-        let usage =
-            crate::usage::Ledger::open(configured.forge_usage, &workspace)?.map(std::sync::Arc::new);
-        let hook = (!configured.pre_tool.is_empty()).then(|| {
-            std::sync::Arc::new(crate::hook::Hook::new(
-                configured.pre_tool.clone(),
-                workspace.clone(),
-            ))
-        });
+        let usage = crate::usage::Ledger::open(configured.forge_usage, &workspace)?
+            .map(std::sync::Arc::new);
+        let hook =
+            (!configured.pre_tool.is_empty() || !configured.post_tool.is_empty()).then(|| {
+                std::sync::Arc::new(crate::hook::Hook::new(
+                    configured.pre_tool.clone(),
+                    configured.post_tool.clone(),
+                    workspace.clone(),
+                ))
+            });
         let config = HostConfig {
             workspace,
             store,

@@ -59,6 +59,9 @@ A key in the project file wins over the user file. Unknown keys stop nanocode at
   "hooks": {
     "pre_tool": [
       { "matcher": "Bash|Edit|Write", "command": ["./scripts/guard"], "timeout": 15000 }
+    ],
+    "post_tool": [
+      { "matcher": "Edit|Write", "command": ["./scripts/review"] }
     ]
   },
   "herdr": true,
@@ -93,6 +96,17 @@ Each entry of `hooks.pre_tool` is a command that sees a tool call before it runs
 - **Several hooks:** every matching entry runs, in order. The first refusal wins, then any ask.
 - **When a hook fails:** it may time out (`timeout` in milliseconds; 60 seconds by default, as in Claude Code), exit with another code, or fail to start. The call then runs, as in Claude Code, and the failure is shown in the transcript (on stderr in exec).
 
+### Post-tool hook
+
+Each entry of `hooks.post_tool` runs after a matching call succeeded, with Claude Code's `PostToolUse` contract. The matcher, directory and environment work as for the pre-tool hook. Its stdin adds `tool_response`, the tool's result.
+
+- **To the model:** what a hook says is added to the tool's result, with Claude Code's wording:
+  - Exit 2 adds `PostToolUse hook blocking error from command: "<command>": <stderr>`.
+  - A JSON reply with `{"decision": "block", "reason": "…"}` adds the reason the same way.
+  - `{"hookSpecificOutput": {"additionalContext": "…"}}` adds `PostToolUse hook additional context: …`.
+- **To you:** stderr from a hook that exits 0 is shown in the transcript, and so is a hook that fails or times out.
+- **What it can't do:** the call has already run, so nothing is undone. Failed calls don't run the hook.
+
 ### Your own commands
 
 A file `<name>.md` in `<workspace>/.nanocode/commands/` or `<home>/commands/` is the command `/<name>`. The project's file wins over the home one.
@@ -115,7 +129,7 @@ A file `<name>.md` in `<workspace>/.nanocode/commands/` or `<home>/commands/` is
 
 ## Not there yet, against OpenCode
 
-- **Approval only through a hook:** without a pre-tool hook, the CLI runs every tool call without asking; there are no built-in permission rules. There is no post-tool hook.
+- **Approval only through a hook:** without a pre-tool hook, the CLI runs every tool call without asking; there are no built-in permission rules. Hooks see tool calls only, with no session, prompt or stop events.
 - **Questions are options or text:** a question can't show option previews or take notes on an answer, and Codex models get Claude Code's tool rather than Codex's own `request_user_input`.
 - **Commands are plain prompts:** a command file is not shown in the `/` menu; `/commands` lists them. Its `model` and `agent` front matter is ignored, and it runs no shell or file includes.
 - **No plugins:** there is no plugin or event-hook API.
