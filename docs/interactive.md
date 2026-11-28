@@ -145,6 +145,20 @@ python3 scripts/from-opencode.py --project ~/src/app --link
 - **Warnings:** what nanocode will not honor is printed: `agent`, `model` or `subagent` front matter, `!` shell blocks, `$1` placeholders, and remote servers that relied on OAuth by default.
 - **Trying it first:** `--dry-run` prints the plan and writes nothing; running it again changes only what changed.
 
+## Pilot: one Herdr space on nanocode for an hour
+
+1. **Install** nanocode and run the two commands above for the space's user and its project. Pass `--claude-hooks` the settings snippet your workflow ships for Claude Code, so its pre-edit and post-edit checks come along.
+2. **Copy the environment:** export, in the space's shell, every variable your commands and hooks expect that OpenCode used to set. Commands that call `"$TOOL/scripts/…"` fail with exit 127 when it is unset.
+3. **Check before you start:** in `nc` in the project, see that `/mcp` lists every server ready, `/commands` lists the commands, and `/skills` lists the skills.
+4. **Start it in a space:** `hc run --keep --label herdr.space=<id> --label herdr.tab=<id> -- nc -m <model>`. Herdr should show it as an agent with app `nanocode`.
+5. **After an hour:**
+   - **Herdr:** the space went working, done and idle, and showed blocked whenever a hook asked or the model asked a question.
+   - **The transcript:** hook failures show as notices. Read them: a failed hook lets the call through.
+   - **Usage records:** `forge usage --harness nanocode --since 1h --by command,agent` should cover the hour's work, with your commands named. Compare its cost with an OpenCode space doing similar work.
+   - **Warnings:** each run's `~/.nanocode/log/otel/<run>/traces.jsonl` holds them as span events with level `WARN`, such as a usage record that was not written: `grep -h '"WARN"' ~/.nanocode/log/otel/*/traces.jsonl`.
+   - **`/mcp`:** no server should have failed since start.
+6. **To go back:** stop the space and start OpenCode there again. The script wrote only nanocode's files.
+
 ## Not there yet, against OpenCode
 
 - **Approval only through a hook:** without a pre-tool hook, the CLI runs every tool call without asking; there are no built-in permission rules. Hooks see tool calls only, with no session, prompt or stop events.
