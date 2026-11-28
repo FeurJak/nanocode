@@ -146,6 +146,7 @@ pub enum AppEvent {
     Notice(NoticeLevel, String),
     SignIn(bool),
     Hook(crate::hook::Report),
+    Asked(crate::question::Asked),
     UserCommand {
         name: String,
         arguments: String,
@@ -185,6 +186,7 @@ impl AppEvent {
             Self::Notice(..) => "notice",
             Self::SignIn(_) => "sign_in",
             Self::Hook(_) => "hook",
+            Self::Asked(_) => "asked",
             Self::UserCommand { .. } => "user_command",
             Self::Applied(_) => "applied",
         }
@@ -238,6 +240,7 @@ pub enum PickerPurpose {
     Session(Vec<SessionSummary>),
     Recent(Vec<String>),
     Permission,
+    Question,
     Theme,
     Skill(Vec<String>),
 }
@@ -342,6 +345,9 @@ pub struct App {
     signing_in: usize,
     pub(crate) asks: std::collections::VecDeque<crate::hook::Ask>,
     pub(crate) command_span: Option<(String, String)>,
+    pub(crate) questioning: Option<crate::question::Pending>,
+    pub(crate) questions_waiting: std::collections::VecDeque<crate::question::Asked>,
+    pub(crate) typing_answer: bool,
     pub(crate) clock_deadline: Option<Instant>,
     pub(crate) btw: HashMap<u64, (Option<nanocode::subagents::AgentId>, usize)>,
     pub(crate) next_btw: u64,
@@ -538,6 +544,19 @@ fn forward_notices(mut notices: crate::host::Notices, tx: UnboundedSender<AppEve
                 .send(AppEvent::Notice(NoticeLevel::Info, notice))
                 .is_err()
             {
+                break;
+            }
+        }
+    });
+}
+
+fn forward_questions(
+    mut asked: nanocode_sync::mpsc::UnboundedReceiver<crate::question::Asked>,
+    tx: UnboundedSender<AppEvent>,
+) {
+    nanocode_platform::spawn_task(async move {
+        while let Some(asked) = asked.recv().await {
+            if tx.send(AppEvent::Asked(asked)).is_err() {
                 break;
             }
         }
@@ -797,9 +816,13 @@ impl App {
     fn herdr_status(&self) -> Option<String> {
         let working = !matches!(self.turn, TurnState::Idle) || self.starting;
         let asking = self.asks.front();
+        let question = self.asking();
         let state = match (self.signing_in > 0, working, self.outcome) {
             _ if asking.is_some() => {
                 nanocode::herdr::State::Blocked(nanocode::herdr::Kind::Permission)
+            }
+            _ if question.is_some() => {
+                nanocode::herdr::State::Blocked(nanocode::herdr::Kind::Question)
             }
             (true, _, _) => nanocode::herdr::State::Blocked(nanocode::herdr::Kind::Auth),
             (false, true, _) => nanocode::herdr::State::Working,
@@ -812,6 +835,9 @@ impl App {
             .map(|agent| format!("session {}", agent.session_id()));
         let message = match (state, asking) {
             (_, Some(ask)) => format!("allow {}? {}", ask.tool, ask.reason),
+            (_, None) if question.is_some() => question
+                .map(|question| question.question.clone())
+                .unwrap_or_default(),
             (nanocode::herdr::State::Blocked(_), None) => {
                 "waiting for a sign-in in the browser".to_owned()
             }
@@ -1184,6 +1210,10 @@ impl App {
                     ),
                     Err(error) => self.notice(NoticeLevel::Error, format!("/{name}: {error}")),
                 }
+                Redraw::Immediate
+            }
+            AppEvent::Asked(asked) => {
+                self.asked(asked);
                 Redraw::Immediate
             }
             AppEvent::Hook(crate::hook::Report::Notice(text)) => {
@@ -2417,6 +2447,10 @@ impl App {
                 .collect();
             *self.composer.history_mut() = History::new(entries);
         }
+        if self.typing_answer {
+            self.typed_answer(text);
+            return;
+        }
         self.append_history(&text);
         self.stashed_draft = None;
         if self.panes.side_active() {
@@ -2943,6 +2977,9 @@ impl App {
                 if matches!(purpose, PickerPurpose::Permission) {
                     self.answer_ask(false);
                 }
+                if matches!(purpose, PickerPurpose::Question) {
+                    self.decline_questions();
+                }
                 if matches!(purpose, PickerPurpose::Session(_))
                     && self.agent.is_none()
                     && !self.starting
@@ -3034,6 +3071,7 @@ impl App {
         let _span = nanocode_trace::info_span!(target: "nanocode", "nc.action", action.name = "picked", session.id = self.agent.as_ref().map(|agent| agent.session_id())).entered();
         match purpose {
             PickerPurpose::Permission => self.answer_ask(index == 0),
+            PickerPurpose::Question => self.question_picked(index),
             PickerPurpose::Model(choices) => {
                 let Some((route, model)) = choices.get(index).cloned().flatten() else {
                     return;

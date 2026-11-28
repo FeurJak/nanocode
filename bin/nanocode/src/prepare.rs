@@ -217,6 +217,7 @@ pub(super) fn prepare<'a>(
             mcp_configured: configured.configured,
             usage,
             hook,
+            questions: (!headless).then(crate::question::Questions::new),
             herdr: configured.herdr,
         };
         let host = nanocode_trace::Instrument::instrument(

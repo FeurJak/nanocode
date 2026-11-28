@@ -482,6 +482,7 @@ pub struct HostConfig {
     pub mcp_configured: Vec<crate::config::Configured>,
     pub usage: Option<std::sync::Arc<crate::usage::Ledger>>,
     pub hook: Option<std::sync::Arc<crate::hook::Hook>>,
+    pub questions: Option<crate::question::Questions>,
     pub herdr: Option<bool>,
     pub workspace: PathBuf,
     pub store: Option<SessionStore>,
@@ -916,6 +917,9 @@ impl Host {
         }
         if let Some(hook) = &config.hook {
             builder = builder.holds(hook.holds());
+        }
+        if let Some(questions) = &config.questions {
+            builder = builder.tool_provider(questions.clone());
         }
         builder = match &config.store {
             Some(store) => builder.durability(store.clone()),

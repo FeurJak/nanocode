@@ -81,6 +81,9 @@ pub(super) fn run(
             signing_in: 0,
             asks: std::collections::VecDeque::new(),
             command_span: None,
+            questioning: None,
+            questions_waiting: std::collections::VecDeque::new(),
+            typing_answer: false,
             clock_deadline: None,
             btw: HashMap::new(),
             next_btw: 0,
@@ -109,6 +112,11 @@ pub(super) fn run(
         }
         if let Some(updates) = app.host.runtime.take_subagent_updates() {
             forward_subagents(updates, app.tx.clone());
+        }
+        if let Some(questions) = &app.host.config.questions {
+            let (asked, received) = nanocode_sync::mpsc::unbounded_channel();
+            questions.answer_with(asked);
+            forward_questions(received, app.tx.clone());
         }
         if let Some(hook) = &app.host.config.hook {
             let (reports, received) = nanocode_sync::mpsc::unbounded_channel();

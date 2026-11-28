@@ -42,7 +42,8 @@
     "TaskList": "expanded",
     "TaskUpdate": "expanded",
     "Monitor": "full",
-    "ScheduleWakeup": "full"
+    "ScheduleWakeup": "full",
+    "AskUserQuestion": "host"
   },
   "artifacts": [
     {
@@ -51,7 +52,7 @@
     },
     {
       "path": "tools/src/tools/upstream.json",
-      "sha256": "95d3c4f33853899144a9400180e24b21bfdda2b9b59cf2d454807e5f0681ad35"
+      "sha256": "41345fed260faa9acfc25ed19d2b5b8d508b2fa06f40d33949247c34e2c12dd9"
     },
     {
       "path": "prompts/bash-first.json",

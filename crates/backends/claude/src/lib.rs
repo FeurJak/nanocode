@@ -62,6 +62,7 @@ pub use defaults::{
 };
 
 pub use nanocode_backend_claude_tools::tools;
+pub use nanocode_backend_claude_tools::upstream as tool_contracts;
 
 mod runtime;
 pub use runtime::ClaudeHarness;

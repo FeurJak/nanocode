@@ -10,13 +10,22 @@ Herdr treats a terminal whose program writes OSC 7501 as an agent and shows its 
 ESC ] 7501 ; state=<idle|working|done|blocked|error>[:kind=<permission|question|auth>]:app=nanocode:msg=<base64> ESC \
 ```
 
-- **TUI states:** `working` while a turn runs, `done` or `error` when it ends, and `idle` when it waits for input. It reports `blocked` with `kind=permission` while a pre-tool hook's question waits for an answer, and `kind=auth` while a `/login` waits for the browser.
+- **TUI states:** `working` while a turn runs, `done` or `error` when it ends, and `idle` when it waits for input. It reports `blocked` with `kind=permission` while a pre-tool hook's question waits for an answer, `kind=question` while the model's question waits, and `kind=auth` while a `/login` waits for the browser.
 - **Message and title:** `msg` is the first line of the session's first prompt, which nanocode also sets as the terminal title (OSC 2). Before the first prompt, `msg` is the session id. `msg` holds at most 2,048 bytes after decoding, the most Herdr accepts. A longer line keeps its longest prefix that fits and ends with `…`, and control characters become spaces.
 - **`nanocode exec`:** it reports `working` with the prompt, then `done` with the session id, or `error`.
 - **When it reports:**
   - **On** in Herdr's terminals (`HC_TERMINAL_ID` or `HC_TERMINAL_SOCKET` set), or with `"herdr": true` in `config.json`.
   - **`HERDR_ENV=1`** or **`HERDR_ENV=0`** overrides both.
   - **Never to a pipe:** exec writes nothing when neither stdout nor stderr is a terminal.
+
+## Questions from the model
+
+In the TUI the model has Claude Code's `AskUserQuestion` tool, with the definition Claude Code 2.1.325 sends when a host can answer. The definition is pinned in `crates/backends/claude/tools/src/tools/upstream.json`.
+
+- **Who gets it:** every harness's agents, its subagents included.
+- **Asking:** each question opens a picker of its options. "Other" takes a typed answer from the prompt, a multi-select question marks options until "Done", and Esc declines.
+- **What the model reads back:** the same text Claude Code returns, whether the answers were options, typed, or declined.
+- **Not in exec:** `nanocode exec` does not offer the tool, as `claude -p` does not, because nobody can answer.
 
 ## config.json
 
@@ -107,7 +116,7 @@ A file `<name>.md` in `<workspace>/.nanocode/commands/` or `<home>/commands/` is
 ## Not there yet, against OpenCode
 
 - **Approval only through a hook:** without a pre-tool hook, the CLI runs every tool call without asking; there are no built-in permission rules. There is no post-tool hook.
-- **No question tool:** the model cannot stop to ask the user, so `kind=question` is never reported.
+- **Questions are options or text:** a question can't show option previews or take notes on an answer, and Codex models get Claude Code's tool rather than Codex's own `request_user_input`.
 - **Commands are plain prompts:** a command file is not shown in the `/` menu; `/commands` lists them. Its `model` and `agent` front matter is ignored, and it runs no shell or file includes.
 - **No plugins:** there is no plugin or event-hook API.
 - **MCP gaps:**

@@ -26,6 +26,7 @@ mod models;
 mod patch;
 mod prepare;
 mod python;
+mod question;
 mod sessions;
 mod setup;
 mod side;
