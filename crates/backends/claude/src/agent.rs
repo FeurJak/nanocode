@@ -308,7 +308,10 @@ type CodeTurnCleanup = Arc<dyn Fn(ClaudeToolProgress) -> BackendFuture<()> + Sen
 type NestedToolLookup = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 type ToolRecovery = Arc<dyn Fn(&str, ClaudeToolInvocation) -> ToolResultFuture + Send + Sync>;
 type ToolAbandon = Arc<
-    dyn Fn(String) -> BackendFuture<std::result::Result<Option<nanocode_tool_host::ToolOutput>, String>>
+    dyn Fn(
+            String,
+        )
+            -> BackendFuture<std::result::Result<Option<nanocode_tool_host::ToolOutput>, String>>
         + Send
         + Sync,
 >;
@@ -980,7 +983,7 @@ pub struct ClaudeBuilder {
     parallel_safe_tools: HashSet<String>,
     client_tool_search: bool,
     upstream_context: bool,
-    skills_listing: Option<Arc<str>>,
+    environment_note: Option<Arc<str>>,
     code_only: bool,
     policy: Option<Arc<dyn ClaudeExecutionPolicy>>,
     restored: Option<Snapshot>,
@@ -1092,7 +1095,7 @@ impl ClaudeBuilder {
             parallel_safe_tools: HashSet::new(),
             client_tool_search: false,
             upstream_context: false,
-            skills_listing: None,
+            environment_note: None,
             code_only: false,
             policy: None,
             restored: None,
@@ -1866,8 +1869,8 @@ impl ClaudeBuilder {
         self
     }
 
-    pub fn skills_listing(mut self, listing: impl Into<Arc<str>>) -> Self {
-        self.skills_listing = Some(listing.into());
+    pub fn environment_note(mut self, listing: impl Into<Arc<str>>) -> Self {
+        self.environment_note = Some(listing.into());
         self
     }
 
@@ -3759,7 +3762,7 @@ struct State {
     discovered: Arc<Atom<HashSet<String>>>,
     client_tool_search: bool,
     upstream_context: bool,
-    skills_listing: Option<Arc<str>>,
+    environment_note: Option<Arc<str>>,
     code_only: bool,
     nested_tools: Option<NestedToolLookup>,
     recovery: Option<ToolRecovery>,
@@ -5026,8 +5029,8 @@ impl State {
                 )
             }
         };
-        let environment = match (&self.skills_listing, self.upstream_context) {
-            (Some(listing), false) => crate::environment::with_skills(&environment, listing),
+        let environment = match (&self.environment_note, self.upstream_context) {
+            (Some(listing), false) => crate::environment::with_note(&environment, listing),
             _ => environment,
         };
         let key = durable::instructions_key(instructions.as_deref());

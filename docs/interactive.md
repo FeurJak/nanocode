@@ -35,6 +35,10 @@ nanocode finds skills, folders with a `SKILL.md`, in `<home>/skills`, `~/.agents
 - **Codex models** get Codex's own `<skills_instructions>` catalog: the skill roots and each skill's description and `SKILL.md` path, which the model reads itself.
 - **`/skills`** lists the skills with their descriptions and inserts one with the path to its `SKILL.md`.
 
+## What the model is told about its setup
+
+Claude and Codex models get a "# nanocode setup" section with the environment part of their instructions: the home, each config file and whether it was read, every pre-tool and post-tool hook with its matcher and command, the MCP servers from config, and how many user commands and skills there are. A model asked how the session is set up answers from it instead of guessing. Antigravity's Gemini models do not get it.
+
 ## config.json
 
 nanocode reads two files at start, if they exist:

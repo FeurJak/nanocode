@@ -170,6 +170,20 @@ pub(super) fn prepare<'a>(
             nanocode_platform::spawn_blocking(move || crate::skills::discover(&home, &workspace))
                 .await?
         };
+        let commands = {
+            let (home, workspace) = (home.clone(), workspace.clone());
+            nanocode_platform::spawn_blocking(move || {
+                crate::user_commands::list(&home, &workspace).map(|commands| commands.len())
+            })
+            .await??
+        };
+        let environment_note = crate::config::environment_note(&crate::config::Setup {
+            home: &home,
+            workspace: &workspace,
+            config: &configured,
+            commands,
+            skills: skills.len(),
+        });
         let hook =
             (!configured.pre_tool.is_empty() || !configured.post_tool.is_empty()).then(|| {
                 std::sync::Arc::new(crate::hook::Hook::new(
@@ -226,6 +240,7 @@ pub(super) fn prepare<'a>(
             hook,
             questions: (!headless).then(crate::question::Questions::new),
             skills,
+            environment_note,
             herdr: configured.herdr,
         };
         let host = nanocode_trace::Instrument::instrument(

@@ -144,7 +144,8 @@ impl Entry {
             original: Arc::from(record.key()),
             cleared: EncodedPayload::from_json(json.into()),
         };
-        self.content.compare_and_swap(&content, Some(Arc::new(paged)));
+        self.content
+            .compare_and_swap(&content, Some(Arc::new(paged)));
         self.typed.store(None);
     }
 }
@@ -328,7 +329,9 @@ impl HistoryMessage {
             .results
             .ok_or("a paged message lists its cleared results")?;
         if !EncodedPayload::is_key(&original) {
-            return Err(format!("a paged message names {original:?}, which is not a record key"));
+            return Err(format!(
+                "a paged message names {original:?}, which is not a record key"
+            ));
         }
         let json = serde_json::to_string(&message).map_err(|error| error.to_string())?;
         let entry = Entry::new(&message, None, None);
@@ -425,10 +428,10 @@ impl HistoryMessage {
             None => {}
         }
         let record = EncodedPayload::from_json(serde_json::to_string(&*self.0.typed())?.into());
-        let previous = self.0.content.compare_and_swap(
-            &held,
-            Some(Arc::new(Content::Full(record.clone()))),
-        );
+        let previous = self
+            .0
+            .content
+            .compare_and_swap(&held, Some(Arc::new(Content::Full(record.clone()))));
         match previous.as_deref() {
             None => Ok(record),
             Some(_) => self.record(),
@@ -451,7 +454,9 @@ impl HistoryMessage {
             return Ok(read(&serde_json::to_string(&*self.typed())?));
         }
         let content = self.json()?;
-        Ok(read(content.json().expect("a message's bytes are resolved")))
+        Ok(read(
+            content.json().expect("a message's bytes are resolved"),
+        ))
     }
 
     pub(super) fn committed(&self) {

@@ -386,3 +386,96 @@ fn ready(names: &[String]) -> String {
         count => format!("ready, {count} tools: {}", names.join(", ")),
     }
 }
+
+pub struct Setup<'a> {
+    pub home: &'a Path,
+    pub workspace: &'a Path,
+    pub config: &'a Config,
+    pub commands: usize,
+    pub skills: usize,
+}
+
+fn hook_lines(kind: &str, entries: &[crate::hook::Entry]) -> Vec<String> {
+    entries
+        .iter()
+        .map(|entry| {
+            let matcher = match entry.matcher.trim() {
+                "" => "every tool".to_owned(),
+                matcher => format!("`{matcher}`"),
+            };
+            format!("- {kind} hook on {matcher}: `{}`", entry.command.join(" "))
+        })
+        .collect()
+}
+
+pub fn environment_note(setup: &Setup<'_>) -> String {
+    let files = paths(setup.home, setup.workspace)
+        .iter()
+        .map(|path| {
+            format!(
+                "{} ({})",
+                path.display(),
+                match path.is_file() {
+                    true => "read",
+                    false => "not present",
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut lines = vec![
+        "# nanocode setup".to_owned(),
+        "This session runs in nanocode, set up as follows. The user changes it in these files; it is read when nanocode starts.".to_owned(),
+        format!(
+            "- Home: {} (sessions, commands/, skills/, config.json)",
+            setup.home.display()
+        ),
+        format!("- Config files: {files}"),
+    ];
+    let pre = hook_lines(
+        "Pre-tool (runs before the call and may refuse it)",
+        &setup.config.pre_tool,
+    );
+    let post = hook_lines(
+        "Post-tool (runs after the call succeeded)",
+        &setup.config.post_tool,
+    );
+    if pre.is_empty() && post.is_empty() {
+        lines.push("- Hooks: none".to_owned());
+    }
+    lines.extend(pre);
+    lines.extend(post);
+    let (enabled, disabled): (Vec<_>, Vec<_>) = setup
+        .config
+        .configured
+        .iter()
+        .partition(|server| server.enabled);
+    let names = |servers: &[&Configured]| {
+        servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    lines.push(match (enabled.is_empty(), disabled.is_empty()) {
+        (true, true) => "- MCP servers from config: none".to_owned(),
+        (_, true) => format!("- MCP servers from config: {}", names(&enabled)),
+        (_, false) => format!(
+            "- MCP servers from config: {} (disabled: {})",
+            names(&enabled),
+            names(&disabled)
+        ),
+    });
+    lines.push(format!(
+        "- User commands: {} (in {} and {}; the user runs them as /<name>)",
+        setup.commands,
+        setup
+            .workspace
+            .join(PROJECT_DIRECTORY)
+            .join("commands")
+            .display(),
+        setup.home.join("commands").display()
+    ));
+    lines.push(format!("- Skills: {}", setup.skills));
+    lines.join("\n")
+}

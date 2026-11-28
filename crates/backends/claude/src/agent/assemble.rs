@@ -596,7 +596,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         discovered,
         client_tool_search: builder.client_tool_search,
         upstream_context: builder.upstream_context,
-        skills_listing: builder.skills_listing,
+        environment_note: builder.environment_note,
         code_only: builder.code_only,
         parallel_tools: builder.parallel_tools,
         parallel_safe_tools: builder.parallel_safe_tools,

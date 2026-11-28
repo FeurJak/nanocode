@@ -223,7 +223,7 @@ const fn upstream_host_lines() -> Vec<String> {
     Vec::new()
 }
 
-pub(crate) fn with_skills(environment: &str, listing: &str) -> String {
+pub(crate) fn with_note(environment: &str, listing: &str) -> String {
     match environment.rfind(DATE) {
         Some(at) => format!(
             "{}\n{listing}\n\n{}",

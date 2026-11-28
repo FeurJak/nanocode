@@ -293,7 +293,7 @@ pub(super) fn run_rounds<'a>(
                 pending.push(
                     Message::text(
                         Role::System,
-                        match &state.skills_listing {
+                        match &state.environment_note {
                             Some(listing) => format!(
                                 "{}\n\n{listing}",
                                 crate::environment::upstream_environment(

@@ -484,6 +484,7 @@ pub struct HostConfig {
     pub hook: Option<std::sync::Arc<crate::hook::Hook>>,
     pub questions: Option<crate::question::Questions>,
     pub skills: Vec<crate::skills::Skill>,
+    pub environment_note: String,
     pub herdr: Option<bool>,
     pub workspace: PathBuf,
     pub store: Option<SessionStore>,
@@ -802,10 +803,27 @@ impl Host {
             Option<std::sync::Arc<str>>,
             Option<std::sync::Arc<str>>,
         ) = match config.skills.is_empty() {
-            true => (None, None),
+            true => (
+                Some(config.environment_note.as_str().into()),
+                Some(config.environment_note.as_str().into()),
+            ),
             false => (
-                Some(crate::skills::claude_listing(&config.skills).into()),
-                Some(crate::skills::codex_catalog(&config.skills).into()),
+                Some(
+                    format!(
+                        "{}\n\n{}",
+                        crate::skills::claude_listing(&config.skills),
+                        config.environment_note
+                    )
+                    .into(),
+                ),
+                Some(
+                    format!(
+                        "{}\n\n{}",
+                        crate::skills::codex_catalog(&config.skills),
+                        config.environment_note
+                    )
+                    .into(),
+                ),
             ),
         };
         let codex = CodexHarness::new(openai)
@@ -820,7 +838,9 @@ impl Host {
             .codesign(config.codesign)
             .configure(move |builder| {
                 let builder = match &codex_skills {
-                    Some(catalog) => builder.additional_instructions(std::sync::Arc::clone(catalog)),
+                    Some(catalog) => {
+                        builder.additional_instructions(std::sync::Arc::clone(catalog))
+                    }
                     None => builder,
                 };
                 let window = context_window
@@ -880,7 +900,7 @@ impl Host {
                 .hedging(std::sync::Arc::clone(&hedging))
                 .omit_custom_model_thinking(no_reasoning_replay);
             let builder = match &claude_skills {
-                Some(listing) => builder.skills_listing(std::sync::Arc::clone(listing)),
+                Some(listing) => builder.environment_note(std::sync::Arc::clone(listing)),
                 None => builder,
             };
             let builder = match tool_result_tokens {
