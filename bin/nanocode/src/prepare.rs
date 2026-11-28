@@ -165,6 +165,12 @@ pub(super) fn prepare<'a>(
         let runner_configs = host::runner_configs(&args.remote)?;
         let usage =
             crate::usage::Ledger::open(configured.forge_usage, &workspace)?.map(std::sync::Arc::new);
+        let hook = (!configured.pre_tool.is_empty()).then(|| {
+            std::sync::Arc::new(crate::hook::Hook::new(
+                configured.pre_tool.clone(),
+                workspace.clone(),
+            ))
+        });
         let config = HostConfig {
             workspace,
             store,
@@ -210,6 +216,7 @@ pub(super) fn prepare<'a>(
             hedge: hedge_policy(args)?,
             mcp_configured: configured.configured,
             usage,
+            hook,
             herdr: configured.herdr,
         };
         let host = nanocode_trace::Instrument::instrument(

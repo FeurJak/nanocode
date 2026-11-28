@@ -10,7 +10,7 @@ Herdr treats a terminal whose program writes OSC 7501 as an agent and shows its 
 ESC ] 7501 ; state=<idle|working|done|blocked|error>[:kind=<permission|question|auth>]:app=nanocode:msg=<base64> ESC \
 ```
 
-- **TUI states:** `working` while a turn runs, `done` or `error` when it ends, and `idle` when it waits for input. It reports `blocked` with `kind=auth` while a `/login` waits for the browser.
+- **TUI states:** `working` while a turn runs, `done` or `error` when it ends, and `idle` when it waits for input. It reports `blocked` with `kind=permission` while a pre-tool hook's question waits for an answer, and `kind=auth` while a `/login` waits for the browser.
 - **Message and title:** `msg` is the first line of the session's first prompt, which nanocode also sets as the terminal title (OSC 2). Before the first prompt, `msg` is the session id. `msg` holds at most 2,048 bytes after decoding, the most Herdr accepts. A longer line keeps its longest prefix that fits and ends with `…`, and control characters become spaces.
 - **`nanocode exec`:** it reports `working` with the prompt, then `done` with the session id, or `error`.
 - **When it reports:**
@@ -47,6 +47,11 @@ A key in the project file wins over the user file. Unknown keys stop nanocode at
       "old": { "type": "local", "command": ["old-server"], "disabled": true }
     }
   },
+  "hooks": {
+    "pre_tool": [
+      { "matcher": "Bash|Edit|Write", "command": ["./scripts/guard"], "timeout": 15000 }
+    ]
+  },
   "herdr": true,
   "forge_usage": false
 }
@@ -65,6 +70,20 @@ A key in the project file wins over the user file. Unknown keys stop nanocode at
 - **Tool names:** a server's tools are named `mcp__<server>__<tool>`.
 - **`/mcp`:** lists every configured server with its transport and file, then its state (ready with its tool names, failed with the reason, disabled), and then any servers nanocode adds itself.
 
+### Pre-tool hook
+
+Each entry of `hooks.pre_tool` is a command that sees a tool call before it runs. It speaks the contract of Claude Code's `PreToolUse` hook, so a guard written for Claude Code works unchanged.
+
+- **Which calls:** `matcher` lists tool names separated by `|`; a name may end with `*`, and an empty matcher means every tool. Calls made from inside a Code Mode cell match by their own tool names, such as `Bash` and `Edit`.
+- **What it gets:** the command runs in the agent's working directory with `CLAUDE_PROJECT_DIR` set to it. Its stdin is one JSON object with `session_id`, `cwd`, `permission_mode`, `hook_event_name` (`PreToolUse`), `tool_name`, `tool_input` and `tool_use_id`.
+- **How it decides:**
+  - **Allow:** exit 0.
+  - **Refuse:** exit 2; stderr is the reason the model gets.
+  - **By JSON reply:** exit 0 and print `{"hookSpecificOutput": {"permissionDecision": "allow" | "deny" | "ask", "permissionDecisionReason": "…"}}`. The older `{"decision": "block", "reason": "…"}` and `{"continue": false}` refuse too.
+- **Asking:** the TUI shows the call and the reason, and Enter or Esc answers. A refusal tells the model the user refused. `nanocode exec` has nobody to ask, so it refuses with the reason.
+- **Several hooks:** every matching entry runs, in order. The first refusal wins, then any ask.
+- **When a hook fails:** it may time out (`timeout` in milliseconds; 60 seconds by default, as in Claude Code), exit with another code, or fail to start. The call then runs, as in Claude Code, and the failure is shown in the transcript (on stderr in exec).
+
 ### Usage records
 
 - **What is written:** one JSON line per completed model call, root agent and subagents alike, appended to `~/.forge/telemetry/usage-YYYY-MM.jsonl` (or under `FORGE_USAGE_DIR`) in that ledger's schema 1:
@@ -77,7 +96,7 @@ A key in the project file wins over the user file. Unknown keys stop nanocode at
 
 ## Not there yet, against OpenCode
 
-- **No permission prompts:** the CLI runs every tool call without asking, so it never reports `blocked` with `kind=permission`. There is no pre-tool hook, so a workflow that has to approve or refuse a tool call before it runs needs the SDK's hold policy (`RuntimeBuilder::holds`), not the CLI.
+- **Approval only through a hook:** without a pre-tool hook, the CLI runs every tool call without asking; there are no built-in permission rules. There is no post-tool hook.
 - **No question tool:** the model cannot stop to ask the user, so `kind=question` is never reported.
 - **No user commands:** the slash commands are built in; there are no command files with arguments.
 - **No plugins:** there is no plugin or event-hook API.

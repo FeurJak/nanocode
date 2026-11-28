@@ -18,6 +18,7 @@ mod exec;
 mod extras;
 mod focus;
 mod history;
+mod hook;
 mod host;
 mod interactive;
 mod login;
