@@ -28,6 +28,7 @@ mod prepare;
 mod python;
 mod question;
 mod sessions;
+mod skills;
 mod setup;
 mod side;
 mod split;

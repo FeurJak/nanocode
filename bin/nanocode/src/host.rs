@@ -483,6 +483,7 @@ pub struct HostConfig {
     pub usage: Option<std::sync::Arc<crate::usage::Ledger>>,
     pub hook: Option<std::sync::Arc<crate::hook::Hook>>,
     pub questions: Option<crate::question::Questions>,
+    pub skills: Vec<crate::skills::Skill>,
     pub herdr: Option<bool>,
     pub workspace: PathBuf,
     pub store: Option<SessionStore>,
@@ -797,6 +798,16 @@ impl Host {
         let no_reasoning_replay = config.no_reasoning_replay;
         let tool_output_token_limit = config.tool_output_token_limit;
         let lean_tool_arguments = config.lean_tool_arguments;
+        let (claude_skills, codex_skills): (
+            Option<std::sync::Arc<str>>,
+            Option<std::sync::Arc<str>>,
+        ) = match config.skills.is_empty() {
+            true => (None, None),
+            false => (
+                Some(crate::skills::claude_listing(&config.skills).into()),
+                Some(crate::skills::codex_catalog(&config.skills).into()),
+            ),
+        };
         let codex = CodexHarness::new(openai)
             .client_for(move |request| match route(request) {
                 Some(Route::Tempo) => tempo_openai.clone(),
@@ -808,6 +819,10 @@ impl Host {
             .headless(config.headless)
             .codesign(config.codesign)
             .configure(move |builder| {
+                let builder = match &codex_skills {
+                    Some(catalog) => builder.additional_instructions(std::sync::Arc::clone(catalog)),
+                    None => builder,
+                };
                 let window = context_window
                     .or_else(|| listed_window(listed.as_ref(), builder.selected_model().as_str()));
                 let builder = match window {
@@ -864,6 +879,10 @@ impl Host {
             let builder = builder
                 .hedging(std::sync::Arc::clone(&hedging))
                 .omit_custom_model_thinking(no_reasoning_replay);
+            let builder = match &claude_skills {
+                Some(listing) => builder.skills_listing(std::sync::Arc::clone(listing)),
+                None => builder,
+            };
             let builder = match tool_result_tokens {
                 Some(tokens) => builder
                     .tool_result_tokens(tokens)
@@ -920,6 +939,9 @@ impl Host {
         }
         if let Some(questions) = &config.questions {
             builder = builder.tool_provider(questions.clone());
+        }
+        if !config.skills.is_empty() {
+            builder = builder.tool_provider(crate::skills::Skills::new(config.skills.clone()));
         }
         builder = match &config.store {
             Some(store) => builder.durability(store.clone()),

@@ -165,6 +165,11 @@ pub(super) fn prepare<'a>(
         let runner_configs = host::runner_configs(&args.remote)?;
         let usage = crate::usage::Ledger::open(configured.forge_usage, &workspace)?
             .map(std::sync::Arc::new);
+        let skills = {
+            let (home, workspace) = (home.clone(), workspace.clone());
+            nanocode_platform::spawn_blocking(move || crate::skills::discover(&home, &workspace))
+                .await?
+        };
         let hook =
             (!configured.pre_tool.is_empty() || !configured.post_tool.is_empty()).then(|| {
                 std::sync::Arc::new(crate::hook::Hook::new(
@@ -220,6 +225,7 @@ pub(super) fn prepare<'a>(
             usage,
             hook,
             questions: (!headless).then(crate::question::Questions::new),
+            skills,
             herdr: configured.herdr,
         };
         let host = nanocode_trace::Instrument::instrument(

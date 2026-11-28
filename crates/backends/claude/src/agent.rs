@@ -980,6 +980,7 @@ pub struct ClaudeBuilder {
     parallel_safe_tools: HashSet<String>,
     client_tool_search: bool,
     upstream_context: bool,
+    skills_listing: Option<Arc<str>>,
     code_only: bool,
     policy: Option<Arc<dyn ClaudeExecutionPolicy>>,
     restored: Option<Snapshot>,
@@ -1091,6 +1092,7 @@ impl ClaudeBuilder {
             parallel_safe_tools: HashSet::new(),
             client_tool_search: false,
             upstream_context: false,
+            skills_listing: None,
             code_only: false,
             policy: None,
             restored: None,
@@ -1861,6 +1863,11 @@ impl ClaudeBuilder {
 
     pub const fn upstream_context(mut self) -> Self {
         self.upstream_context = true;
+        self
+    }
+
+    pub fn skills_listing(mut self, listing: impl Into<Arc<str>>) -> Self {
+        self.skills_listing = Some(listing.into());
         self
     }
 
@@ -3752,6 +3759,7 @@ struct State {
     discovered: Arc<Atom<HashSet<String>>>,
     client_tool_search: bool,
     upstream_context: bool,
+    skills_listing: Option<Arc<str>>,
     code_only: bool,
     nested_tools: Option<NestedToolLookup>,
     recovery: Option<ToolRecovery>,
@@ -5017,6 +5025,10 @@ impl State {
                     crate::environment::project_instructions(&workspace),
                 )
             }
+        };
+        let environment = match (&self.skills_listing, self.upstream_context) {
+            (Some(listing), false) => crate::environment::with_skills(&environment, listing),
+            _ => environment,
         };
         let key = durable::instructions_key(instructions.as_deref());
         let instructions = instructions.map(Arc::<str>::from);

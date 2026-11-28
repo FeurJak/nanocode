@@ -27,6 +27,10 @@
     ],
     "bypass": [
       "--dangerously-skip-permissions"
+    ],
+    "skills": [
+      "--tools",
+      "Skill"
     ]
   },
   "tool_profiles": {
@@ -43,7 +47,8 @@
     "TaskUpdate": "expanded",
     "Monitor": "full",
     "ScheduleWakeup": "full",
-    "AskUserQuestion": "host"
+    "AskUserQuestion": "host",
+    "Skill": "skills"
   },
   "artifacts": [
     {
@@ -52,7 +57,7 @@
     },
     {
       "path": "tools/src/tools/upstream.json",
-      "sha256": "41345fed260faa9acfc25ed19d2b5b8d508b2fa06f40d33949247c34e2c12dd9"
+      "sha256": "036f5c4a0fec5c2f3f5835ed07b4c75c86376e10a6f57b3b7b4e5f7cbcb304f4"
     },
     {
       "path": "prompts/bash-first.json",

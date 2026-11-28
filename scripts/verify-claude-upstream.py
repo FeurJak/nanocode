@@ -152,7 +152,8 @@ if args.capture:
                    '--no-chrome', '--disable-slash-commands', '--exclude-dynamic-system-prompt-sections']
         try:
             with (folder / 'stdout.log').open('w') as stdout, (folder / 'stderr.log').open('w') as stderr:
-                subprocess.run(command + options, cwd=workspace, env=env, stdout=stdout,
+                flags = [flag for flag in command if not (folder.name == 'skills' and flag == '--disable-slash-commands')]
+                subprocess.run(flags + options, cwd=workspace, env=env, stdout=stdout,
                                stderr=stderr, check=True, timeout=45)
         finally:
             server.shutdown()

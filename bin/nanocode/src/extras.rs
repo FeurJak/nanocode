@@ -496,28 +496,18 @@ impl App {
 
     pub(crate) fn open_skills(&mut self) {
         let _span = nanocode_trace::info_span!(target: "nanocode", "nc.action", action.name = "open_skills", session.id = self.agent.as_ref().map(|agent| agent.session_id())).entered();
-        let skills = match nanocode_home::AgentHome::from_env() {
-            Ok(home) => home.skills_for(&home.project(&self.host.config.workspace)),
-            Err(error) => {
-                self.notice(NoticeLevel::Error, format!("skills: {error}"));
-                return;
-            }
-        };
-        if skills.skills.is_empty() {
+        let skills = &self.host.config.skills;
+        if skills.is_empty() {
             self.flash("no skills found for this workspace");
             return;
         }
         let names = skills
-            .skills
             .iter()
             .map(|skill| (skill.name.clone(), skill.skill_md.clone()))
             .collect::<Vec<_>>();
         let items = skills
-            .skills
             .iter()
-            .map(|skill| {
-                PickerItem::choice(skill.name.clone()).detail(skill.dir.display().to_string())
-            })
+            .map(|skill| PickerItem::choice(skill.name.clone()).detail(skill.description.clone()))
             .collect();
         self.overlay = Some(Overlay::Picker(
             PickerPurpose::Skill(names),

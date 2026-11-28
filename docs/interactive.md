@@ -27,6 +27,14 @@ In the TUI the model has Claude Code's `AskUserQuestion` tool, with the definiti
 - **What the model reads back:** the same text Claude Code returns, whether the answers were options, typed, or declined.
 - **Not in exec:** `nanocode exec` does not offer the tool, as `claude -p` does not, because nobody can answer.
 
+## Skills
+
+nanocode finds skills, folders with a `SKILL.md`, in `<home>/skills`, `~/.agents/skills` and `<workspace>/.agents/skills`. Each skill's `description` comes from the front matter of its `SKILL.md`.
+
+- **Claude models** get Claude Code's listing in their system prompt, "The following skills are available for use with the Skill tool:" with one `- name: description` line each. They also get Claude Code 2.1.325's `Skill` tool, pinned in `upstream.json`. It returns "Launching skill: <name>", the skill's base directory, and the body of its `SKILL.md` with any arguments.
+- **Codex models** get Codex's own `<skills_instructions>` catalog: the skill roots and each skill's description and `SKILL.md` path, which the model reads itself.
+- **`/skills`** lists the skills with their descriptions and inserts one with the path to its `SKILL.md`.
+
 ## config.json
 
 nanocode reads two files at start, if they exist:
@@ -173,7 +181,7 @@ python3 scripts/from-opencode.py --project ~/src/app --link
 - **Approval only through a hook:** without a pre-tool hook, the CLI runs every tool call without asking; there are no built-in permission rules. Hooks see tool calls only, with no session, prompt or stop events.
 - **Questions are options or text:** a question can't show option previews or take notes on an answer, and Codex models get Claude Code's tool rather than Codex's own `request_user_input`.
 - **Commands:** a command file is not shown in the `/` menu; `/commands` lists them. `agent` names a subagent role, not a configured agent with its own prompt and tools.
-- **Skills are pointers:** `/skills` inserts the skill's name and its `SKILL.md` path into the prompt; the model is not told which skills exist unless you pick one.
+- **Skills:** Antigravity's Gemini models get no skill listing. Skills are read at start, so one added during a session waits for the next.
 - **No plugins:** there is no plugin or event-hook API.
 - **MCP gaps:**
   - It does not run an OAuth sign-in from config (`oauth` must be `false`, with the credential in `headers`).

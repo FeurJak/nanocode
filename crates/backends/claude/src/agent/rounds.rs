@@ -293,12 +293,23 @@ pub(super) fn run_rounds<'a>(
                 pending.push(
                     Message::text(
                         Role::System,
-                        crate::environment::upstream_environment(
-                            &state.workspace(),
-                            &state.model(),
-                            state.codesign,
-                            state.hand(),
-                        ),
+                        match &state.skills_listing {
+                            Some(listing) => format!(
+                                "{}\n\n{listing}",
+                                crate::environment::upstream_environment(
+                                    &state.workspace(),
+                                    &state.model(),
+                                    state.codesign,
+                                    state.hand(),
+                                )
+                            ),
+                            None => crate::environment::upstream_environment(
+                                &state.workspace(),
+                                &state.model(),
+                                state.codesign,
+                                state.hand(),
+                            ),
+                        },
                     )
                     .into(),
                 );
