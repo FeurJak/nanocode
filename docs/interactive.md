@@ -76,7 +76,7 @@ A key in the project file wins over the user file. Unknown keys stop nanocode at
   - `remote` speaks Streamable HTTP to `url` with `headers`.
 - **Options:**
   - `disabled: true` keeps a server listed but not started.
-  - `codemode: false` puts its tools on the model's direct tool list instead of in Code Mode.
+  - `codemode: false` is refused at start: nanocode reaches MCP tools through Code Mode and tool search only.
   - `timeout.startup` (connection, initialization and tool listing) and `timeout.execution` (each tool call) are in milliseconds. A server's own value overrides the default under `mcp.timeout`.
   - `{env:NAME}` is replaced by that environment variable in commands, environment values, URLs and headers. An unset variable stops start.
 - **Tool names:** a server's tools are named `mcp__<server>__<tool>`.

@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use nanocode::tools::mcp::{McpServer, McpToolExposure};
+use nanocode::tools::mcp::McpServer;
 use serde::Deserialize;
 
 use crate::Result;
@@ -265,10 +265,9 @@ fn server(
             (server, transport)
         }
     };
-    let server = match codemode {
-        Some(false) => server.tool_exposure(McpToolExposure::DeferredOnly),
-        Some(true) | None => server,
-    };
+    if codemode == Some(false) {
+        return Err("nanocode reaches MCP tools only through Code Mode and tool search, so codemode: false would leave them uncallable; leave codemode out".to_owned());
+    }
     Ok((timed(server, timeout, defaults)?, transport))
 }
 
