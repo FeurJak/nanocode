@@ -644,6 +644,10 @@ default_table='
 8 cache_policy pass --scenario cache_policy
 2 cache_policy_twice pass --scenario cache_policy --twice
 1 canary_cache_policy_restored_ignored canary:64 --scenario cache_policy --mutation restored_ignored
+8 herdr pass --scenario herdr
+2 herdr_twice pass --scenario herdr --twice
+1 canary_herdr_uncapped canary:64 --scenario herdr --mutation uncapped
+1 canary_herdr_controls_kept canary:64 --scenario herdr --mutation controls_kept
 '
 default_known='
 '

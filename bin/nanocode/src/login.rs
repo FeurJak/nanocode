@@ -158,6 +158,21 @@ impl App {
     }
 }
 
+struct Waiting(UnboundedSender<AppEvent>);
+
+impl Waiting {
+    fn start(tx: &UnboundedSender<AppEvent>) -> Self {
+        drop(tx.send(AppEvent::SignIn(true)));
+        Self(tx.clone())
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        drop(self.0.send(AppEvent::SignIn(false)));
+    }
+}
+
 async fn codex(tx: UnboundedSender<AppEvent>) {
     let notice = |level, text| drop(tx.send(AppEvent::Notice(level, text)));
     let path = match chatgpt_auth_file() {
@@ -172,7 +187,10 @@ async fn codex(tx: UnboundedSender<AppEvent>) {
         NoticeLevel::Info,
         browse("ChatGPT sign-in", login.authorization_url()),
     );
-    match login.complete().await {
+    let waiting = Waiting::start(&tx);
+    let completed = login.complete().await;
+    drop(waiting);
+    match completed {
         Ok(status) => notice(
             NoticeLevel::Info,
             format!(
@@ -194,7 +212,10 @@ async fn claude(tx: UnboundedSender<AppEvent>) {
         NoticeLevel::Info,
         browse("Claude sign-in", login.authorization_url()),
     );
-    match login.complete().await {
+    let waiting = Waiting::start(&tx);
+    let completed = login.complete().await;
+    drop(waiting);
+    match completed {
         Ok(ClaudeSubscriptionStatus::Authenticated { .. }) => {
             notice(NoticeLevel::Info, "signed in to Claude".to_owned());
         }
@@ -221,7 +242,10 @@ async fn google(
         codes: Some(codes),
     };
     let notice = |level, text| drop(tx.send(AppEvent::Notice(level, text)));
-    match crate::setup::google(&config, &model, &mut report).await {
+    let waiting = Waiting::start(&tx);
+    let completed = crate::setup::google(&config, &model, &mut report).await;
+    drop(waiting);
+    match completed {
         Ok(account) => {
             let text = if config.method == Some(nanocode::antigravity::AuthMethod::Antigravity) {
                 format!("signed in to Antigravity; {next}")
@@ -252,7 +276,10 @@ async fn tempo(tx: UnboundedSender<AppEvent>) {
             login.user_code()
         ),
     );
-    match login.complete().await {
+    let waiting = Waiting::start(&tx);
+    let completed = login.complete().await;
+    drop(waiting);
+    match completed {
         Ok(account) => notice(
             NoticeLevel::Info,
             format!("signed in with Tempo ID as {account}; {TEMPO_PAYS}"),

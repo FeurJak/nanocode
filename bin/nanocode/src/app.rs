@@ -144,6 +144,7 @@ pub enum AppEvent {
         result: std::result::Result<String, String>,
     },
     Notice(NoticeLevel, String),
+    SignIn(bool),
     Applied(std::result::Result<(ModelSelection, Thinking, ServiceTier, String), String>),
 }
 
@@ -176,6 +177,7 @@ impl AppEvent {
             Self::AgentDirectory { .. } => "agent_directory",
             Self::AgentsListed { .. } => "agents_listed",
             Self::Notice(..) => "notice",
+            Self::SignIn(_) => "sign_in",
             Self::Applied(_) => "applied",
         }
     }
@@ -327,6 +329,8 @@ pub struct App {
     autoscroll_at: Option<Instant>,
     herdr: nanocode::herdr::Reporter,
     outcome: Option<nanocode::herdr::State>,
+    title: Option<String>,
+    signing_in: usize,
     pub(crate) clock_deadline: Option<Instant>,
     pub(crate) btw: HashMap<u64, (Option<nanocode::subagents::AgentId>, usize)>,
     pub(crate) next_btw: u64,
@@ -768,17 +772,28 @@ impl App {
 
     fn herdr_status(&self) -> Option<String> {
         let working = !matches!(self.turn, TurnState::Idle) || self.starting;
-        let state = match (working, self.outcome) {
-            (true, _) => nanocode::herdr::State::Working,
-            (false, Some(outcome)) => outcome,
-            (false, None) => nanocode::herdr::State::Idle,
+        let state = match (self.signing_in > 0, working, self.outcome) {
+            (true, _, _) => nanocode::herdr::State::Blocked(nanocode::herdr::Kind::Auth),
+            (false, true, _) => nanocode::herdr::State::Working,
+            (false, false, Some(outcome)) => outcome,
+            (false, false, None) => nanocode::herdr::State::Idle,
         };
-        let message = self
+        let session = self
             .agent
             .as_ref()
-            .map(|agent| format!("session {}", agent.session_id()))
-            .unwrap_or_default();
-        self.herdr.changed(state, &message)
+            .map(|agent| format!("session {}", agent.session_id()));
+        let message = match state {
+            nanocode::herdr::State::Blocked(_) => "waiting for a sign-in in the browser".to_owned(),
+            _ => self.title.clone().or(session).unwrap_or_default(),
+        };
+        let title = self
+            .title
+            .as_deref()
+            .and_then(|title| self.herdr.retitled(title));
+        match (self.herdr.changed(state, &message), title) {
+            (Some(status), Some(title)) => Some(status + &title),
+            (status, title) => status.or(title),
+        }
     }
 
     fn animating(&self) -> bool {
@@ -1117,6 +1132,13 @@ impl App {
                 self.notice(level, text);
                 Redraw::Immediate
             }
+            AppEvent::SignIn(waiting) => {
+                self.signing_in = match waiting {
+                    true => self.signing_in + 1,
+                    false => self.signing_in.saturating_sub(1),
+                };
+                Redraw::Immediate
+            }
             AppEvent::Compacted { since } => {
                 if !self.transcript.has_notice_since(
                     since,
@@ -1195,6 +1217,7 @@ impl App {
                 self.close_side();
             }
         }
+        self.title = ready.prompts.first().cloned();
         self.session_started = ready
             .history
             .as_ref()
@@ -1576,6 +1599,9 @@ impl App {
         durable: bool,
     ) {
         nanocode_tui::highlight::prewarm();
+        if self.title.is_none() {
+            self.title = Some(text.clone());
+        }
         self.resuming = durable;
         self.resumes.insert(id.clone(), (sent.clone(), durable));
         self.queue.push(QueuedPrompt {

@@ -3,7 +3,9 @@ use nanocode_sys::base64::STANDARD;
 
 pub const ENV: &str = "HERDR_ENV";
 const TERMINAL_VARIABLES: [&str; 2] = ["HC_TERMINAL_ID", "HC_TERMINAL_SOCKET"];
-const MESSAGE_CHARS_MAX: usize = 200;
+const APP: &str = "nanocode";
+pub const MESSAGE_BYTES_MAX: usize = 2048;
+const CUT: char = '…';
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -51,29 +53,78 @@ pub fn enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
     }
 }
 
-#[must_use]
-pub fn sequence(state: State, message: &str) -> String {
-    let message = message
-        .lines()
-        .next()
+pub mod sim {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(u8)]
+    pub enum Mutation {
+        None,
+        Uncapped,
+        ControlsKept,
+    }
+
+    static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
+
+    pub fn mutate(mutation: Mutation) {
+        MUTATION.store(mutation as u8, Ordering::SeqCst);
+    }
+
+    pub fn mutated(mutation: Mutation) -> bool {
+        MUTATION.load(Ordering::Relaxed) == mutation as u8
+    }
+}
+
+fn line(text: &str) -> String {
+    let controls = !sim::mutated(sim::Mutation::ControlsKept);
+    text.lines()
+        .find(|line| !line.trim().is_empty())
         .unwrap_or_default()
         .chars()
-        .take(MESSAGE_CHARS_MAX)
-        .collect::<String>();
+        .map(|character| match controls && character.is_control() {
+            true => ' ',
+            false => character,
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn fitted(text: &str) -> String {
+    let text = line(text);
+    if text.len() <= MESSAGE_BYTES_MAX || sim::mutated(sim::Mutation::Uncapped) {
+        return text;
+    }
+    let room = MESSAGE_BYTES_MAX - CUT.len_utf8();
+    let end = (0..=room)
+        .rev()
+        .find(|index| text.is_char_boundary(*index))
+        .unwrap_or_default();
+    format!("{}{CUT}", &text[..end])
+}
+
+#[must_use]
+pub fn sequence(state: State, message: &str) -> String {
     let kind = state
         .kind()
         .map(|kind| format!(":kind={kind}"))
         .unwrap_or_default();
     format!(
-        "\x1b]7501;state={}{kind}:msg={}\x1b\\",
+        "\x1b]7501;state={}{kind}:app={APP}:msg={}\x1b\\",
         state.word(),
-        STANDARD.encode(message)
+        STANDARD.encode(fitted(message))
     )
+}
+
+#[must_use]
+pub fn title(text: &str) -> String {
+    format!("\x1b]2;{}\x1b\\", line(text))
 }
 
 pub struct Reporter {
     enabled: bool,
     last: Atom<Option<(State, String)>>,
+    titled: Atom<Option<String>>,
 }
 
 impl Reporter {
@@ -82,6 +133,7 @@ impl Reporter {
         Self {
             enabled,
             last: Atom::new(None),
+            titled: Atom::new(None),
         }
     }
 
@@ -105,6 +157,22 @@ impl Reporter {
         changed.then(|| {
             self.last.set(Some(next));
             sequence(state, message)
+        })
+    }
+
+    #[must_use]
+    pub fn retitled(&self, text: &str) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        let next = line(text);
+        let changed = self
+            .titled
+            .read(|titled| titled.as_deref() != Some(next.as_str()));
+        changed.then(|| {
+            let sequence = title(&next);
+            self.titled.set(Some(next));
+            sequence
         })
     }
 }
