@@ -510,7 +510,7 @@ impl App {
         let names = skills
             .skills
             .iter()
-            .map(|skill| skill.name.clone())
+            .map(|skill| (skill.name.clone(), skill.skill_md.clone()))
             .collect::<Vec<_>>();
         let items = skills
             .skills

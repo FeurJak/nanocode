@@ -242,7 +242,7 @@ pub enum PickerPurpose {
     Permission,
     Question,
     Theme,
-    Skill(Vec<String>),
+    Skill(Vec<(String, std::path::PathBuf)>),
 }
 
 pub enum Overlay {
@@ -3111,9 +3111,12 @@ impl App {
                     self.set_theme(&name);
                 }
             }
-            PickerPurpose::Skill(names) => {
-                if let Some(name) = names.get(index) {
-                    self.composer.insert_str(&format!("Use the {name} skill: "));
+            PickerPurpose::Skill(skills) => {
+                if let Some((name, path)) = skills.get(index) {
+                    self.composer.insert_str(&format!(
+                        "Use the {name} skill (read {} first): ",
+                        path.display()
+                    ));
                 }
             }
             PickerPurpose::Recent(entries) => {
